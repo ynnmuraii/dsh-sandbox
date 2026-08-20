@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { isAbsolute, join } from 'node:path'
-import { resolveSourceOverlay, buildProfilePackageJson } from './run.js'
+import { resolveSourceOverlay, buildProfilePackageJson, buildSourceOverlay } from './run.js'
 
 describe('resolveSourceOverlay', () => {
   it('produces an absolute path to the plugin entry', () => {
@@ -16,5 +16,13 @@ describe('buildProfilePackageJson', () => {
     const out = buildProfilePackageJson(spec, { dsh: '0.1.0-rc.8' })
     expect(out.dependencies['@deepseek-ai/dsh']).toBe('0.1.0-rc.8')
     expect(out).toHaveProperty('dsh')
+  })
+})
+
+describe('buildSourceOverlay', () => {
+  it('escapes apostrophes by doubling them for the YAML single-quoted scalar', () => {
+    const overlay = buildSourceOverlay('example', `A:/plugins/o'brien/src/index.ts`)
+    expect(overlay).toContain(`name: 'A:/plugins/o''brien/src/index.ts'`)
+    expect(overlay).not.toContain(`\\'`)
   })
 })
