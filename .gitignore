@@ -1,5 +1,6 @@
 node_modules/
-.lab/runtime/
+.lab/runtime/*
+!.lab/runtime/README.md
 dist/
 lib/
 coverage/
