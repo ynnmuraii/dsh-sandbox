@@ -1,0 +1,48 @@
+# AGENTS.md
+
+`dsh-lab` is a meta-repo and local library for creating, studying, and verifying independent DeepSeek Harness plugins. Each `plugins/<name>` is its own Git repo; this root is not a plugin monorepo.
+
+## Source of truth
+
+`context/*` is the single source of truth for shared rules — edit there, never in plugin snapshots:
+
+- `context/harness-contracts.md` — public plugin contracts and integration paths.
+- `context/cordis-model.md` — Fiber/effect/inject model.
+- `context/plugin-anatomy.md` — standalone plugin repo layout and package contract.
+- `context/testing-policy.md` — required test levels and HMR-safety rules.
+- `context/compatibility.md` — targets, `workbench/compatibility.yaml`, per-plugin target claims.
+
+Per-plugin `AGENTS.md` files hold only local rules and must read `.dsh-lab/shared-context.md` first.
+
+## Lab commands
+
+```text
+pnpm lab new <name>
+pnpm lab dev <name> --target next|master
+pnpm lab verify <name> [--target next|master|all]
+pnpm lab sync-context [name|--all]
+pnpm lab doctor
+```
+
+- `new` creates an autonomous nested Git repo from the template (tracked as `local`).
+- `dev` runs a source overlay + HMR against the chosen target.
+- `verify` runs the plugin's own checks, then compatibility checks.
+- `sync-context` regenerates `plugin/.dsh-lab/shared-context.md` snapshots.
+- `doctor` checks toolchain, catalog, target pins, submodules, and context hashes.
+- Root tooling never changes plugin version or publishes packages.
+
+## Catalog policy
+
+`catalog.yaml` tracks each plugin as one of:
+
+- `local` — independent nested repo, ignored by the meta-repo; for experiments.
+- `submodule` — meta-repo pins remote + commit of a mature plugin.
+
+Promoting `local → submodule` is a release from the incubator: create a remote, pass stable checks, flip tracking, register the submodule. Deleting a local dir never deletes its remote; removing a submodule is an explicit catalog + `.gitmodules` operation.
+
+## Rules
+
+- The meta-repo never mutates plugin git state destructively (no automatic update/reset of dirty submodules, no destructive git operations inside plugin repos).
+- Production plugin code imports only public npm APIs — never from an upstream Harness checkout.
+- Preserve patch semantics, fix exact versions, and keep the two source/bundle acceptance boundaries separate.
+- Credentials and secrets live only in ignored runtime environment, never in catalog, manifests, or snapshots.
