@@ -1,0 +1,13 @@
+{
+  "name": "@dsh-lab/profile-master",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@deepseek-ai/dsh": "file:../../upstream/deepseek-harness"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base"]
+    }
+  }
+}

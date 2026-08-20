@@ -2,6 +2,7 @@
 import { doctor } from './doctor.js'
 import { createPlugin } from './create.js'
 import { syncContext } from './sync.js'
+import { devSource, verifyBundle } from './run.js'
 
 const HELP = `
 Usage: lab <command> [args]
@@ -43,10 +44,36 @@ export async function runCli(argv: string[]): Promise<number> {
       }
       return 0
     }
-    case 'dev':
-    case 'verify':
-      console.error(`error: '${cmd}' not implemented yet`)
-      return 1
+    case 'dev': {
+      const [name] = rest.filter(a => !a.startsWith('--'))
+      if (!name) {
+        console.error('error: usage: lab dev <name> [--target next|master]')
+        return 1
+      }
+      try {
+        const target = parseTarget(rest)
+        await devSource({ root: process.cwd(), name, target })
+        return 0
+      } catch (e) {
+        console.error(`error: ${(e as Error).message}`)
+        return 1
+      }
+    }
+    case 'verify': {
+      const [name] = rest.filter(a => !a.startsWith('--'))
+      if (!name) {
+        console.error('error: usage: lab verify <name> [--target next|master]')
+        return 1
+      }
+      try {
+        const target = parseTarget(rest)
+        await verifyBundle({ root: process.cwd(), name, target })
+        return 0
+      } catch (e) {
+        console.error(`error: ${(e as Error).message}`)
+        return 1
+      }
+    }
     case '--help':
     case '-h':
     case undefined:
@@ -69,6 +96,17 @@ function report(results: { level: string; message: string }[]): number {
 
 function resultLogLevel(level: string): 'error' | 'warn' | 'log' {
   return level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'
+}
+
+// Parse `--target <next|master>` from the arg list; default to `next`.
+function parseTarget(rest: string[]): 'next' | 'master' {
+  const i = rest.indexOf('--target')
+  if (i === -1) return 'next'
+  const value = rest[i + 1]
+  if (value !== 'next' && value !== 'master') {
+    throw new Error(`invalid --target '${value}' (expected next|master)`)
+  }
+  return value
 }
 
 // Allow direct node execution.

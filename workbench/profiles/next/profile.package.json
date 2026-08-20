@@ -1,0 +1,13 @@
+{
+  "name": "@dsh-lab/profile-next",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@deepseek-ai/dsh": "<set to exact next version by lab dev>"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base"]
+    }
+  }
+}
