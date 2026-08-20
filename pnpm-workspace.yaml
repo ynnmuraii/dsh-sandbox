@@ -1,0 +1,5 @@
+packages:
+  - "tooling/*"
+  - "tooling"
+allowBuilds:
+  esbuild: true

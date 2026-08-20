@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-lab/meta",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "lab": "tsx tooling/src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -b tooling/tsconfig.json",
+    "doctor": "tsx tooling/src/cli.ts doctor"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
