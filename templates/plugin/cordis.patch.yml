@@ -1,0 +1,2 @@
+# Patch layer contributed by this plugin's bundle. Release installs this file
+# via dsh.bundle.patch; lab dev generates a source overlay instead.

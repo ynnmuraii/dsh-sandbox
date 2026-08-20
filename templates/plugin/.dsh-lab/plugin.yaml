@@ -1,0 +1,5 @@
+name: __PLUGIN_NAME__
+tracking: local
+maturity: experiment
+targets:
+  - next

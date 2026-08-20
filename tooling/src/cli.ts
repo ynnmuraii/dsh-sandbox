@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { doctor } from './doctor.js'
+import { createPlugin } from './create.js'
 
 const HELP = `
 Usage: lab <command> [args]
@@ -17,7 +18,21 @@ export async function runCli(argv: string[]): Promise<number> {
   switch (cmd) {
     case 'doctor':
       return report(await doctor({ root: process.cwd() }))
-    case 'new':
+    case 'new': {
+      const name = rest[0]
+      if (!name) {
+        console.error('error: usage: lab new <name>')
+        return 1
+      }
+      try {
+        const created = await createPlugin({ root: process.cwd(), name })
+        console.log(`created plugin at ${created}`)
+        return 0
+      } catch (e) {
+        console.error(`error: ${(e as Error).message}`)
+        return 1
+      }
+    }
     case 'dev':
     case 'verify':
     case 'sync-context':
