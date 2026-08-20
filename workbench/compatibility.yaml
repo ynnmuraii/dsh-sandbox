@@ -1,0 +1,9 @@
+targets:
+  next:
+    dsh: 0.1.0-rc.8
+    cordis: 4.0.1
+    node: 22.20.0
+  master:
+    repository: deepseek-ai/deepseek-harness
+    commit: 0000000000000000000000000000000000000000
+    pnpm: 11.7.0
