@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { isAbsolute, join } from 'node:path'
-import { resolveSourceOverlay, buildProfilePackageJson, buildSourceOverlay } from './run.js'
+import {
+  resolveSourceOverlay,
+  buildProfilePackageJson,
+  buildSourceOverlay,
+  verifyAllTargets,
+} from './run.js'
 
 describe('resolveSourceOverlay', () => {
   it('produces an absolute path to the plugin entry', () => {
@@ -23,6 +28,29 @@ describe('buildProfilePackageJson', () => {
     const out = buildProfilePackageJson(spec, {})
     expect(out.dependencies).toEqual({})
     expect(out.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base'])
+  })
+})
+
+describe('verifyAllTargets', () => {
+  it('dispatches next then master and does not skip master when next fails', async () => {
+    const calls: string[] = []
+    await expect(
+      verifyAllTargets('root', 'example', async target => {
+        calls.push(target)
+        if (target === 'next') throw new Error('boom next')
+      }),
+    ).rejects.toThrow(/next: boom next/)
+    // Both declared targets run under --target all; a failing next does not
+    // collapse the aggregate to a single non-master run.
+    expect(calls).toEqual(['next', 'master'])
+  })
+
+  it('reports every failing target together', async () => {
+    await expect(
+      verifyAllTargets('root', 'example', async target => {
+        throw new Error(`synthetic ${target}`)
+      }),
+    ).rejects.toThrow(/next: synthetic next[\s\S]*master: synthetic master/)
   })
 })
 

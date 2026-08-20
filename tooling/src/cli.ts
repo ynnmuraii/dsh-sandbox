@@ -2,7 +2,7 @@
 import { doctor } from './doctor.js'
 import { createPlugin } from './create.js'
 import { syncContext } from './sync.js'
-import { devSource, verifyBundle } from './run.js'
+import { devSource, verifyBundle, type VerifyOptions } from './run.js'
 
 const HELP = `
 Usage: lab <command> [args]
@@ -51,7 +51,7 @@ export async function runCli(argv: string[]): Promise<number> {
         return 1
       }
       try {
-        const target = parseTarget(rest)
+        const target = parseTarget(rest, ['next', 'master']) as 'next' | 'master'
         await devSource({ root: process.cwd(), name, target })
         return 0
       } catch (e) {
@@ -62,11 +62,11 @@ export async function runCli(argv: string[]): Promise<number> {
     case 'verify': {
       const [name] = rest.filter(a => !a.startsWith('--'))
       if (!name) {
-        console.error('error: usage: lab verify <name> [--target next|master]')
+        console.error('error: usage: lab verify <name> [--target next|master|all]')
         return 1
       }
       try {
-        const target = parseTarget(rest)
+        const target = parseTarget(rest, ['next', 'master', 'all']) as VerifyOptions['target']
         await verifyBundle({ root: process.cwd(), name, target })
         return 0
       } catch (e) {
@@ -98,13 +98,14 @@ function resultLogLevel(level: string): 'error' | 'warn' | 'log' {
   return level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'
 }
 
-// Parse `--target <next|master>` from the arg list; default to `next`.
-function parseTarget(rest: string[]): 'next' | 'master' {
+// Parse `--target <T>` from the arg list against an allowed set; default to the
+// first allowed value. `verify` allows next|master|all; `dev` is next|master.
+function parseTarget(rest: string[], allowed: readonly string[]): string {
   const i = rest.indexOf('--target')
-  if (i === -1) return 'next'
-  const value = rest[i + 1]
-  if (value !== 'next' && value !== 'master') {
-    throw new Error(`invalid --target '${value}' (expected next|master)`)
+  if (i === -1) return allowed[0] as string
+  const value = rest[i + 1] ?? ''
+  if (!allowed.includes(value)) {
+    throw new Error(`invalid --target '${value}' (expected ${allowed.join('|')})`)
   }
   return value
 }

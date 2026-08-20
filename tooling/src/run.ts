@@ -9,6 +9,7 @@ import {
   type CatalogEntry,
 } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
+import { verifyUpstreamCommit } from './upstream.js'
 
 export interface ProfileSpec {
   name: string
@@ -24,7 +25,7 @@ export interface DevOptions {
 export interface VerifyOptions {
   root: string
   name: string
-  target: string
+  target: 'next' | 'master' | 'all'
 }
 
 const PROFILE_BUNDLES = ['@deepseek-ai/dsh-base']
@@ -157,7 +158,42 @@ export async function devSource(opts: DevOptions): Promise<void> {
   }
 }
 
+// `lab verify --target all` runs the plugin against every declared variable,
+// next then master, and reports all failures together while still running both
+// targets (a failure in one does not skip the other). The `run` seam lets a
+// unit test assert the dispatch order/aggregation without an end-to-end boot.
+export async function verifyAllTargets(
+  root: string,
+  name: string,
+  run: (target: 'next' | 'master') => Promise<void> = (target) =>
+    verifyBundleTarget({ root, name, target }),
+): Promise<void> {
+  const failures: string[] = []
+  for (const target of ['next', 'master'] as const) {
+    try {
+      await run(target)
+    } catch (e) {
+      failures.push(`${target}: ${(e as Error).message}`)
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`verify failed:\n  ${failures.join('\n  ')}`)
+  }
+}
+
 export async function verifyBundle(opts: VerifyOptions): Promise<void> {
+  if (opts.target === 'all') {
+    await verifyAllTargets(opts.root, opts.name)
+    return
+  }
+  await verifyBundleTarget({ root: opts.root, name: opts.name, target: opts.target })
+}
+
+async function verifyBundleTarget(opts: {
+  root: string
+  name: string
+  target: 'next' | 'master'
+}): Promise<void> {
   const { root, name, target } = opts
   const entry = catalogEntry(root, name)
   const pluginDir = resolve(root, entry.path)
@@ -231,6 +267,24 @@ export async function verifyBundle(opts: VerifyOptions): Promise<void> {
   )
   writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), 'packages:\n  - "."\n')
   const env = { ...process.env, DSH_HOME: home.replace(/\\/g, '/') }
+
+  // Master runs against the PINNED upstream source. A generated/untracked
+  // `apps/cli/lib/bin.js` could be stale and falsely pass, so every master run
+  // first verifies the checkout HEAD matches compat.targets.master.commit and
+  // (re)builds it. A clone not pinned to that commit fails here with a
+  // documented prerequisite instead of silently skipping master.
+  if (target === 'master') {
+    const masterPin = compat.targets.master
+    const upstreamDir = rootPath(root, ROOT_PATHS.upstream)
+    if (!masterPin.commit || !(await verifyUpstreamCommit(root, masterPin.commit))) {
+      throw new CompatibilityError(
+        `master target requires upstream/deepseek-harness HEAD pinned to ${masterPin.commit} ` +
+          `(refresh the Task 8 submodule); refusing to report a master pass on a mismatched checkout`,
+      )
+    }
+    execSync('pnpm install && pnpm run build', { cwd: upstreamDir, stdio: 'inherit' })
+  }
+
   const launcher =
     target === 'master'
       ? `node "${rootPath(root, ROOT_PATHS.upstream + '/apps/cli/lib/bin.js').replace(/\\/g, '/')}"`
