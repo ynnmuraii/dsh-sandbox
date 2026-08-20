@@ -29,4 +29,19 @@ describe('syncContext', () => {
     expect(res[0]!.path).toBe(join(dir, 'plugins', 'a', '.dsh-lab', 'shared-context.md'))
     expect(readFileSync(res[0]!.path, 'utf8')).toMatch(/^# Shared context snapshot/)
   })
+
+  it('ignores named targets not in the catalog (incl. prototype keys)', async () => {
+    writeFileSync(join(dir, 'catalog.yaml'), 'plugins:\n  a:\n    path: plugins/a\n    tracking: local\n')
+    mkdirSync(join(dir, 'plugins', 'a'), { recursive: true })
+    const res = await syncContext({ root: dir, names: ['constructor'], all: false })
+    expect(res).toHaveLength(0)
+  })
+
+  it('does not crash when catalog is missing and a name collides with a prototype key', async () => {
+    // No catalog.yaml present -> plugins = {}; 'constructor' must resolve to
+    // "not found" rather than the inherited Object constructor.
+    mkdirSync(join(dir, 'plugins', 'constructor'), { recursive: true })
+    const res = await syncContext({ root: dir, names: ['constructor'], all: false })
+    expect(res).toHaveLength(0)
+  })
 })

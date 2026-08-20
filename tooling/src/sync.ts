@@ -43,7 +43,7 @@ export async function syncContext({ root, names, all }: SyncOptions): Promise<Sy
 
   const targets = all
     ? Object.keys(catalog.plugins)
-    : names.filter(n => catalog.plugins[n])
+    : names.filter(n => Object.hasOwn(catalog.plugins, n))
 
   const results: SyncedResult[] = []
   for (const name of targets) {
