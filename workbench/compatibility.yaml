@@ -5,5 +5,6 @@ targets:
     node: 22.20.0
   master:
     repository: deepseek-ai/deepseek-harness
-    commit: 0000000000000000000000000000000000000000
+    commit: 141eb6fef83422698aef7a981029e843e8161534
     pnpm: 11.7.0
+    node: ^22.19.0
