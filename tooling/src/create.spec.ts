@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPlugin, loadPluginConfig } from './create.js'
@@ -21,6 +21,13 @@ describe('createPlugin', () => {
   it('refuses an existing non-empty target', async () => {
     await createPlugin({ root: dir, name: 'example' })
     await expect(createPlugin({ root: dir, name: 'example' })).rejects.toThrow(/exists/i)
+  })
+
+  it('refuses a target that already contains .git', async () => {
+    const target = join(dir, 'plugins', 'example')
+    mkdirSync(join(target, '.git'), { recursive: true })
+    await expect(createPlugin({ root: dir, name: 'example' })).rejects.toThrow(/exists/i)
+    expect(existsSync(target)).toBe(true)
   })
 
   it('writes plugin.yaml that round-trips', async () => {

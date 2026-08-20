@@ -116,7 +116,11 @@ export async function createPlugin(opts: { root: string; name: string }): Promis
     throw new Error(`invalid plugin name '${name}': use lowercase letters, digits, hyphens`)
   }
   const target = join(root, ROOT_PATHS.plugins, name)
-  if (existsSync(target) && readDirRecursive(target).length > 0) {
+  // Refuse any existing target that holds ANY entry (including .git or
+  // node_modules). Uses an unfiltered listing: the template filters for .git /
+  // node_modules must NOT apply here, or an already-initialized repo would be
+  // mistaken for empty and deleted below.
+  if (existsSync(target) && readdirSync(target, { withFileTypes: true }).length > 0) {
     throw new Error(`plugin target already exists and is non-empty: ${target}`)
   }
   rmSync(target, { recursive: true, force: true })
