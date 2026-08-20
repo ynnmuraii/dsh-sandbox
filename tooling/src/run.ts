@@ -31,6 +31,11 @@ export interface VerifyOptions {
 }
 
 const PROFILE_BUNDLES = ['@deepseek-ai/dsh-base']
+// The shipped Web surface: base plus the web-app bundle (windows-shell.spec /
+// web-agent-presets.e2e in upstream declare exactly these two). `lab dev`
+// materializes a profile with these so booting it by name (`--profile
+// <name>-<target>`) is a REAL web composition — not the base bundle alone.
+export const DEV_WEB_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 const TARGETS = ['next', 'master'] as const
 type Target = (typeof TARGETS)[number]
 
@@ -131,8 +136,9 @@ function materializeProfile(opts: {
   root: string
   name: string
   target: Target
+  bundles?: string[]
 }): string {
-  const { root, name, target } = opts
+  const { root, name, target, bundles = PROFILE_BUNDLES } = opts
   const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
   const profileDir = join(root, ROOT_PATHS.runtime, 'profiles', `${name}-${target}`)
   let dsh: string
@@ -145,7 +151,7 @@ function materializeProfile(opts: {
     }
     dsh = pin
   }
-  const spec: ProfileSpec = { name: `@dsh-lab/profile-${target}`, bundles: PROFILE_BUNDLES }
+  const spec: ProfileSpec = { name: `@dsh-lab/profile-${target}`, bundles }
   mkdirSync(profileDir, { recursive: true })
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify(buildProfilePackageJson(spec, { dsh }), null, 2))
   writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), 'packages: []\n')
@@ -210,6 +216,9 @@ async function resolveLauncher(root: string, compat: Compatibility, target: Targ
 
 // Run a launcher command against the materialized profile, isolating it to the
 // lab runtime home (`DSH_HOME`) so it never touches the user's real ~/.dsh.
+// The launcher's OWN flags come first: `--profile <name>` must precede any
+// inner/`--patch` arguments, and the `web` subcommand alias is never used (it
+// would hard-code profile "web" and bypass our materialized profile).
 function bootProfile(
   launcher: Command,
   profileDir: string,
@@ -217,7 +226,7 @@ function bootProfile(
   env: NodeJS.ProcessEnv,
   args: string[],
 ): void {
-  execFileSync(launcher.cmd, [...launcher.args, ...args, '--profile', profileName], {
+  execFileSync(launcher.cmd, [...launcher.args, '--profile', profileName, ...args], {
     cwd: profileDir,
     env,
     stdio: 'inherit',
@@ -244,18 +253,19 @@ export async function devSource(opts: DevOptions): Promise<void> {
   mkdirSync(overlayDir, { recursive: true })
   writeFileSync(overlayPath, buildDevOverlay(name, entryPath, dirname(entryPath)))
 
-  // Materialize the pinned profile, boot the ACTUAL profile with the source
-  // overlay, and watch source for HMR. DSH_HOME is pointed at the lab runtime
-  // home so the boot is fully isolated from the user's real ~/.dsh, and the
-  // `--profile <name>-<target>` flag boots the materialized profile (including
-  // its required web bundles) rather than an ad-hoc home profile. Master boots
-  // the pinned upstream's built CLI directly (no `dsh` bin exists on dsh-root).
-  const profileDir = materializeProfile({ root, name, target })
+  // Materialize the pinned profile (carrying the full WEB bundle stack so a
+  // real web composition boots), then boot THE ACTUAL profile by name with the
+  // source overlay and watch source for HMR. DSH_HOME is pointed at the lab
+  // runtime home so the boot is fully isolated from the user's real ~/.dsh.
+  // The `--profile <name>-<target>` flag boots the materialized web profile
+  // (NOT the `web` built-in alias); master boots the pinned upstream's built
+  // CLI directly (no `dsh` bin exists on dsh-root).
+  const profileDir = materializeProfile({ root, name, target, bundles: DEV_WEB_BUNDLES })
   const profileName = `${name}-${target}`
   const env = { ...process.env, DSH_HOME: rootPath(root, ROOT_PATHS.runtime).replace(/\\/g, '/') }
   console.log(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
   console.log(`[dev] generated overlay: ${overlayPath}`)
-  console.log(`[dev] booting materialized profile '${profileName}' with DSH_HOME=${env.DSH_HOME}`)
+  console.log(`[dev] booting materialized web profile '${profileName}' with DSH_HOME=${env.DSH_HOME}`)
 
   const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
   const launcher = await resolveLauncher(root, compat, target)
@@ -263,7 +273,7 @@ export async function devSource(opts: DevOptions): Promise<void> {
     if (target !== 'master') {
       pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
     }
-    bootProfile(launcher, profileDir, profileName, env, ['web', '--patch', overlayPath])
+    bootProfile(launcher, profileDir, profileName, env, ['--patch', overlayPath])
   } catch (e) {
     throw new Error(`dsh boot failed for profile '${target}': ${(e as Error).message}`, { cause: e })
   }

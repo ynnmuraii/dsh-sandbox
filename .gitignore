@@ -10,6 +10,7 @@ coverage/
 .edv/dsh*
 # Local plugin repos are standalone nested git repos (tracking: local); the
 # meta-repo never tracks their internals. To promote a plugin to a submodule,
-# force-add the gitlink: `git add -f plugins/<name>` (see docs/using-the-lab.md).
+# force-record the gitlink because this path is ignored:
+#   git submodule add -f <url> plugins/<name>   (see docs/using-the-lab.md)
 plugins/*
 

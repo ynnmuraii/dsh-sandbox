@@ -224,19 +224,34 @@ function submoduleDiagnostics(root: string, relPath: string): string[] {
     out.push(`cataloged submodule '${relPath}' is missing (expected a git repo at ${dir})`)
     return out
   }
-  // The parent must track the path as a gitlink (mode 160000), not a regular file.
+  // The parent must track the path as a gitlink (mode 160000), not a regular
+  // file, and the gitlink's recorded object ID must match the nested repo's
+  // current HEAD — a submodule checked out at a DIFFERENT commit has an empty
+  // `status --porcelain` but is still not the recorded pin.
   try {
     const stage = execFileSync('git', ['ls-files', '--stage', '--', relPath.replace(/\\/g, '/')], {
       cwd: root,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     })
-    const isGitlink = /^160000\s+[0-9a-f]{40}\s+\d+\s/.test(stage.trim())
-    if (!isGitlink) {
+    const hit = /^160000\s+([0-9a-f]{40})\s+\d+\t/.exec(stage.trim())
+    if (!hit) {
       out.push(`cataloged submodule '${relPath}' is not tracked as a gitlink by the meta-repo`)
+    } else {
+      const recorded = hit[1]
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim()
+      if (head !== recorded) {
+        out.push(
+          `cataloged submodule '${relPath}' HEAD ${head} does not match the meta-repo gitlink ${recorded}`,
+        )
+      }
     }
-  } catch {
-    out.push(`cannot inspect meta-repo gitlink for submodule '${relPath}'`)
+  } catch (e) {
+    out.push(`cannot inspect meta-repo gitlink for submodule '${relPath}': ${(e as Error).message}`)
   }
   if (workingTreeDirty(dir)) {
     out.push(`cataloged submodule '${relPath}' working tree is dirty: ${dir}`)

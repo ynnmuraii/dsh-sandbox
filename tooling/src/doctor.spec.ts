@@ -165,4 +165,35 @@ describe('doctor', () => {
       true,
     )
   })
+
+  it('reports a submodule checked out at a different commit than the recorded gitlink', async () => {
+    const dir = tmpRoot()
+    const sub = join(dir, 'plugins', 'demo')
+    mkdirSync(sub, { recursive: true })
+    initCommit(sub) // commit A
+    // Parent records the nested repo as a gitlink at commit A.
+    git({ dir, args: ['init', '-q'] })
+    git({ dir, args: ['add', 'plugins/demo'] })
+    git({ dir, args: ['commit', '-qm', 'add submodule'] })
+    // Advance the nested repo to commit B with a CLEAN working tree; git status
+    // --porcelain is empty, but the parent's gitlink still points at A.
+    writeFileSync(join(sub, 'f'), 'advanced')
+    git({ dir: sub, args: ['add', '.'] })
+    git({ dir: sub, args: ['commit', '-qm', 'advance'] })
+    writeFileSync(
+      join(dir, 'catalog.yaml'),
+      [
+        'plugins:',
+        '  demo:',
+        '    path: plugins/demo',
+        '    repository: https://github.com/example/demo',
+        '    tracking: submodule',
+        '    maturity: experiment',
+      ].join('\n') + '\n',
+    )
+    const res = await doctor({ root: dir })
+    expect(
+      res.some(r => r.level === 'error' && /does not match the meta-repo gitlink/i.test(r.message)),
+    ).toBe(true)
+  })
 })

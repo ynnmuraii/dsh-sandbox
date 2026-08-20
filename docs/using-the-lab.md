@@ -108,12 +108,14 @@ There is no `lab promote` command yet; this is a manual, careful transition.
    ```
 3. The parent does **not** track the local plugin's internals (`tracking: local`),
    so there is nothing to `git rm -cached`. Snapshot the reviewed commit, then
-   remove the nested working copy so `git submodule add` can take the path:
+   remove the nested working copy so `git submodule add` can take the path. The
+   parent ignores `plugins/*`, so the add must be forced (`-f`) to record the
+   gitlink at the otherwise-ignored path:
    ```bash
    HEAD=$(git -C plugins/<name> rev-parse HEAD)
    rm -rf plugins/<name>
-   git submodule add <url> plugins/<name>          # from the parent root
-   git -C plugins/<name> checkout "$HEAD"           # pin the reviewed commit
+   git submodule add -f <url> plugins/<name>      # from the parent root (-f: path is gitignored)
+   git -C plugins/<name> checkout "$HEAD"          # pin the reviewed commit
    ```
 4. Update `catalog.yaml` for the plugin: `tracking: submodule` **and** the
    required `repository: <url>` (a `submodule` entry without `repository` fails

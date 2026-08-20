@@ -10,6 +10,7 @@ import {
   buildDevOverlay,
   verifyAllTargets,
   upstreamWorkingTreeDirty,
+  DEV_WEB_BUNDLES,
 } from './run.js'
 
 describe('resolveSourceOverlay', () => {
@@ -33,6 +34,16 @@ describe('buildProfilePackageJson', () => {
     const out = buildProfilePackageJson(spec, {})
     expect(out.dependencies).toEqual({})
     expect(out.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base'])
+  })
+
+  it('carries the full web bundle stack so the dev profile boots a real web composition', () => {
+    // Finding P1-1 wave 2: the dev profile must not be left with only the base
+    // bundle — booting it by name must compose the web-app surface too.
+    const spec = { name: '@dsh-lab/profile-next', bundles: DEV_WEB_BUNDLES }
+    const out = buildProfilePackageJson(spec, { dsh: '0.1.0-rc.8' })
+    expect(out.dsh.profile.bundles).toContain('@deepseek-ai/dsh-base')
+    expect(out.dsh.profile.bundles).toContain('@deepseek-ai/dsh-web-app')
+    expect(DEV_WEB_BUNDLES.length).toBeGreaterThan(1)
   })
 })
 
