@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPlugin, loadPluginConfig } from './create.js'
 import { loadCatalogFromFile } from './schemas.js'
+import { snapshotContext } from './sync.js'
 
 describe('createPlugin', () => {
   let dir: string
@@ -67,5 +68,17 @@ describe('createPlugin', () => {
       expect(pkg.devDependencies[dep]).toBeTruthy()
     }
     expect(pkg.peerDependencies['@deepseek-ai/cordis']).toBeTruthy()
+  })
+
+  it('writes the canonical shared-context snapshot (not a not-synced stub)', async () => {
+    mkdirSync(join(dir, 'context'), { recursive: true })
+    writeFileSync(join(dir, 'context', 'a.md'), 'hello')
+    const canonical = snapshotContext(dir, [readFileSync(join(dir, 'context', 'a.md'), 'utf8')])
+    const canonicalHash = /^> context version: (\S+)$/m.exec(canonical)?.[1]
+    await createPlugin({ root: dir, name: 'example' })
+    const written = readFileSync(join(dir, 'plugins', 'example', '.dsh-lab', 'shared-context.md'), 'utf8')
+    expect(canonicalHash).toBeTruthy()
+    expect(written).not.toContain('not-synced')
+    expect(written).toContain(`context version: ${canonicalHash}`)
   })
 })

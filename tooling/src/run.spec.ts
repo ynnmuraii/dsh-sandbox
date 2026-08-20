@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import {
   resolveSourceOverlay,
@@ -6,6 +9,7 @@ import {
   buildSourceOverlay,
   buildDevOverlay,
   verifyAllTargets,
+  upstreamWorkingTreeDirty,
 } from './run.js'
 
 describe('resolveSourceOverlay', () => {
@@ -80,5 +84,26 @@ describe('buildDevOverlay', () => {
   it('escapes apostrophes in the hmr root the same way as the entry', () => {
     const overlay = buildDevOverlay('example', `A:/o'brien/src/index.ts`, `A:/o'brien/src`)
     expect(overlay).toContain(`- 'A:/o''brien/src'`)
+  })
+})
+
+describe('upstreamWorkingTreeDirty', () => {
+  function initCommitRepo(dir: string): void {
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'init', '-q'], { cwd: dir })
+    writeFileSync(join(dir, 'f'), 'x')
+    execFileSync('git', ['add', '.'], { cwd: dir })
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], { cwd: dir })
+  }
+
+  it('false for a clean repo, true once a tracked file is modified', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-run-'))
+    try {
+      initCommitRepo(dir)
+      expect(upstreamWorkingTreeDirty(dir)).toBe(false)
+      writeFileSync(join(dir, 'f'), 'y') // modify a tracked file
+      expect(upstreamWorkingTreeDirty(dir)).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

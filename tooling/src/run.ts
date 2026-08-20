@@ -1,6 +1,6 @@
 import { join, relative, resolve, dirname } from 'node:path'
 import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+import { execSync, execFileSync } from 'node:child_process'
 import { loadPluginConfig } from './create.js'
 import {
   loadCatalogFromFile,
@@ -184,8 +184,23 @@ export async function devSource(opts: DevOptions): Promise<void> {
 // next then master, and reports all failures together while still running both
 // targets (a failure in one does not skip the other). The `run` seam lets a
 // unit test assert the dispatch order/aggregation without an end-to-end boot.
-export async function verifyAllTargets(
-  root: string,
+// Whether the upstream checkout has a modified tracked working tree
+// (`git status --porcelain` non-empty). A pinned HEAD whose tracked files were
+// touched is not a faithful source run, so both `verify --target master` and
+// `lab doctor` reject it.
+export function upstreamWorkingTreeDirty(dir: string): boolean {
+  try {
+    const out = execFileSync('git', ['status', '--porcelain'], {
+      cwd: dir,
+      encoding: 'utf8',
+    })
+    return out.trim().length > 0
+  } catch {
+    return true // cannot inspect; treat as dirty to avoid a false clean gate
+  }
+}
+
+export async function verifyAllTargets(  root: string,
   name: string,
   run: (target: 'next' | 'master') => Promise<void> = (target) =>
     verifyBundleTarget({ root, name, target }),
@@ -302,6 +317,15 @@ async function verifyBundleTarget(opts: {
       throw new CompatibilityError(
         `master target requires upstream/deepseek-harness HEAD pinned to ${masterPin.commit} ` +
           `(refresh the Task 8 submodule); refusing to report a master pass on a mismatched checkout`,
+      )
+    }
+    // A pinned HEAD with a modified tracked working tree is not a faithful
+    // source run either: reject it before building so a dirty checkout cannot
+    // report a master pass. (Matches `lab doctor`'s dirty-submodule error.)
+    if (upstreamWorkingTreeDirty(upstreamDir)) {
+      throw new CompatibilityError(
+        `master target requires a clean upstream/deepseek-harness working tree ` +
+          `(git -C ${upstreamDir} status); refusing to report a master pass on modified tracked files`,
       )
     }
     execSync('pnpm install && pnpm run build', { cwd: upstreamDir, stdio: 'inherit' })
