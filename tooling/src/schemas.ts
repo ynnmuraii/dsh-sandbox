@@ -50,11 +50,19 @@ function assertPin(kind: 'next' | 'master', pin: TargetPin): void {
   }
 }
 
-export function loadCompatibility(text: string): Compatibility {
+function parseYaml(text: string, what: string): unknown {
   // FAILSAFE_SCHEMA keeps all scalars as strings. The default schema would
   // coerce an all-digit commit (e.g. the all-zero placeholder) to a number and
   // drop leading zeros, breaking the 40-char SHA contract.
-  const raw = loadYaml(text, { schema: FAILSAFE_SCHEMA }) as Compatibility
+  try {
+    return loadYaml(text, { schema: FAILSAFE_SCHEMA })
+  } catch (e) {
+    throw new CompatibilityError(`invalid ${what}: ${(e as Error).message}`, { cause: e })
+  }
+}
+
+export function loadCompatibility(text: string): Compatibility {
+  const raw = parseYaml(text, 'compatibility manifest') as Compatibility
   if (!raw?.targets?.next || !raw?.targets?.master) {
     throw new CompatibilityError('compatibility manifest requires both next and master targets')
   }
@@ -68,7 +76,7 @@ export function loadCompatibilityFromFile(path: string): Compatibility {
 }
 
 export function loadCatalog(text: string): Catalog {
-  const raw = loadYaml(text, { schema: FAILSAFE_SCHEMA }) as Catalog
+  const raw = parseYaml(text, 'catalog') as Catalog
   if (!raw?.plugins || typeof raw.plugins !== 'object') {
     throw new CompatibilityError('catalog requires a plugins map')
   }
