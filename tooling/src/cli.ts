@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { doctor } from './doctor.js'
 import { createPlugin } from './create.js'
+import { syncContext } from './sync.js'
 
 const HELP = `
 Usage: lab <command> [args]
@@ -33,9 +34,17 @@ export async function runCli(argv: string[]): Promise<number> {
         return 1
       }
     }
+    case 'sync-context': {
+      const all = rest.includes('--all')
+      const names = rest.filter(a => a !== '--all')
+      const res = await syncContext({ root: process.cwd(), names, all })
+      for (const r of res) {
+        console.log(r.changed ? `synced  ${r.path}` : `current ${r.path}`)
+      }
+      return 0
+    }
     case 'dev':
     case 'verify':
-    case 'sync-context':
       console.error(`error: '${cmd}' not implemented yet`)
       return 1
     case '--help':
