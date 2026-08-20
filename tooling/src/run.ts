@@ -1,4 +1,4 @@
-import { join, relative, resolve } from 'node:path'
+import { join, relative, resolve, dirname } from 'node:path'
 import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { loadPluginConfig } from './create.js'
@@ -83,6 +83,26 @@ export function buildSourceOverlay(name: string, entryPath: string): string {
   return ['', '- insert:', `    - id: ${name}`, `      name: '${entry}'`, ''].join('\n')
 }
 
+// Render the full source-dev overlay. Beyond inserting the plugin's source
+// entry (buildSourceOverlay), it re-enables the shared Cordis module HMR row
+// and points its module `root` at the plugin's source directory, so edits to
+// src/index.ts are watched and reloaded while `lab dev` runs (criterion 6).
+// The web bundle previously disabled the shared hmr row (`disabled: true`);
+// because later patch layers win per row, this overlay — applied last via
+// `--patch` — overrides `disabled` back to false and scopes the watched root.
+export function buildDevOverlay(name: string, entryPath: string, sourceRoot: string): string {
+  const root = sourceRoot.replace(/\\/g, '/').replace(/'/g, "''")
+  const insert = buildSourceOverlay(name, entryPath)
+  return [
+    '- id: hmr',
+    '  disabled: false',
+    '  config:',
+    '    root:',
+    `      - '${root}'`,
+    insert,
+  ].join('\n')
+}
+
 // Read the catalog entry for a plugin; throw if the name is absent.
 function catalogEntry(root: string, name: string): CatalogEntry {
   const catalog = loadCatalogFromFile(rootPath(root, ROOT_PATHS.catalog))
@@ -135,11 +155,13 @@ export async function devSource(opts: DevOptions): Promise<void> {
   }
   const entryPath = resolveSourceOverlay(root, entry.path, 'src/index.ts', name)
 
-  // Emit an absolute overlay into the runtime dir.
+  // Emit an absolute overlay into the runtime dir. The overlay both inserts the
+  // plugin source entry AND re-enables Cordis module HMR with a module `root`
+  // at the plugin's src dir, so edits there reload live during `lab dev`.
   const overlayDir = join(root, ROOT_PATHS.runtime, 'overlays', name)
   const overlayPath = join(overlayDir, 'cordis.patch.yml')
   mkdirSync(overlayDir, { recursive: true })
-  writeFileSync(overlayPath, buildSourceOverlay(name, entryPath))
+  writeFileSync(overlayPath, buildDevOverlay(name, entryPath, dirname(entryPath)))
 
   console.log(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
   console.log(`[dev] generated overlay: ${overlayPath}`)

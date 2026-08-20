@@ -34,7 +34,7 @@ the only mode today); only `catalog.yaml` is committed in the parent.
 | `pnpm lab dev <name> --target next\|master` | Emit a **source overlay** (`cordis.patch.yml`) that points at the plugin's `src/index.ts`, materialize a pinned profile, and boot `dsh web` against it watching source for HMR. |
 | `pnpm lab verify <name> --target next\|master\|all` | Build + pack the bundle, install the tarball into an ephemeral profile via the real `dsh plugin add`, and assert the composed `--dump-config` contains the plugin. |
 | `pnpm lab sync-context [name\|--all]` | Regenerate `.dsh-lab/shared-context.md` snapshots inside each plugin repo from `context/`, embedding a content hash. |
-| `pnpm lab doctor` | Validate toolchain, catalog, target pins (node version, manifest, upstream git dir). Exit 0 only when green. |
+| `pnpm lab doctor` | Validate toolchain, catalog, target pins, context-snapshot freshness, and the upstream submodule (present + pinned to `master.commit` + clean). Exit 0 only when green. |
 
 ## Recipe: scaffold a new plugin
 
@@ -46,8 +46,10 @@ pnpm typecheck && pnpm test
 ```
 
 `lab new` writes `.dsh-lab/plugin.yaml` declaring the plugin's declared targets
-(e.g. `targets: [next]`). Add a target there before expecting `dev`/`verify` to
-accept it for that target.
+(e.g. `targets: [next]`), registers a `catalog.yaml` entry (`tracking: local,
+maturity: experiment`), and scaffolds a self-contained `package.json` with the
+runnable dev deps needed to `install`/`typecheck`/`test` on its own. Add a target
+there before expecting `dev`/`verify` to accept it for that target.
 
 ## Recipe: `lab dev` — iterate on live source
 
@@ -56,8 +58,10 @@ pnpm lab dev my-plugin --target next
 ```
 
 This writes a source overlay to `.lab/runtime/overlays/my-plugin/cordis.patch.yml`
-and boots the pinned `next` profile with `--patch <overlay>`, watching your source
-for HMR. Type-code, save, and watch the running instance reload.
+and boots the pinned `next` profile with `--patch <overlay>`. The overlay both
+inserts your `src/index.ts` and re-enables Cordis module HMR with a module `root`
+pointing at the plugin's `src/` dir, so an edit there is watched and the running
+instance reloads. Type-code, save, and watch.
 
 - Source mode proves your **live source** behaves; it does **not** prove the
   packed bundle works. Keep the two boundaries separate (see `lab verify`).
@@ -96,17 +100,28 @@ There is no `lab promote` command yet; this is a manual, careful transition.
 1. Decide the submodule source — practically a fork/standalone repo you control,
    because the plugin must be self-sufficient (its own `package.json`,
    self-contained `tsconfig.json`, committed lockfile and `shared-context.md`).
-2. `git -C plugins/<name> remote add origin <url>` then `git push -u origin HEAD`.
-3. Remove `plugins/<name>` from the parent working tree and re-add it as a
-   submodule pinned to the reviewed commit:
+2. Register a remote on the **existing nested repo** and push it (this keeps the
+   full history and the committed `shared-context.md`):
    ```bash
-   git -C ../.. rm --cached plugins/<name>
-   git submodule add <url> plugins/<name>
+   git -C plugins/<name> remote add origin <url>
+   git -C plugins/<name> push -u origin HEAD
    ```
-4. Update `catalog.yaml` `tracking: local -> submodule` for the plugin; keep
-   `maturity` as-is. Commit the parent (submodule + catalog) and push both repos.
+3. The parent does **not** track the local plugin's internals (`tracking: local`),
+   so there is nothing to `git rm -cached`. Snapshot the reviewed commit, then
+   remove the nested working copy so `git submodule add` can take the path:
+   ```bash
+   HEAD=$(git -C plugins/<name> rev-parse HEAD)
+   rm -rf plugins/<name>
+   git submodule add <url> plugins/<name>          # from the parent root
+   git -C plugins/<name> checkout "$HEAD"           # pin the reviewed commit
+   ```
+4. Update `catalog.yaml` for the plugin: `tracking: submodule` **and** the
+   required `repository: <url>` (a `submodule` entry without `repository` fails
+   the catalog schema). Keep `maturity` as-is. The parent commit then records the
+   submodule gitlink + the updated catalog entry; push both repos.
 5. Re-run `pnpm lab doctor` and `pnpm lab verify <name> --target all` from the
-   parent to confirm the submodule path still resolves.
+   parent to confirm the submodule path still resolves and the pinned commit is
+   clean.
 
 > Only ever track reviewed, pinned source. Commit `prepare`/build scripts run on
 > the author's machine; pin commits and review before trusting a submodule.
@@ -116,7 +131,8 @@ There is no `lab promote` command yet; this is a manual, careful transition.
 ### Stale shared context
 
 `shared-context.md` carries an explicit `context version:` hash. When the root
-`context/*.md` moves on but a plugin's snapshot is old, the hash won't match.
+`context/*.md` moves on but a plugin's snapshot is old, the hash won't match —
+and `lab doctor` now flags it: `stale shared context for plugin '<name>'`.
 Fix:
 
 ```bash
@@ -140,12 +156,14 @@ git -C plugins/<name> commit -m "chore: refresh shared context snapshot"
 
 ### Dirty or missing upstream submodule
 
-`verify --target master` requires the pinned upstream checkout at
-`upstream/deepseek-harness` whose HEAD equals `compat.targets.master.commit`
-(enforced by `verifyUpstreamCommit`). A mismatched or missing checkout throws a
-prerequisite error and refuses to report a master pass — **fix or skip, don't
-fake**. If your local upstream working tree is dirty, `git -C upstream/deepseek-harness status`
-and stash/restore before verifying.
+Both `lab doctor` and `verify --target master` require the pinned upstream
+checkout at `upstream/deepseek-harness` whose HEAD equals `compat.targets.master.commit`
+(enforced by `verifyUpstreamCommit`). Doctor reports **errors** (exit 1) for a
+missing upstream, a HEAD that does not match the pinned commit, or a dirty
+working tree; a mismatched/missing/dirty upstream also throws a prerequisite
+error in `verify` and refuses to report a master pass — **fix or skip, don't
+fake**. To fix: `git -C upstream/deepseek-harness status`, then restore the pin or
+stash/restore your working tree before verifying and running doctor again.
 
 ### Master build failure on Windows
 
@@ -174,8 +192,14 @@ All gates below ran green on this host (Windows, node v22.20.0 = the pinned
 `22.20.0`):
 
 - `pnpm typecheck` — 0 errors
-- `pnpm test` — 21 passed
-- `pnpm lab doctor` — clean, exit 0
+- `pnpm test` — 31 passed
+- `pnpm lab doctor` — clean, exit 0 (node pin, catalog, context snapshots, pinned
+  upstream submodule, upstream clean)
 - `pnpm lab verify example --target all` — next **and** master both pass
-- **Standalone clone** of `plugins/example` (install → typecheck → test → build →
+- **Fresh scaffold** `lab new demo` — install → typecheck → test (1 real lifecycle
+  test) → build all pass standalone
+- **Standalone clone** of `plugins/example` (install → typecheck → 3 tests → build →
   pack) — all pass without the meta-repo
+- **`lab dev`** emits an overlay that re-enables Cordis module HMR with a module
+  `root` at the plugin's `src/` (asserted by unit test); a live reload boot was not
+  re-run (it binds a running web server)

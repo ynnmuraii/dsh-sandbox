@@ -4,6 +4,7 @@ import {
   resolveSourceOverlay,
   buildProfilePackageJson,
   buildSourceOverlay,
+  buildDevOverlay,
   verifyAllTargets,
 } from './run.js'
 
@@ -59,5 +60,25 @@ describe('buildSourceOverlay', () => {
     const overlay = buildSourceOverlay('example', `A:/plugins/o'brien/src/index.ts`)
     expect(overlay).toContain(`name: 'A:/plugins/o''brien/src/index.ts'`)
     expect(overlay).not.toContain(`\\'`)
+  })
+})
+
+describe('buildDevOverlay', () => {
+  it('re-enables the hmr row and points its module root at the plugin source dir', () => {
+    const overlay = buildDevOverlay('example', `A:/plugins/example/src/index.ts`, `A:/plugins/example/src`)
+    // The shared hmr row (disabled by the web bundle) is re-enabled…
+    expect(overlay).toContain('- id: hmr')
+    expect(overlay).toContain('disabled: false')
+    // …and its module root points at the plugin source directory for live reload.
+    expect(overlay).toContain(`root:`)
+    expect(overlay).toContain(`- 'A:/plugins/example/src'`)
+    // The plugin source entry is still inserted.
+    expect(overlay).toContain(`- insert:`)
+    expect(overlay).toContain(`name: 'A:/plugins/example/src/index.ts'`)
+  })
+
+  it('escapes apostrophes in the hmr root the same way as the entry', () => {
+    const overlay = buildDevOverlay('example', `A:/o'brien/src/index.ts`, `A:/o'brien/src`)
+    expect(overlay).toContain(`- 'A:/o''brien/src'`)
   })
 })

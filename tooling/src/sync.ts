@@ -26,7 +26,7 @@ export function snapshotContext(root: string, reads: string[]): string {
   return `${SNAPSHOT_HEADER}\n> context version: ${digest}\n> regenerate with \`lab sync-context\`\n\n${body}\n`
 }
 
-function contextDocuments(root: string): string[] {
+export function contextDocuments(root: string): string[] {
   const dir = rootPath(root, ROOT_PATHS.contextDir)
   if (!existsSync(dir)) return []
   return readdirSync(dir)

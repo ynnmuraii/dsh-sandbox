@@ -9,8 +9,9 @@ import {
 } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { load as loadYaml } from 'js-yaml'
-import { ROOT_PATHS } from './context.js'
+import { load as loadYaml, dump as dumpYaml } from 'js-yaml'
+import { loadCatalogFromFile } from './schemas.js'
+import { ROOT_PATHS, rootPath } from './context.js'
 
 // Resolve the template dir from this module's own location so creation works
 // regardless of the caller's cwd/root (unit tests root a throwaway tmpdir).
@@ -98,6 +99,7 @@ const STANDALONE_TSCONFIG = {
     esModuleInterop: true,
     skipLibCheck: true,
     forceConsistentCasingInFileNames: true,
+    lib: ['ESNext'],
     noEmit: true,
   },
   include: ['src', 'tests'],
@@ -139,5 +141,25 @@ export async function createPlugin(opts: { root: string; name: string }): Promis
   writeFileSync(join(target, '.dsh-lab', 'shared-context.md'), SHARED_CONTEXT_STUB)
 
   execSync('git init -q', { cwd: target, stdio: 'ignore' })
+
+  // Register the new plugin in the meta-repo catalog so `lab dev`/`lab verify`
+  // can resolve it (criterion 4). Read an existing catalog, add the entry, write
+  // back; create catalog.yaml if it is absent.
+  const catalogPath = rootPath(root, ROOT_PATHS.catalog)
+  let catalog: {
+    plugins: Record<string, { path: string; tracking: 'local' | 'submodule'; maturity: 'experiment' | 'stable'; repository?: string }>
+  }
+  if (existsSync(catalogPath)) {
+    catalog = loadCatalogFromFile(catalogPath) as typeof catalog
+  } else {
+    catalog = { plugins: {} }
+  }
+  catalog.plugins[name] = {
+    path: `plugins/${name}`,
+    tracking: 'local',
+    maturity: 'experiment',
+  }
+  writeFileSync(catalogPath, dumpYaml(catalog, { noRefs: true, lineWidth: 120 }) + '\n')
+
   return target
 }
