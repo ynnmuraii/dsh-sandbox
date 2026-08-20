@@ -23,7 +23,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "pack": "pnpm pack"
+    "pack": "pnpm pack",
+    "pack-smoke": "node scripts/pack-smoke.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",

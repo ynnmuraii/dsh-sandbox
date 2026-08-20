@@ -1,10 +1,12 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { load as loadYaml } from 'js-yaml'
 import { loadCompatibility, loadCompatibilityFromFile, loadCatalogFromFile } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
 import { snapshotContext, contextDocuments } from './sync.js'
 import { verifyUpstreamCommit } from './upstream.js'
+import { pnpm } from './proc.js'
 
 export interface DiagnosticResult {
   level: 'error' | 'warn'
@@ -56,6 +58,19 @@ export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[
       out.push({
         level: 'error',
         message: `node version mismatch: manifest pins ${expectedNode}, running ${actual}`,
+      })
+    }
+  }
+
+  // Toolchain pin gate (§14): the pinned pnpm version must match the running
+  // one, or a later install/verify against the pinned targets is not faithful.
+  const expectedPnpm = compat.targets.next.pnpm
+  if (expectedPnpm) {
+    const actual = pnpm(['--version'], { encoding: 'utf8' }).toString().trim()
+    if (actual !== expectedPnpm) {
+      out.push({
+        level: 'error',
+        message: `pnpm version mismatch: manifest pins ${expectedPnpm}, running ${actual}`,
       })
     }
   }
@@ -130,5 +145,101 @@ export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[
     }
   }
 
+  // Plugin pin + repo integrity gate (§14 / §16.10). For every cataloged plugin:
+  // (a) a declared target's exact Cordis dependency (peer and dev) must equal
+  // the compatibility pin, and (b) a `tracking: submodule` entry must be present,
+  // tracked as a gitlink by the meta-repo, and free of working-tree dirt — all
+  // without modifying the plugin repo.
+  if (existsSync(catalogPath)) {
+    try {
+      const catalog = loadCatalogFromFile(catalogPath)
+      for (const [name, entry] of Object.entries(catalog.plugins)) {
+        const pluginDir = join(root, entry.path)
+        const yamlPath = join(pluginDir, '.dsh-lab', 'plugin.yaml')
+        const pkgPath = join(pluginDir, 'package.json')
+        if (existsSync(yamlPath) && existsSync(pkgPath)) {
+          let cfg: { targets?: string[] }
+          try {
+            cfg = JSON.parse(JSON.stringify(loadYaml(readFileSync(yamlPath, 'utf8')))) as {
+              targets?: string[]
+            }
+          } catch (e) {
+            cfg = {}
+            out.push({
+              level: 'error',
+              message: `plugin '${name}' has an unreadable .dsh-lab/plugin.yaml: ${(e as Error).message}`,
+            })
+          }
+          try {
+            const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+              peerDependencies?: Record<string, string>
+              devDependencies?: Record<string, string>
+            }
+            for (const target of cfg.targets ?? []) {
+              const pin = (compat.targets as Record<string, { cordis?: string }>)[target]?.cordis
+              if (!pin) continue
+              for (const field of ['peerDependencies', 'devDependencies'] as const) {
+                const actual = pkg[field]?.['@deepseek-ai/cordis']
+                if (actual !== pin) {
+                  out.push({
+                    level: 'error',
+                    message:
+                      `plugin '${name}' ${field}['@deepseek-ai/cordis'] is '${actual ?? '(missing)'}', ` +
+                      `does not match declared target '${target}' pin '${pin}'`,
+                  })
+                }
+              }
+            }
+          } catch (e) {
+            out.push({
+              level: 'error',
+              message: `plugin '${name}' has an unreadable package.json: ${(e as Error).message}`,
+            })
+          }
+        }
+        if (entry.tracking === 'submodule') {
+          const submoduleErrors = submoduleDiagnostics(root, entry.path)
+          for (const msg of submoduleErrors) {
+            out.push({ level: 'error', message: msg })
+          }
+        }
+      }
+    } catch (e) {
+      out.push({
+        level: 'error',
+        message: `cannot read catalog for plugin pin check: ${(e as Error).message}`,
+      })
+    }
+  }
+
+  return out
+}
+
+// Diagnostics for a cataloged `tracking: submodule` plugin repo, without
+// modifying anything: presence, meta-repo gitlink, and working-tree cleanliness.
+function submoduleDiagnostics(root: string, relPath: string): string[] {
+  const out: string[] = []
+  const dir = join(root, relPath)
+  if (!existsSync(join(dir, '.git'))) {
+    out.push(`cataloged submodule '${relPath}' is missing (expected a git repo at ${dir})`)
+    return out
+  }
+  // The parent must track the path as a gitlink (mode 160000), not a regular file.
+  try {
+    const stage = execFileSync('git', ['ls-files', '--stage', '--', relPath.replace(/\\/g, '/')], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const isGitlink = /^160000\s+[0-9a-f]{40}\s+\d+\s/.test(stage.trim())
+    if (!isGitlink) {
+      out.push(`cataloged submodule '${relPath}' is not tracked as a gitlink by the meta-repo`)
+    }
+  } catch {
+    out.push(`cannot inspect meta-repo gitlink for submodule '${relPath}'`)
+  }
+  if (workingTreeDirty(dir)) {
+    out.push(`cataloged submodule '${relPath}' working tree is dirty: ${dir}`)
+  }
   return out
 }

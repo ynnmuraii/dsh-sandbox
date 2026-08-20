@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { snapshotContext, syncContext } from './sync.js'
@@ -25,9 +26,18 @@ describe('syncContext', () => {
     writeFileSync(join(dir, 'workbench-compat-stub'), '')
     mkdirSync(join(dir, 'plugins', 'a'), { recursive: true })
     writeFileSync(join(dir, 'plugins', 'a', 'package.json'), '{}')
+    execFileSync('git', ['init', '-q'], { cwd: join(dir, 'plugins', 'a') })
     const res = await syncContext({ root: dir, names: ['a'], all: false })
     expect(res[0]!.path).toBe(join(dir, 'plugins', 'a', '.dsh-lab', 'shared-context.md'))
     expect(readFileSync(res[0]!.path, 'utf8')).toMatch(/^# Shared context snapshot/)
+  })
+
+  it('refuses to sync when the plugin repo is missing (no manufactured .dsh-lab)', async () => {
+    // Cataloged 'a' has no plugins/a directory at all -> must refuse instead of
+    // fabricating a standalone repo.
+    writeFileSync(join(dir, 'catalog.yaml'), 'plugins:\n  a:\n    path: plugins/a\n    tracking: local\n')
+    await expect(syncContext({ root: dir, names: ['a'], all: false })).rejects.toThrow(/missing or not a git repo/)
+    expect(existsSync(join(dir, 'plugins', 'a', '.dsh-lab'))).toBe(false)
   })
 
   it('ignores named targets not in the catalog (incl. prototype keys)', async () => {

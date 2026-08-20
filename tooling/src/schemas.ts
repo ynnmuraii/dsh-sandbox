@@ -35,17 +35,41 @@ export interface Catalog {
 }
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/
+const PIN_RANGE = /^(~|\^|>=|<=)?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \|\| .+)?$/
+
+function requireField(kind: 'next' | 'master', pin: TargetPin, field: keyof TargetPin): void {
+  if (pin[field] === undefined || pin[field] === '') {
+    throw new CompatibilityError(
+      `target '${kind}' requires a mandatory pin field '${field}'`,
+    )
+  }
+}
 
 function assertPin(kind: 'next' | 'master', pin: TargetPin): void {
   if (kind === 'next') {
-    for (const v of [pin.dsh, pin.cordis, pin.node]) {
-      if (v !== undefined && !EXACT_VERSION.test(v)) {
+    // Full mandatory shape: every field the next target pins must be present
+    // and exact. An empty `next: {}` (or any missing field) is a config error,
+    // not a valid "unpinned" target.
+    for (const field of ['dsh', 'cordis', 'node', 'pnpm'] as const) {
+      requireField(kind, pin, field)
+    }
+    for (const v of [pin.dsh, pin.cordis, pin.node, pin.pnpm]) {
+      if (!EXACT_VERSION.test(v ?? '')) {
         throw new CompatibilityError(`next target requires an exact pinned version, got '${v}'`)
       }
     }
   } else {
-    if (!pin.commit || !/^[0-9a-f]{40}$/.test(pin.commit)) {
+    // Full mandatory shape: upstream identity + pinned commit + toolchain pins.
+    for (const field of ['repository', 'commit', 'pnpm', 'node'] as const) {
+      requireField(kind, pin, field)
+    }
+    if (!/^[0-9a-f]{40}$/.test(pin.commit!)) {
       throw new CompatibilityError('master target requires a 40-char pinned git commit')
+    }
+    for (const v of [pin.pnpm, pin.node]) {
+      if (v !== undefined && !PIN_RANGE.test(v)) {
+        throw new CompatibilityError(`master target requires a valid pinned version, got '${v}'`)
+      }
     }
   }
 }

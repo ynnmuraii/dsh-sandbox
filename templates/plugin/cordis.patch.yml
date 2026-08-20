@@ -1,2 +1,7 @@
 # Patch layer contributed by this plugin's bundle. Release installs this file
 # via dsh.bundle.patch; lab dev generates a source overlay instead.
+# A top-level array of loader patch entries; the insert makes the Loader import
+# this plugin package so its tool is observable in the composed tree.
+- insert:
+    - id: __PLUGIN_NAME__
+      name: '@dsh-lab/dsh-plugin-__PLUGIN_NAME__'

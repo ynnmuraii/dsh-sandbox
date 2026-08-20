@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import {
   mkdirSync,
   readdirSync,
@@ -23,6 +23,18 @@ export interface PluginConfig {
   tracking: 'local' | 'submodule'
   maturity: string
   targets: string[]
+}
+
+export interface CatalogShape {
+  plugins: Record<
+    string,
+    {
+      path: string
+      tracking: 'local' | 'submodule'
+      maturity: 'experiment' | 'stable'
+      repository?: string
+    }
+  >
 }
 
 export function loadPluginConfig(path: string): PluginConfig {
@@ -111,6 +123,20 @@ export async function createPlugin(opts: { root: string; name: string }): Promis
   if (!NAME_RE.test(name)) {
     throw new Error(`invalid plugin name '${name}': use lowercase letters, digits, hyphens`)
   }
+  // Reject a name already registered in the catalog BEFORE touching any target
+  // path: overwriting an existing catalog entry would silently absorb a
+  // reviewed local or submodule plugin into a fresh scaffold. Only the explicit
+  // submodule/catalog workflow may convert an existing entry.
+  const catalogPath = rootPath(root, ROOT_PATHS.catalog)
+  if (existsSync(catalogPath)) {
+    const existing = loadCatalogFromFile(catalogPath) as CatalogShape
+    if (Object.hasOwn(existing.plugins, name)) {
+      throw new Error(
+        `plugin '${name}' is already registered in the catalog; use the submodule/catalog ` +
+          `workflow to convert an existing entry instead of \`lab new\``,
+      )
+    }
+  }
   const target = join(root, ROOT_PATHS.plugins, name)
   // Refuse any existing target that holds ANY entry (including .git or
   // node_modules). Uses an unfiltered listing: the template filters for .git /
@@ -139,17 +165,14 @@ export async function createPlugin(opts: { root: string; name: string }): Promis
     snapshotContext(root, contextDocuments(root)),
   )
 
-  execSync('git init -q', { cwd: target, stdio: 'ignore' })
+  execFileSync('git', ['init', '-q'], { cwd: target, stdio: 'ignore' })
 
   // Register the new plugin in the meta-repo catalog so `lab dev`/`lab verify`
   // can resolve it (criterion 4). Read an existing catalog, add the entry, write
   // back; create catalog.yaml if it is absent.
-  const catalogPath = rootPath(root, ROOT_PATHS.catalog)
-  let catalog: {
-    plugins: Record<string, { path: string; tracking: 'local' | 'submodule'; maturity: 'experiment' | 'stable'; repository?: string }>
-  }
+  let catalog: CatalogShape
   if (existsSync(catalogPath)) {
-    catalog = loadCatalogFromFile(catalogPath) as typeof catalog
+    catalog = loadCatalogFromFile(catalogPath) as CatalogShape
   } else {
     catalog = { plugins: {} }
   }

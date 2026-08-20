@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadCatalogFromFile } from './schemas.js'
@@ -45,6 +46,19 @@ export async function syncContext({ root, names, all }: SyncOptions): Promise<Sy
     ? Object.keys(catalog.plugins)
     : names.filter(n => Object.hasOwn(catalog.plugins, n))
 
+  // Refuse to "synchronize" a missing plugin repo: creating `.dsh-lab` inside a
+  // directory that is not an existing nested git repo would manufacture a
+  // partial, untracked plugin rather than refresh an author's real standalone
+  // repo. Validate every target's repo up front so we fail before writing any.
+  const missing = targets.filter(
+    name => !isNestedRepo(join(root, catalog.plugins[name]!.path)),
+  )
+  if (missing.length > 0) {
+    throw new Error(
+      `cannot sync-context: plugin repo missing or not a git repo: ${missing.join(', ')}`,
+    )
+  }
+
   const results: SyncedResult[] = []
   for (const name of targets) {
     const entry = catalog.plugins[name]!
@@ -56,4 +70,22 @@ export async function syncContext({ root, names, all }: SyncOptions): Promise<Sy
     results.push({ name, changed, path })
   }
   return results
+}
+
+// A plugin's `.dsh-lab` lives inside a standalone nested git repo. On a
+// submodule the repo's `.git` is a gitlink marker file (`gitdir: …`) rather
+// than a directory, so a presence check must accept both.
+function isNestedRepo(dir: string): boolean {
+  const marker = join(dir, '.git')
+  if (!existsSync(marker)) return false
+  try {
+    const st = execFileSync('git', ['rev-parse', '--git-dir'], {
+      cwd: dir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return st.trim().length > 0
+  } catch {
+    return false
+  }
 }

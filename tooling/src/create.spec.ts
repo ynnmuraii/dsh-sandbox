@@ -21,7 +21,11 @@ describe('createPlugin', () => {
   })
 
   it('refuses an existing non-empty target', async () => {
-    await createPlugin({ root: dir, name: 'example' })
+    // Target dir exists and holds a file, but is NOT in the catalog -> the
+    // target-existence guard fires (not the catalog-name guard).
+    const target = join(dir, 'plugins', 'example')
+    mkdirSync(target, { recursive: true })
+    writeFileSync(join(target, 'somefile'), 'x')
     await expect(createPlugin({ root: dir, name: 'example' })).rejects.toThrow(/exists/i)
   })
 
@@ -59,6 +63,17 @@ describe('createPlugin', () => {
     const catalog = loadCatalogFromFile(join(dir, 'catalog.yaml'))
     expect(catalog.plugins['other']).toBeTruthy()
     expect(catalog.plugins['example']).toBeTruthy()
+  })
+
+  it('rejects a name already registered in the catalog without touching the target', async () => {
+    // Catalog already claims 'example' -> `lab new example` must refuse rather
+    // than overwrite the catalog entry / manufacture a fresh scaffold.
+    writeFileSync(
+      join(dir, 'catalog.yaml'),
+      ['plugins:', '  example:', '    path: plugins/example', '    tracking: local', '    maturity: experiment'].join('\n') + '\n',
+    )
+    await expect(createPlugin({ root: dir, name: 'example' })).rejects.toThrow(/already registered/i)
+    expect(existsSync(join(dir, 'plugins', 'example'))).toBe(false)
   })
 
   it('scaffolds a package.json carrying the runnable standalone dev deps', async () => {

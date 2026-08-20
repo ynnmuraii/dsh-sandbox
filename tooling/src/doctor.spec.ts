@@ -13,10 +13,12 @@ const VALID_MANIFEST = (commit: string): string =>
     '    dsh: 0.1.0-rc.8',
     '    cordis: 4.0.1',
     '    node: 1.0.0',
+    '    pnpm: 11.7.0',
     '  master:',
     '    repository: deepseek-ai/deepseek-harness',
     `    commit: ${commit}`,
     '    pnpm: 11.7.0',
+    '    node: ^22.19.0',
   ].join('\n')
 
 function tmpRoot(): string {
@@ -111,6 +113,55 @@ describe('doctor', () => {
     const res = await doctor({ root: dir })
     expect(canonicalHash).toBeTruthy()
     expect(res.some(r => r.level === 'error' && /stale shared context for plugin 'demo'/i.test(r.message))).toBe(
+      true,
+    )
+  })
+
+  it('reports a cataloged plugin whose Cordis deps mismatch its declared target pin', async () => {
+    const dir = tmpRoot()
+    const plugin = join(dir, 'plugins', 'mismatch')
+    mkdirSync(join(plugin, '.dsh-lab'), { recursive: true })
+    writeFileSync(
+      join(plugin, '.dsh-lab', 'plugin.yaml'),
+      ['name: mismatch', 'tracking: local', 'maturity: experiment', 'targets:', '  - next'].join('\n') + '\n',
+    )
+    writeFileSync(
+      join(plugin, 'package.json'),
+      JSON.stringify({
+        name: '@dsh-lab/dsh-plugin-mismatch',
+        peerDependencies: { '@deepseek-ai/cordis': '4.0.99' },
+        devDependencies: { '@deepseek-ai/cordis': '4.0.1' },
+      }),
+    )
+    writeFileSync(
+      join(dir, 'catalog.yaml'),
+      ['plugins:', '  mismatch:', '    path: plugins/mismatch', '    tracking: local', '    maturity: experiment'].join('\n') + '\n',
+    )
+    const res = await doctor({ root: dir })
+    expect(
+      res.some(r => r.level === 'error' && /plugin 'mismatch' peerDependencies\['@deepseek-ai\/cordis'\]/i.test(r.message)),
+    ).toBe(true)
+  })
+
+  it('reports a dirty cataloged submodule', async () => {
+    const dir = tmpRoot()
+    const sub = join(dir, 'plugins', 'demo')
+    mkdirSync(sub, { recursive: true })
+    initCommit(sub)
+    writeFileSync(join(sub, 'f'), 'changed') // dirt
+    writeFileSync(
+      join(dir, 'catalog.yaml'),
+      [
+        'plugins:',
+        '  demo:',
+        '    path: plugins/demo',
+        '    repository: https://github.com/example/demo',
+        '    tracking: submodule',
+        '    maturity: experiment',
+      ].join('\n') + '\n',
+    )
+    const res = await doctor({ root: dir })
+    expect(res.some(r => r.level === 'error' && /submodule 'plugins\/demo' working tree is dirty/i.test(r.message))).toBe(
       true,
     )
   })
