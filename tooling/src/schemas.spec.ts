@@ -46,7 +46,11 @@ plugins:
     path: plugins/b
     tracking: local
 `)
-    expect(catalog.plugins.a.tracking).toBe('submodule')
-    expect(catalog.plugins.b.tracking).toBe('local')
+    const a = catalog.plugins.a
+    const b = catalog.plugins.b
+    expect(a).toBeDefined()
+    expect(b).toBeDefined()
+    expect(a!.tracking).toBe('submodule')
+    expect(b!.tracking).toBe('local')
   })
 })
