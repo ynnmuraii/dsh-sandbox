@@ -17,6 +17,13 @@ describe('buildProfilePackageJson', () => {
     expect(out.dependencies['@deepseek-ai/dsh']).toBe('0.1.0-rc.8')
     expect(out).toHaveProperty('dsh')
   })
+
+  it('omits the launcher dependency when no pin is given (master composes against the built bin)', () => {
+    const spec = { name: 'dsh-profile-master', bundles: ['@deepseek-ai/dsh-base'] }
+    const out = buildProfilePackageJson(spec, {})
+    expect(out.dependencies).toEqual({})
+    expect(out.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base'])
+  })
 })
 
 describe('buildSourceOverlay', () => {
