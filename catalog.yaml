@@ -3,3 +3,8 @@ plugins:
     path: plugins/example
     tracking: local
     maturity: experiment
+  llm-oauth:
+    path: plugins/llm-oauth
+    tracking: local
+    maturity: experiment
+
