@@ -187,6 +187,27 @@ describe('UI session store', () => {
     expect(current).not.toHaveProperty('staleReasons')
   })
 
+  it('rejects direct state writes that remove an already-latched stale reason', () => {
+    const root = runtimeRoot()
+    const stale = state({ staleReasons: ['plugin-changed'] })
+    createUiSession({ runtimeRoot: root, state: stale })
+
+    expect(() => writeUiSession({
+      runtimeRoot: root,
+      state: state({
+        state: 'ready',
+        supervisorPid: 10,
+        childPid: 11,
+        url: 'http://127.0.0.1:49152',
+        updatedAt: '2026-08-24T12:00:01.000Z',
+      }),
+    })).toThrow(/stale|latched|plugin-changed|remove/i)
+
+    expect(readUiSession({ runtimeRoot: root, sessionId: SESSION }).staleReasons).toEqual([
+      'plugin-changed',
+    ])
+  })
+
   it('writes, reads, rejects replacement, and explicitly clears exact controls', () => {
     const root = runtimeRoot()
     createUiSession({ runtimeRoot: root, state: state() })
@@ -204,6 +225,18 @@ describe('UI session store', () => {
     })).toThrow(/exist|control|pending/i)
     clearUiControl({ runtimeRoot: root, sessionId: SESSION })
     expect(readUiControl({ runtimeRoot: root, sessionId: SESSION })).toBeUndefined()
+  })
+
+  it('refuses to clear corrupt control content and preserves it for diagnosis', () => {
+    const root = runtimeRoot()
+    const directory = createUiSession({ runtimeRoot: root, state: state() })
+    const path = join(directory, 'control.json')
+    writeFileSync(path, '{broken')
+
+    expect(() => clearUiControl({ runtimeRoot: root, sessionId: SESSION })).toThrow(
+      new RegExp(escapeRegex(path)),
+    )
+    expect(readFileSync(path, 'utf8')).toBe('{broken')
   })
 
   it('reports corrupt JSON with its exact path and never creates an unknown session', () => {
