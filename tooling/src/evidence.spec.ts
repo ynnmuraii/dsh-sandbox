@@ -157,6 +157,31 @@ describe('publishRunResult', () => {
     })).toThrow(/steps.*256|too many steps/i)
   })
 
+  it('redacts compound secret keys without destroying ordinary diagnostic assignments', () => {
+    const root = runsRoot()
+    const path = publishRunResult({
+      runsRoot: root,
+      result: result({
+        steps: [{
+          id: 'inspect',
+          status: 'fail',
+          durationMs: 1,
+          summary: 'client_secret=mysecret access_token=token-value ERROR=ENOENT HTTP=200 PATH=/tmp/plugin',
+        }],
+      }),
+    })
+    const stored = JSON.parse(readFileSync(path, 'utf8')) as VerifyRunResultV1
+    const summary = stored.steps[0]!.summary!
+
+    expect(summary).not.toContain('mysecret')
+    expect(summary).not.toContain('token-value')
+    expect(summary).toContain('client_secret=[REDACTED]')
+    expect(summary).toContain('access_token=[REDACTED]')
+    expect(summary).toContain('ERROR=ENOENT')
+    expect(summary).toContain('HTTP=200')
+    expect(summary).toContain('PATH=/tmp/plugin')
+  })
+
   it.each(['CON', 'con.txt', 'PRN', 'AUX', 'NUL', 'COM1', 'lpt9', 'run.'])(
     'rejects non-portable Windows run id %j',
     runId => {
@@ -248,6 +273,44 @@ describe('publishRunResult', () => {
       new RegExp(`${escapeRegex(lock)}.*(?:stale|orphan|remove|recover)`, 'i'),
     )
   })
+
+  it('reports an orphan temporary file with its exact actionable path', () => {
+    const root = runsRoot()
+    const value = result()
+    const temporary = join(
+      root,
+      pluginEvidenceKey(value.plugin),
+      value.runId,
+      `${value.runId}.tmp`,
+    )
+    mkdirSync(dirname(temporary), { recursive: true })
+    writeFileSync(temporary, 'orphan')
+
+    expect(() => publishRunResult({ runsRoot: root, result: value })).toThrow(
+      new RegExp(`${escapeRegex(temporary)}.*(?:stale|orphan|remove|recover)`, 'i'),
+    )
+    expect(existsSync(temporary)).toBe(true)
+  })
+
+  it('revalidates containment after a run directory is swapped before publication I/O', () => {
+    const root = runsRoot()
+    const outside = runsRoot()
+    const value = result()
+    let seamCalled = false
+
+    expect(() => publishRunResult({
+      runsRoot: root,
+      result: value,
+      beforePublishWrite(runDirectory) {
+        seamCalled = true
+        rmSync(runDirectory, { recursive: true, force: true })
+        symlinkSyncDirectory(outside, runDirectory)
+      },
+    })).toThrow(/symlink|junction|containment|changed|escape/i)
+    expect(seamCalled).toBe(true)
+    expect(existsSync(join(outside, `${value.runId}.tmp`))).toBe(false)
+    expect(existsSync(join(outside, 'result.json'))).toBe(false)
+  })
 })
 
 describe('loadRunResults', () => {
@@ -294,6 +357,27 @@ describe('loadRunResults', () => {
       'a',
       'B',
     ])
+  })
+
+  it('revalidates a finalized file after it is swapped immediately before reading', () => {
+    const root = runsRoot()
+    const value = result()
+    const path = publishRunResult({ runsRoot: root, result: value })
+    const outside = runsRoot()
+    writeFileSync(join(outside, 'result.json'), `${JSON.stringify(result({ result: 'fail' }))}\n`)
+    let seamCalled = false
+
+    expect(() => loadRunResults({
+      runsRoot: root,
+      pluginKey: pluginEvidenceKey(value.plugin),
+      beforeResultRead(resultPath) {
+        seamCalled = true
+        expect(resultPath).toBe(path)
+        rmSync(resultPath)
+        symlinkSyncDirectory(outside, resultPath)
+      },
+    })).toThrow(/symlink|changed|containment|regular file/i)
+    expect(seamCalled).toBe(true)
   })
 })
 
