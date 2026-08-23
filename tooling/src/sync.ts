@@ -3,7 +3,13 @@ import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 
 import { join } from 'node:path'
 import { loadCatalogFromFile } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
-import { contextDigest, normalizeGeneratedText } from './skill.js'
+import {
+  AGENT_SKILL_PATH,
+  SKILL_SOURCE_PATH,
+  contextDigest,
+  normalizeGeneratedText,
+  renderAgentSkill,
+} from './skill.js'
 
 export { contextDigest } from './skill.js'
 
@@ -44,6 +50,8 @@ export async function syncContext({ root, names, all }: SyncOptions): Promise<Sy
   const catalog = existsSync(catalogPath) ? loadCatalogFromFile(catalogPath) : { plugins: {} }
   const docs = contextDocuments(root)
   const snapshot = snapshotContext(root, docs)
+  const skillBody = readFileSync(rootPath(root, SKILL_SOURCE_PATH), 'utf8')
+  const skill = renderAgentSkill({ body: skillBody, documents: docs })
 
   const targets = all
     ? Object.keys(catalog.plugins)
@@ -72,6 +80,22 @@ export async function syncContext({ root, names, all }: SyncOptions): Promise<Sy
     if (changed) writeFileSync(path, snapshot)
     results.push({ kind: 'plugin-context', name, changed, path })
   }
+
+  const skillPath = rootPath(root, AGENT_SKILL_PATH)
+  const existingSkill = existsSync(skillPath) ? readFileSync(skillPath, 'utf8') : null
+  const skillChanged = existingSkill === null
+    ? true
+    : normalizeGeneratedText(existingSkill) !== normalizeGeneratedText(skill)
+  if (skillChanged) {
+    mkdirSync(join(skillPath, '..'), { recursive: true })
+    writeFileSync(skillPath, skill)
+  }
+  results.push({
+    kind: 'agent-skill',
+    name: 'dsh-plugin-development',
+    changed: skillChanged,
+    path: skillPath,
+  })
   return results
 }
 

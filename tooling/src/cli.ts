@@ -22,7 +22,7 @@ Commands:
   status <name>|--path P [--json]      derive current verification status
     exit 0 all applicable claims current/pass; exit 2 any applicable stale/not-run/failed;
     exit 1 selector/tooling error
-  sync-context [name|--all] regenerate shared-context snapshots
+  sync-context [name|--all] regenerate shared-context projections and the agent skill
   doctor                   validate toolchain, catalog, and target pins
   upstream check           compare the pinned master commit with the remote
   upstream update [--verify] explicitly adopt the fetched master commit
