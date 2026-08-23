@@ -270,13 +270,42 @@ describe('path-first live development', () => {
       const boot = JSON.parse(readFileSync(capturePath, 'utf8')) as Record<string, unknown>
       expect(boot.argv).toEqual(['--profile', 'external-plugin-next-dev', '--patch', overlay])
       expect(boot.home).toBe(runtime.replaceAll('\\', '/'))
-      expect(boot.nodeOptions).toMatch(/tsx\/esm/)
+      expect(boot.nodeOptions).toContain(`--import=${resolveTsxLoader()}`)
       expect(readdirSync(externalRoot, { recursive: true }).map(String).sort()).toEqual(before)
       expect(existsSync(join(externalRoot, '.dsh-lab'))).toBe(false)
     } finally {
       vi.mocked(pnpmCommand).mockReset()
       rmSync(root, { recursive: true, force: true })
       rmSync(externalRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an unsafe runtime identity before creating any forge or plugin files', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dev-unsafe-root-'))
+    const sourcePath = mkdtempSync(join(tmpdir(), 'dsh-dev-unsafe-plugin-'))
+    try {
+      mkdirSync(join(sourcePath, 'src'))
+      writeFileSync(join(sourcePath, 'src', 'index.ts'), 'export {}\n')
+      const plugin: PluginRef = {
+        sourcePath,
+        packageName: '@fixture/safe-package',
+        metadata: {
+          name: '../../outside',
+          tracking: 'local',
+          maturity: 'experiment',
+          targets: ['next'],
+        },
+      }
+      const rootBefore = readdirSync(root, { recursive: true }).map(String).sort()
+      const pluginBefore = readdirSync(sourcePath, { recursive: true }).map(String).sort()
+
+      await expect(devPlugin({ root, plugin, target: 'next' })).rejects.toThrow(/invalid|unsafe.*(?:name|identity)|runtime.*identity/i)
+
+      expect(readdirSync(root, { recursive: true }).map(String).sort()).toEqual(rootBefore)
+      expect(readdirSync(sourcePath, { recursive: true }).map(String).sort()).toEqual(pluginBefore)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(sourcePath, { recursive: true, force: true })
     }
   })
 })
@@ -300,6 +329,32 @@ describe('profile boundaries', () => {
     expect(profileName('example', 'next', 'verify', 'run-123')).toBe(
       'example-next-verify-run-123',
     )
+  })
+
+  it.each(['', '.', '..', '../outside', '..\\outside', '/absolute', 'line\nbreak'])('rejects unsafe profile identity %j', name => {
+    expect(() => profileName(name, 'next', 'dev')).toThrow(/invalid|unsafe.*(?:name|identity)|profile.*name/i)
+  })
+
+  it('rejects an unsafe packed-target identity before creating a profile', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-verify-unsafe-name-'))
+    try {
+      await expect(verifyPackedTarget({
+        root,
+        pluginName: '../../outside',
+        target: 'master',
+        tarball: join(root, 'plugin.tgz'),
+        masterBin: join(root, 'unused.mjs'),
+        compat: {
+          targets: {
+            next: { dsh: '0.1.1-rc.2', cordis: '4.0.1', node: '22.20.0', pnpm: '11.7.0' },
+            master: { repository: 'deepseek-ai/deepseek-harness', commit: '1'.repeat(40), node: '^22.19.0', pnpm: '11.7.0' },
+          },
+        },
+      })).rejects.toThrow(/invalid|unsafe.*(?:name|identity)|profile.*name/i)
+      expect(existsSync(join(root, '.lab'))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('materializes only target-owned build policy in the profile workspace', () => {
