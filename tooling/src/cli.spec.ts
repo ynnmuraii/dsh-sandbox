@@ -253,6 +253,22 @@ describe('verify CLI', () => {
     expect(JSON.parse(output.logs[0]!)).toEqual(result)
   })
 
+  it('suppresses incidental verifier progress so JSON stdout remains one document', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(standalone)
+    const result = verifyResult()
+    vi.mocked(verifyPlugin).mockImplementation(async () => {
+      console.log('target launcher progress')
+      return result
+    })
+
+    expect(
+      await runCli(['verify', '--path', 'A:/standalone', '--target', 'next', '--json']),
+    ).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    expect(JSON.parse(output.logs[0]!)).toEqual(result)
+  })
+
   it('prints concise step outcomes in text mode', async () => {
     const output = captureConsole()
     vi.mocked(resolvePluginRef).mockReturnValue(catalogPlugin)

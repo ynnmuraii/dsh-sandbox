@@ -200,11 +200,43 @@ describe('verifyPlugin orchestration', () => {
 
     const result = await verifyPlugin(options(deps, 'all'))
 
+    expect(deps.inspectPlugin).toHaveBeenCalledTimes(2)
+    expect(deps.inspectPlugin).toHaveBeenNthCalledWith(1, {
+      root: 'A:/lab',
+      plugin: options(deps, 'all').plugin,
+      target: 'next',
+    })
+    expect(deps.inspectPlugin).toHaveBeenNthCalledWith(2, {
+      root: 'A:/lab',
+      plugin: options(deps, 'all').plugin,
+      target: 'master',
+    })
     expect(events).toContain('target:next')
     expect(events).toContain('target:master')
     expect(result.result).toBe('fail')
     expect(result.targets.next.result).toBe('fail')
     expect(result.targets.master).toMatchObject({ commit: '1'.repeat(40), result: 'pass' })
+  })
+
+  it('inspects both explicit all targets even when a standalone plugin has no metadata', async () => {
+    const events: string[] = []
+    const deps = dependencies(events)
+    const standalone = { sourcePath: 'A:/plugin', packageName: '@fixture/demo' }
+
+    await verifyPlugin({
+      root: 'A:/lab',
+      plugin: standalone,
+      target: 'all',
+      runsRoot: 'A:/runs',
+      dependencies: deps,
+    })
+
+    expect(deps.inspectPlugin).toHaveBeenNthCalledWith(1, {
+      root: 'A:/lab', plugin: standalone, target: 'next',
+    })
+    expect(deps.inspectPlugin).toHaveBeenNthCalledWith(2, {
+      root: 'A:/lab', plugin: standalone, target: 'master',
+    })
   })
 
   it('records cleanup failure as a failed result and still publishes exactly once', async () => {

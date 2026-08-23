@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -76,6 +76,33 @@ describe('verifyAllTargets', () => {
         throw new Error(`synthetic ${target}`)
       }),
     ).rejects.toThrow(/next: synthetic next[\s\S]*master: synthetic master/)
+  })
+
+  it('removes a packed-target profile when setup fails before launcher execution', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-packed-target-cleanup-'))
+    try {
+      await expect(verifyPackedTarget({
+        root,
+        pluginName: 'demo',
+        target: 'next',
+        tarball: join(root, 'demo.tgz'),
+        compat: {
+          targets: {
+            next: { cordis: '4.0.1', node: '22.20.0', pnpm: '11.7.0' },
+            master: {
+              repository: 'deepseek-ai/deepseek-harness',
+              commit: '1'.repeat(40),
+              node: '^22.19.0',
+              pnpm: '11.7.0',
+            },
+          },
+        },
+      })).rejects.toThrow(/pinned dsh|requires.*dsh/i)
+      const profiles = join(root, '.lab', 'runtime', 'profiles')
+      expect(existsSync(profiles) ? readdirSync(profiles) : []).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 

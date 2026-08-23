@@ -362,6 +362,19 @@ describe('loadRunResults', () => {
     )
   })
 
+  it('publishes and loads a master-only target map without inventing next', () => {
+    const root = runsRoot()
+    const masterOnly: VerifyRunResultV1 = result({
+      targets: { master: { commit: '1'.repeat(40), result: 'pass' } },
+    })
+    const key = pluginEvidenceKey(masterOnly.plugin)
+
+    publishRunResult({ runsRoot: root, result: masterOnly })
+
+    expect(loadRunResults({ runsRoot: root, pluginKey: key })).toEqual([masterOnly])
+    expect(loadRunResults({ runsRoot: root, pluginKey: key })[0]!.targets).not.toHaveProperty('next')
+  })
+
   it('uses a locale-independent code-point tie-breaker for equal completion times', () => {
     const root = runsRoot()
     const timestamp = '2026-08-23T10:00:01.000Z'
