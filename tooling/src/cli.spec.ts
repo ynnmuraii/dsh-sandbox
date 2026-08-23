@@ -99,6 +99,10 @@ describe('plugin selector parsing', () => {
     )
   })
 
+  it.each(['', '   '])('rejects an empty --path value: %j', (path) => {
+    expect(() => parsePluginSelector(['--path', path])).toThrow(/--path requires a value/i)
+  })
+
   it('rejects conflicting positional names', () => {
     expect(() => parsePluginSelector(['demo', 'other'])).toThrow(/conflicting positional names/i)
   })

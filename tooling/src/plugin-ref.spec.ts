@@ -91,6 +91,12 @@ describe('resolvePluginRef', () => {
     expect(() => resolvePluginRef({ root: fixtureRoot(), selector })).toThrow(message)
   })
 
+  it.each(['', '   '])('rejects an empty path selector: %j', (path) => {
+    expect(() => resolvePluginRef({ root: fixtureRoot(), selector: { path } })).toThrow(
+      /path must not be empty/i,
+    )
+  })
+
   it('reports a missing catalog name', () => {
     const root = fixtureRoot()
     writeFileSync(join(root, 'catalog.yaml'), 'plugins: {}\n')
