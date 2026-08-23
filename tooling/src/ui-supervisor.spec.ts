@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -14,9 +14,12 @@ import {
   parseDshReadyUrl,
   posixProcessGroup,
   runUiSupervisor,
+  stopOwnedChildTree,
   windowsTreeKillArgs,
+  writeBoundedSupervisorLog,
   type UiChildExit,
   type UiChildHandle,
+  type UiProcessTreeDependencies,
   type UiSupervisorDependencies,
   type UiSupervisorRequestV1,
 } from './ui-supervisor.js'
@@ -96,6 +99,7 @@ function dependencies(plan: UiRuntimePlan, child = fakeChild()) {
     prepareRuntime: vi.fn(async () => plan),
     spawnChild: vi.fn(() => child.handle),
     stopChildTree,
+    writeLog: writeBoundedSupervisorLog,
     now: () => `2026-08-24T12:00:${String(++tick).padStart(2, '0')}.000Z`,
     sleep: ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 2))),
     pollIntervalMs: 1,
@@ -141,6 +145,41 @@ describe('parseDshReadyUrl', () => {
       expect(() => windowsTreeKillArgs(pid)).toThrow(/pid|positive|integer/i)
       expect(() => posixProcessGroup(pid)).toThrow(/pid|positive|integer/i)
     }
+  })
+
+  it('escalates an owned POSIX process group and fails if close stays unconfirmed', async () => {
+    const child = fakeChild().handle
+    const signalGroup = vi.fn()
+    const waitForExit = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+    const deps: UiProcessTreeDependencies = {
+      platform: 'posix',
+      taskkill: vi.fn(),
+      signalGroup,
+      waitForExit,
+      termGraceMs: 5,
+      killGraceMs: 5,
+    }
+    await stopOwnedChildTree(child, deps)
+    expect(signalGroup.mock.calls).toEqual([
+      [-4242, 'SIGTERM'],
+      [-4242, 'SIGKILL'],
+    ])
+
+    waitForExit.mockReset()
+    waitForExit.mockResolvedValue(false)
+    await expect(stopOwnedChildTree(child, deps)).rejects.toThrow(/close|exit|timeout|terminate/i)
+  })
+
+  it('refuses to write a bounded log through an externally linked file', () => {
+    const current = fixture()
+    const canary = join(current.root, 'outside.log')
+    const log = join(current.sessionDir, 'supervisor.log')
+    writeFileSync(canary, 'do-not-change')
+    linkSync(canary, log)
+    expect(() => writeBoundedSupervisorLog(current.sessionDir, 'secret output', 32)).toThrow(/link|unsafe|regular/i)
+    expect(readFileSync(canary, 'utf8')).toBe('do-not-change')
   })
 })
 
@@ -203,13 +242,16 @@ describe('runUiSupervisor', () => {
     }
     child.exit({ code: 7, signal: null })
     await waitFor(() => readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).state === 'crashed', 'crashed')
-    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).error).toMatch(/exit|code 7|crash/i)
+    const crashed = readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })
     writeUiControl({
       runtimeRoot: current.runtimeRoot,
       sessionId: SESSION,
       control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
     })
     await running
+    expect(crashed.error).toMatch(/exit|code 7|crash/i)
+    expect(crashed).not.toHaveProperty('supervisorPid')
+    expect(crashed).not.toHaveProperty('childPid')
     expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).state).toBe('aborted')
     expect(stopChildTree).not.toHaveBeenCalled()
   })
@@ -249,6 +291,33 @@ describe('runUiSupervisor', () => {
       control: { schemaVersion: 1, action: 'finish', requestedAt: '2026-08-24T12:01:00.000Z' },
     })
     await expect(running).rejects.toThrow(/injected stop failure|cleanup/i)
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'crashed',
+      cleanup: 'fail',
+    })
+    expect(existsSync(current.plan.runtimeHome)).toBe(true)
+  })
+
+  it('turns an asynchronous diagnostic-log failure into owned cleanup failure', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.writeLog = vi.fn(() => { throw new Error('injected log failure') })
+    const running = runUiSupervisor(current.request, bundle.deps)
+    const fallback = setTimeout(() => {
+      try {
+        writeUiControl({
+          runtimeRoot: current.runtimeRoot,
+          sessionId: SESSION,
+          control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+        })
+      } catch {
+        // The expected failure path may already have made the lease diagnostic-only.
+      }
+    }, 50)
+    bundle.child.stderr.write('trigger log write\n')
+    await expect(running).rejects.toThrow(/log failure|diagnostic|cleanup/i)
+    clearTimeout(fallback)
+    expect(bundle.stopChildTree).toHaveBeenCalledTimes(1)
     expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
       state: 'crashed',
       cleanup: 'fail',
