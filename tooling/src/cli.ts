@@ -7,6 +7,7 @@ import { checkUpstream, updateUpstream } from './upstream-update.js'
 import { parsePluginSelector, resolvePluginRef } from './plugin-ref.js'
 import { inspectPlugin } from './inspect.js'
 import { verifyPlugin } from './verify.js'
+import { derivePluginStatus, type PluginStatus, type StatusClaim } from './status.js'
 
 export { parsePluginSelector } from './plugin-ref.js'
 
@@ -18,6 +19,7 @@ Commands:
   dev <name> --target T    run source overlay + HMR against target (next|master)
   verify <name> [--target T] [--json] run plugin checks + target compatibility
   inspect <name> [--target T] inspect standalone plugin contracts
+  status <name> [--json] derive current verification status (exit 2 means incomplete)
   sync-context [name|--all] regenerate shared-context snapshots
   doctor                   validate toolchain, catalog, and target pins
   upstream check           compare the pinned master commit with the remote
@@ -130,6 +132,27 @@ export async function runCli(argv: string[]): Promise<number> {
           }
         }
         return result.ok ? 0 : 1
+      } catch (e) {
+        console.error(`error: ${(e as Error).message}`)
+        return 1
+      }
+    }
+    case 'status': {
+      if (rest.length === 0) {
+        console.error('error: usage: lab status <name> [--json]')
+        return 1
+      }
+      try {
+        const parsed = parsePluginSelector(rest)
+        const flags = parseStatusFlags(parsed.rest)
+        const plugin = resolvePluginRef({ root: process.cwd(), selector: parsed.selector })
+        const result = derivePluginStatus({ root: process.cwd(), plugin })
+        if (flags.json) {
+          console.log(JSON.stringify(result))
+        } else {
+          printStatus(result)
+        }
+        return statusExitCode(result)
       } catch (e) {
         console.error(`error: ${(e as Error).message}`)
         return 1
@@ -286,6 +309,39 @@ function parseInspectFlags(rest: string[]): { target?: 'next' | 'master'; json: 
     throw new Error(`unknown inspect flag '${flag}'`)
   }
   return target === undefined ? { json } : { target, json }
+}
+
+function parseStatusFlags(rest: string[]): { json: boolean } {
+  let json = false
+  for (const flag of rest) {
+    if (flag === '--json') {
+      if (json) throw new Error('--json may be specified only once')
+      json = true
+      continue
+    }
+    throw new Error(`unknown status flag '${flag}'`)
+  }
+  return { json }
+}
+
+function printStatus(result: PluginStatus): void {
+  console.log(`Plugin: ${result.plugin.packageName}`)
+  console.log(`Structure: ${formatClaim(result.structure)}`)
+  console.log(`Bundle: ${formatClaim(result.bundle)}`)
+  for (const [target, claim] of Object.entries(result.targets)) {
+    console.log(`DSH ${target}: ${formatClaim(claim)}`)
+  }
+  console.log(`UI review: ${formatClaim(result.ui)}`)
+}
+
+function formatClaim(claim: StatusClaim): string {
+  const detail = claim.reasons && claim.reasons.length > 0 ? ` - ${claim.reasons.join(', ')}` : ''
+  return `${claim.state.toUpperCase()}${detail}`
+}
+
+function statusExitCode(result: PluginStatus): number {
+  const claims = [result.structure, result.bundle, ...Object.values(result.targets), result.ui]
+  return claims.some(claim => claim.state !== 'pass' && claim.state !== 'not-applicable') ? 2 : 0
 }
 
 // Allow direct node execution.
