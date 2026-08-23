@@ -398,11 +398,33 @@ function sanitizeSummary(summary: string): string {
     '[REDACTED]',
   )
   sanitized = sanitized.replace(
-    /\b((?:client[_-]?secret|server[_-]?secret|consumer[_-]?secret|client[_-]?token|server[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|auth[_-]?token|api[_-]?key|private[_-]?key|secret[_-]?key|token|password|passwd|pwd|authorization|credential)s?)\b\s*([:=])\s*(?:"[^"]*"|'[^']*'|Bearer\s+[^\s,;]+|[^\s,;]+)/gi,
-    (_match, key: string, separator: string) => `${key}${separator}[REDACTED]`,
+    /\b([A-Za-z][A-Za-z0-9_-]*)\b\s*([:=])\s*(?:"[^"]*"|'[^']*'|Bearer\s+[^\s,;]+|[^\s,;]+)/g,
+    (match: string, key: string, separator: string) =>
+      isSensitiveAssignmentKey(key) ? `${key}${separator}[REDACTED]` : match,
   )
   sanitized = sanitized.replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
   return Array.from(sanitized).slice(0, MAX_SUMMARY_LENGTH).join('')
+}
+
+function isSensitiveAssignmentKey(key: string): boolean {
+  const components = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map(component => component.toLowerCase())
+  const sensitiveComponents = new Set([
+    'password',
+    'passwd',
+    'pwd',
+    'secret',
+    'token',
+    'authorization',
+    'credential',
+    'credentials',
+  ])
+  if (components.some(component => sensitiveComponents.has(component))) return true
+  return components.includes('api') && components.includes('key') ||
+    components.includes('private') && components.includes('key')
 }
 
 function normalizeSourcePath(sourcePath: string): string {
