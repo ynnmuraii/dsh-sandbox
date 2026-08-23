@@ -470,8 +470,59 @@ function hasPrivateUpstreamImport(content: string): boolean {
 }
 
 interface SourceToken {
-  kind: 'identifier' | 'string' | 'punctuation' | 'newline'
+  kind: 'identifier' | 'string' | 'regex' | 'punctuation' | 'newline'
   value: string
+}
+
+const REGEX_PREFIX_KEYWORDS = new Set([
+  'await',
+  'case',
+  'delete',
+  'do',
+  'else',
+  'in',
+  'instanceof',
+  'new',
+  'of',
+  'return',
+  'throw',
+  'typeof',
+  'void',
+  'yield',
+])
+
+function canStartRegex(tokens: SourceToken[]): boolean {
+  const previous = tokens[tokens.length - 1]
+  if (previous === undefined || previous.kind === 'newline') return true
+  if (previous.kind === 'identifier') return REGEX_PREFIX_KEYWORDS.has(previous.value)
+  if (previous.kind === 'string' || previous.kind === 'regex') return false
+  return previous.value !== ')' && previous.value !== ']' && previous.value !== '}'
+}
+
+function regexLiteralEnd(content: string, start: number): number | undefined {
+  let inCharacterClass = false
+  for (let i = start + 1; i < content.length; i += 1) {
+    const character = content[i]!
+    if (character === '\\') {
+      i += 1
+      continue
+    }
+    if (character === '\n' || character === '\r') return undefined
+    if (character === '[') {
+      inCharacterClass = true
+      continue
+    }
+    if (character === ']' && inCharacterClass) {
+      inCharacterClass = false
+      continue
+    }
+    if (character === '/' && !inCharacterClass) {
+      i += 1
+      while (i < content.length && /[A-Za-z]/.test(content[i]!)) i += 1
+      return i
+    }
+  }
+  return undefined
 }
 
 function tokenizeSource(content: string): SourceToken[] {
@@ -511,6 +562,14 @@ function tokenizeCode(
       while (i < content.length && !(content[i] === '*' && content[i + 1] === '/')) i += 1
       if (i < content.length) i += 2
       continue
+    }
+    if (character === '/' && canStartRegex(tokens)) {
+      const regexEnd = regexLiteralEnd(content, i)
+      if (regexEnd !== undefined) {
+        tokens.push({ kind: 'regex', value: '' })
+        i = regexEnd
+        continue
+      }
     }
     if (character === "'" || character === '"' || character === '`') {
       if (character === '`') {
