@@ -1,5 +1,5 @@
 import { dump as dumpYaml, load as loadYaml } from 'js-yaml'
-import { existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve, win32 } from 'node:path'
 import { pnpm, type RunOpts } from './proc.js'
 import type { RunStepResult } from './evidence.js'
@@ -98,16 +98,12 @@ function validatePrerequisites(
   workspacePath: string,
   allowBuilds: Record<string, boolean>,
 ): void {
-  if (!statIsDirectory(workspacePath)) {
-    throw new Error(`package verification workspace is not a directory: ${workspacePath}`)
-  }
+  assertPreflightPath(workspacePath, workspacePath, 'workspace', 'directory')
 
   for (const file of ['pnpm-lock.yaml', 'pnpm-workspace.yaml', 'package.json']) {
     const path = resolve(workspacePath, file)
-    if (!existsSync(path) || !statIsFile(path)) {
-      const label = file === 'pnpm-lock.yaml' ? 'lockfile' : file === 'pnpm-workspace.yaml' ? 'workspace boundary' : file
-      throw new Error(`package verification workspace is missing ${label} (${file})`)
-    }
+    const label = file === 'pnpm-lock.yaml' ? 'lockfile' : file === 'pnpm-workspace.yaml' ? 'workspace boundary' : file
+    assertPreflightPath(workspacePath, path, label, 'file')
   }
 
   const packagePath = resolve(workspacePath, 'package.json')
@@ -217,19 +213,45 @@ function attachPrerequisiteSteps(error: unknown, steps: RunStepResult[]): Error 
   return failure
 }
 
-function statIsDirectory(path: string): boolean {
+function assertPreflightPath(
+  workspacePath: string,
+  targetPath: string,
+  label: string,
+  expected: 'directory' | 'file',
+): void {
+  let workspaceReal: string
+  let targetReal: string
   try {
-    return statSync(path).isDirectory()
-  } catch {
-    return false
-  }
-}
+    const workspaceStat = lstatSync(workspacePath)
+    if (workspaceStat.isSymbolicLink() || !workspaceStat.isDirectory()) {
+      throw new Error(`workspace must be a real directory (not a symlink or junction): ${workspacePath}`)
+    }
+    workspaceReal = realpathSync(workspacePath)
 
-function statIsFile(path: string): boolean {
-  try {
-    return statSync(path).isFile()
-  } catch {
-    return false
+    const targetStat = lstatSync(targetPath)
+    if (targetStat.isSymbolicLink()) {
+      throw new Error(`${label} must be a real path (not a symlink or junction): ${targetPath}`)
+    }
+    if (expected === 'directory' ? !targetStat.isDirectory() : !targetStat.isFile()) {
+      throw new Error(`${label} has the wrong type; expected a ${expected}: ${targetPath}`)
+    }
+    targetReal = realpathSync(targetPath)
+  } catch (error) {
+    if (error instanceof Error && /real directory|real path|wrong type/.test(error.message)) throw error
+    throw new Error(`package verification ${label} is missing or inaccessible: ${targetPath}`, { cause: error })
+  }
+
+  const child = relative(workspaceReal, targetReal)
+  const isRoot = resolve(workspacePath) === resolve(targetPath)
+  if (
+    (!child && !isRoot) ||
+    child === '..' ||
+    child.startsWith(`..${'\\'}`) ||
+    child.startsWith(`..${'/'}`) ||
+    isAbsolute(child) ||
+    win32.isAbsolute(child)
+  ) {
+    throw new Error(`package verification ${label} is outside workspace: ${targetPath}`)
   }
 }
 
