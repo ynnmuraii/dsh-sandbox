@@ -1,10 +1,11 @@
-import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadCatalogFromFile } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
-import { normalizeGeneratedText } from './skill.js'
+import { contextDigest, normalizeGeneratedText } from './skill.js'
+
+export { contextDigest } from './skill.js'
 
 export interface SyncedResult {
   kind: 'plugin-context' | 'agent-skill'
@@ -20,18 +21,6 @@ export interface SyncOptions {
 }
 
 const SNAPSHOT_HEADER = '# Shared context snapshot\n'
-
-export function contextDigest(reads: readonly string[]): string {
-  const hash = createHash('sha256')
-  for (const read of reads) {
-    const normalized = normalizeGeneratedText(read)
-    const bytes = Buffer.from(normalized, 'utf8')
-    hash.update(String(bytes.byteLength))
-    hash.update('\0')
-    hash.update(bytes)
-  }
-  return hash.digest('hex').slice(0, 12)
-}
 
 export function snapshotContext(root: string, reads: string[]): string {
   const digest = contextDigest(reads)

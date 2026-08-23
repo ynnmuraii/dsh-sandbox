@@ -1,10 +1,21 @@
-import { contextDigest } from './sync.js'
+import { createHash } from 'node:crypto'
 
 export const AGENT_SKILL_PATH = '.agents/skills/dsh-plugin-development/SKILL.md'
 export const SKILL_SOURCE_PATH = 'context/dsh-plugin-development-skill.md'
 
 export function normalizeGeneratedText(text: string): string {
   return text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
+}
+
+export function contextDigest(reads: readonly string[]): string {
+  const hash = createHash('sha256')
+  for (const read of reads) {
+    const bytes = Buffer.from(normalizeGeneratedText(read), 'utf8')
+    hash.update(String(bytes.byteLength))
+    hash.update('\0')
+    hash.update(bytes)
+  }
+  return hash.digest('hex').slice(0, 12)
 }
 
 export function renderAgentSkill(input: {
@@ -32,6 +43,7 @@ export function renderAgentSkill(input: {
     '# DSH Plugin Development',
     '',
     note,
+    '> regenerate with `pnpm lab sync-context`',
     version,
     '',
     remainder,
