@@ -3,6 +3,7 @@ import { parsePluginSelector, runCli } from './cli.js'
 import { checkUpstream, updateUpstream } from './upstream-update.js'
 import { resolvePluginRef } from './plugin-ref.js'
 import { inspectPlugin } from './inspect.js'
+import { verifyPlugin } from './verify.js'
 
 vi.mock('./upstream-update.js', () => ({
   checkUpstream: vi.fn(),
@@ -15,6 +16,7 @@ vi.mock('./plugin-ref.js', async importOriginal => ({
 }))
 
 vi.mock('./inspect.js', () => ({ inspectPlugin: vi.fn() }))
+vi.mock('./verify.js', () => ({ verifyPlugin: vi.fn() }))
 
 const PINNED = '1'.repeat(40)
 const REMOTE = '2'.repeat(40)
@@ -25,6 +27,7 @@ afterEach(() => {
   vi.mocked(updateUpstream).mockReset()
   vi.mocked(resolvePluginRef).mockReset()
   vi.mocked(inspectPlugin).mockReset()
+  vi.mocked(verifyPlugin).mockReset()
 })
 
 function captureConsole() {
@@ -190,5 +193,109 @@ describe('inspect CLI', () => {
     expect(await runCli(['inspect', '--path', 'A:/standalone', ...flags])).toBe(1)
     expect(output.errors.join('\n')).toMatch(/error:/i)
     expect(inspectPlugin).not.toHaveBeenCalled()
+  })
+})
+
+describe('verify CLI', () => {
+  const standalone = { sourcePath: 'A:/standalone', packageName: '@fixture/standalone' }
+  const catalogPlugin = {
+    ...standalone,
+    catalogName: 'demo',
+    metadata: { name: 'demo', tracking: 'local' as const, maturity: 'experiment', targets: ['next'] },
+  }
+
+  function verifyResult(result: 'pass' | 'fail' = 'pass') {
+    return {
+      schemaVersion: 1 as const,
+      runId: 'verify-1',
+      operation: 'verify' as const,
+      result,
+      plugin: { ...standalone, digest: `sha256:${'a'.repeat(64)}` as const },
+      targets: { next: { dsh: '0.1.1-rc.2', result: result === 'pass' ? 'pass' as const : 'fail' as const } },
+      lab: { contextDigest: `sha256:${'b'.repeat(64)}` },
+      environment: { node: '22.20.0', pnpm: '11.7.0', platform: process.platform },
+      steps: [
+        { id: 'inspect', status: 'pass' as const, durationMs: 1 },
+        { id: 'target:next', status: result === 'pass' ? 'pass' as const : 'fail' as const, durationMs: 2 },
+      ],
+      cleanup: 'pass' as const,
+      startedAt: '2026-08-23T10:00:00.000Z',
+      finishedAt: '2026-08-23T10:00:01.000Z',
+    }
+  }
+
+  it.each([
+    [['verify', '--path', 'A:/standalone', '--target', 'next'], standalone],
+    [['verify', 'demo', '--target', 'next'], catalogPlugin],
+  ] as const)('routes path and catalog selectors through the same verifier: %j', async (argv, resolved) => {
+    captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(resolved)
+    vi.mocked(verifyPlugin).mockResolvedValue(verifyResult())
+
+    expect(await runCli([...argv])).toBe(0)
+    expect(verifyPlugin).toHaveBeenCalledWith({
+      root: process.cwd(),
+      plugin: resolved,
+      target: 'next',
+    })
+  })
+
+  it('prints exactly one finalized JSON document and maps failed result to exit 1', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(standalone)
+    const result = verifyResult('fail')
+    vi.mocked(verifyPlugin).mockResolvedValue(result)
+
+    expect(
+      await runCli(['verify', '--path', 'A:/standalone', '--target', 'next', '--json']),
+    ).toBe(1)
+    expect(output.logs).toHaveLength(1)
+    expect(JSON.parse(output.logs[0]!)).toEqual(result)
+  })
+
+  it('prints concise step outcomes in text mode', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(catalogPlugin)
+    vi.mocked(verifyPlugin).mockResolvedValue(verifyResult())
+
+    expect(await runCli(['verify', 'demo', '--target', 'next'])).toBe(0)
+    expect(output.logs).toEqual([
+      '[pass] inspect (1ms)',
+      '[pass] target:next (2ms)',
+      'verify: pass; cleanup: pass',
+    ])
+  })
+
+  it('requires an explicit target for a standalone plugin without metadata', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(standalone)
+
+    expect(await runCli(['verify', '--path', 'A:/standalone'])).toBe(1)
+    expect(output.errors.join('\n')).toMatch(/--target.*required|target.*metadata/i)
+    expect(verifyPlugin).not.toHaveBeenCalled()
+  })
+
+  it('uses a single metadata target when CLI target is omitted', async () => {
+    captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(catalogPlugin)
+    vi.mocked(verifyPlugin).mockResolvedValue(verifyResult())
+
+    expect(await runCli(['verify', 'demo'])).toBe(0)
+    expect(verifyPlugin).toHaveBeenCalledWith(expect.objectContaining({ target: 'next' }))
+  })
+
+  it.each([
+    ['--target', 'wat'],
+    ['--target'],
+    ['--target', 'next', '--target', 'master'],
+    ['--json', '--json', '--target', 'next'],
+    ['--wat', '--target', 'next'],
+  ])('rejects invalid verify flags without invocation: %j', async (...flags) => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(standalone)
+
+    expect(await runCli(['verify', '--path', 'A:/standalone', ...flags])).toBe(1)
+    expect(output.errors.join('\n')).toMatch(/error:/i)
+    expect(verifyPlugin).not.toHaveBeenCalled()
   })
 })

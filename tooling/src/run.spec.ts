@@ -15,6 +15,7 @@ import {
   buildProfileWorkspaceYaml,
   profileName,
   resolveTsxLoader,
+  verifyPackedTarget,
 } from './run.js'
 
 describe('resolveSourceOverlay', () => {
@@ -52,6 +53,10 @@ describe('buildProfilePackageJson', () => {
 })
 
 describe('verifyAllTargets', () => {
+  it('exports packed-target verification as the outer verifier seam', () => {
+    expect(verifyPackedTarget).toBeTypeOf('function')
+  })
+
   it('dispatches next then master and does not skip master when next fails', async () => {
     const calls: string[] = []
     await expect(
