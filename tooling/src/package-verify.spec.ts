@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
@@ -43,6 +43,8 @@ interface Call {
 function runner(opts: {
   pack?: string
   failAt?: string
+  failureMessage?: string
+  createTarball?: boolean
   onCall?: (args: string[]) => void
 } = {}): { runner: PackageVerifyRunner; calls: Call[] } {
   const calls: Call[] = []
@@ -53,11 +55,24 @@ function runner(opts: {
         calls.push({ args: [...args], cwd: runOpts.cwd })
         opts.onCall?.(args)
         if (args[0] === opts.failAt) {
-          throw new Error('command failed\nTOKEN=super-secret-value')
+          throw new Error(opts.failureMessage ?? 'command failed\nTOKEN=super-secret-value')
         }
-        return args[0] === 'pack'
-          ? (opts.pack ?? JSON.stringify([{ filename: 'fixture-demo-0.0.0.tgz' }]))
-          : ''
+        if (args[0] !== 'pack') return ''
+        const output = opts.pack ?? JSON.stringify([{ filename: 'fixture-demo-0.0.0.tgz' }])
+        if (opts.createTarball !== false) {
+          try {
+            const parsed = JSON.parse(output) as Array<{ filename?: unknown }>
+            const filename = parsed.length === 1 ? parsed[0]?.filename : undefined
+            if (
+              typeof filename === 'string' &&
+              !isAbsolute(filename) &&
+              !filename.replaceAll('\\', '/').split('/').includes('..')
+            ) writeFileSync(join(runOpts.cwd!, filename), 'tarball bytes')
+          } catch {
+            // Malformed-output tests intentionally provide non-JSON.
+          }
+        }
+        return output
       },
     },
   }
@@ -100,6 +115,10 @@ describe('verifyPackageInWorkspace', () => {
   it('merges normalized, sorted target allowBuilds into only the copied workspace policy', () => {
     const workspacePath = workspace()
     const subject = runner()
+    writeFileSync(
+      join(workspacePath, 'pnpm-workspace.yaml'),
+      'packages:\n  - .\nsharedWorkspaceLockfile: false\nallowBuilds:\n  source-owned: true\n',
+    )
 
     verifyPackageInWorkspace({
       workspacePath,
@@ -114,6 +133,7 @@ describe('verifyPackageInWorkspace', () => {
       sharedWorkspaceLockfile: false,
       allowBuilds: { esbuild: true, zlib: false },
     })
+    expect(parsed.allowBuilds).not.toHaveProperty('source-owned')
     expect(text.indexOf('esbuild:')).toBeLessThan(text.indexOf('zlib:'))
     expect(Object.values(parsed.allowBuilds as Record<string, unknown>).every(
       value => typeof value === 'boolean',
@@ -134,6 +154,11 @@ describe('verifyPackageInWorkspace', () => {
       runner: subject.runner,
     })).toThrow(new RegExp(message, 'i'))
     expect(subject.calls).toEqual([])
+    expectStructuredPrerequisiteError(() => verifyPackageInWorkspace({
+      workspacePath,
+      allowBuilds: {},
+      runner: subject.runner,
+    }))
   })
 
   it.each(['typecheck', 'test', 'build', 'pack-smoke'])(
@@ -170,11 +195,45 @@ describe('verifyPackageInWorkspace', () => {
     expect(readFileSync(policyPath, 'utf8')).toBe(before)
   })
 
+  it.each(['__proto__', 'constructor', 'prototype'])(
+    'rejects unsafe allowBuilds package key %j',
+    packageName => {
+      const workspacePath = workspace()
+      const policy = Object.create(null) as Record<string, boolean>
+      Object.defineProperty(policy, packageName, { value: true, enumerable: true })
+      const subject = runner()
+
+      expect(() => verifyPackageInWorkspace({
+        workspacePath,
+        allowBuilds: policy,
+        runner: subject.runner,
+      })).toThrow(/allowBuilds.*key|package name|unsafe/i)
+      expect(subject.calls).toEqual([])
+    },
+  )
+
+  it('rejects duplicate allowBuilds keys in workspace YAML before invoking pnpm', () => {
+    const workspacePath = workspace()
+    writeFileSync(
+      join(workspacePath, 'pnpm-workspace.yaml'),
+      'packages:\n  - .\nallowBuilds:\n  esbuild: true\n  esbuild: false\n',
+    )
+    const subject = runner()
+
+    expect(() => verifyPackageInWorkspace({
+      workspacePath,
+      allowBuilds: {},
+      runner: subject.runner,
+    })).toThrow(/duplicate|duplicated|allowBuilds/i)
+    expect(subject.calls).toEqual([])
+  })
+
   it.each([
     ['not json', /pack.*json/i],
     ['[]', /pack.*empty|no.*tarball/i],
     [JSON.stringify([{ filename: '../outside.tgz' }]), /tarball.*escape|outside/i],
     [JSON.stringify([{ filename: resolve(tmpdir(), 'outside.tgz') }]), /tarball.*absolute|escape|outside/i],
+    [JSON.stringify([{ filename: 'one.tgz' }, { filename: 'two.tgz' }]), /pack.*exactly one|ambiguous|multiple/i],
   ])('rejects unsafe pack output %j before pack-smoke', (pack, message) => {
     const workspacePath = workspace()
     const subject = runner({ pack })
@@ -191,6 +250,29 @@ describe('verifyPackageInWorkspace', () => {
       'build',
       'pack',
     ])
+  })
+
+  it('requires the packed tarball to be an existing regular file inside the workspace', () => {
+    const workspacePath = workspace()
+    const missing = runner({ createTarball: false })
+    expect(() => verifyPackageInWorkspace({
+      workspacePath,
+      allowBuilds: {},
+      runner: missing.runner,
+    })).toThrow(/tarball.*not found|regular file|does not exist/i)
+    expect(missing.calls.at(-1)?.args[0]).toBe('pack')
+
+    const outside = mkdtempSync(join(tmpdir(), 'dsh-lab-package-outside-'))
+    roots.push(outside)
+    writeFileSync(join(outside, 'out.tgz'), 'outside bytes')
+    symlinkSync(outside, join(workspacePath, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
+    const escaped = runner({ pack: JSON.stringify([{ filename: 'link/out.tgz' }]) })
+    expect(() => verifyPackageInWorkspace({
+      workspacePath,
+      allowBuilds: {},
+      runner: escaped.runner,
+    })).toThrow(/tarball.*symlink|junction|escape|outside/i)
+    expect(escaped.calls.at(-1)?.args[0]).toBe('pack')
   })
 
   it('attaches structured pass/fail/skipped results with a sanitized failure summary', () => {
@@ -219,4 +301,40 @@ describe('verifyPackageInWorkspace', () => {
     expect(steps[2]!.summary).not.toMatch(/[\r\n]/)
     expect(subject.calls.map(call => call.args[0])).toEqual(['install', 'typecheck', 'test'])
   })
+
+  it('redacts access keys and credential-bearing URLs from failure summaries', () => {
+    const workspacePath = workspace()
+    const subject = runner({
+      failAt: 'test',
+      failureMessage: [
+        'AWS_ACCESS_KEY_ID=AKIA1234567890',
+        'DATABASE_URL=postgres://user:secret@db.example/app',
+      ].join('\n'),
+    })
+    let error: unknown
+    try {
+      verifyPackageInWorkspace({ workspacePath, allowBuilds: {}, runner: subject.runner })
+    } catch (caught) {
+      error = caught
+    }
+
+    const summary = (error as Error & { steps: Array<{ summary?: string }> }).steps[2]!.summary!
+    expect(summary).not.toContain('AKIA1234567890')
+    expect(summary).not.toContain('user:secret')
+    expect(summary).toContain('[REDACTED]')
+  })
 })
+
+function expectStructuredPrerequisiteError(run: () => unknown): void {
+  let error: unknown
+  try {
+    run()
+  } catch (caught) {
+    error = caught
+  }
+  expect(error).toBeInstanceOf(Error)
+  const steps = (error as Error & { steps?: Array<{ id: string; status: string }> }).steps
+  expect(steps).toHaveLength(6)
+  expect(steps!.some(step => step.status === 'blocked' || step.status === 'fail')).toBe(true)
+  expect(steps!.every(step => ['blocked', 'fail', 'skipped'].includes(step.status))).toBe(true)
+}
