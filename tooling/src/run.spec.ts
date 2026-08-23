@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -111,6 +111,43 @@ describe('verifyAllTargets', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  it('fails target verification when profile removal falls back to a stale directory', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-packed-target-stale-'))
+    const masterBin = join(root, 'fake-master-bin.mjs')
+    writeFileSync(
+      masterBin,
+      'if (process.argv.includes("--dump-config")) console.log("demo")\n',
+    )
+    try {
+      await expect(verifyPackedTarget({
+        root,
+        pluginName: 'demo',
+        target: 'master',
+        tarball: join(root, 'demo.tgz'),
+        masterBin,
+        compat: {
+          targets: {
+            next: { dsh: '0.1.1-rc.2', cordis: '4.0.1', node: '22.20.0', pnpm: '11.7.0' },
+            master: {
+              repository: 'deepseek-ai/deepseek-harness',
+              commit: '1'.repeat(40),
+              node: '^22.19.0',
+              pnpm: '11.7.0',
+            },
+          },
+        },
+        removeProfile() {
+          throw new Error('injected profile lock')
+        },
+      })).rejects.toThrow(/cleanup|profile.*stale|injected profile lock/i)
+      const profiles = join(root, '.lab', 'runtime', 'profiles')
+      expect(readdirSync(profiles)).toHaveLength(1)
+      expect(readdirSync(profiles)[0]).toMatch(/\.stale-/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('master launcher build output', () => {
@@ -170,6 +207,13 @@ describe('buildDevOverlay', () => {
 })
 
 describe('profile boundaries', () => {
+  it('retains noUncheckedIndexedAccess for the tooling package', () => {
+    const config = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../tsconfig.json', import.meta.url)), 'utf8'),
+    ) as { compilerOptions?: { noUncheckedIndexedAccess?: boolean } }
+    expect(config.compilerOptions?.noUncheckedIndexedAccess).not.toBe(false)
+  })
+
   it('resolves the public tsx/esm loader export to an installed file', () => {
     const loader = resolveTsxLoader()
     expect(loader).toMatch(/^file:/)
