@@ -245,6 +245,12 @@ async function resolveLauncher(root: string, compat: Compatibility, target: Targ
   return { cmd: pc.cmd, args: [...pc.args, 'exec', 'dsh'] }
 }
 
+// UI sessions use the same target launcher resolution as dev/verify while
+// keeping their session-specific argument and environment boundaries separate.
+export async function resolveUiLauncher(root: string, target: Target, compat: Compatibility): Promise<Command> {
+  return resolveLauncher(root, compat, target)
+}
+
 // `pnpmCommand` is also the test seam for a directly executable launcher. In
 // production the resolved pnpm entry needs `exec dsh`; an injected node script
 // already represents dsh and must receive only dsh's own flags.
