@@ -17,13 +17,19 @@ import {
   resolveTsxLoader,
   verifyPackedTarget,
   buildUpstream,
+  devPlugin,
 } from './run.js'
-import { pnpm } from './proc.js'
+import { pnpm, pnpmCommand } from './proc.js'
+import type { PluginRef } from './plugin-ref.js'
 
-vi.mock('./proc.js', async importOriginal => ({
-  ...(await importOriginal<typeof import('./proc.js')>()),
-  pnpm: vi.fn(),
-}))
+vi.mock('./proc.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('./proc.js')>()
+  return {
+    ...actual,
+    pnpm: vi.fn(),
+    pnpmCommand: vi.fn(actual.pnpmCommand),
+  }
+})
 
 describe('resolveSourceOverlay', () => {
   it('produces an absolute path to the plugin entry', () => {
@@ -203,6 +209,75 @@ describe('buildDevOverlay', () => {
   it('escapes apostrophes in the hmr root the same way as the entry', () => {
     const overlay = buildDevOverlay('example', `file:///A:/o'brien/src/index.ts`, `A:/o'brien/src`)
     expect(overlay).toContain(`- 'A:/o''brien/src'`)
+  })
+})
+
+describe('path-first live development', () => {
+  it('runs an external PluginRef live while writing profiles and overlays only under forge runtime', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dev-forge-'))
+    const externalRoot = mkdtempSync(join(tmpdir(), 'dsh-dev-external-'))
+    const capturePath = join(root, 'boot.json')
+    try {
+      mkdirSync(join(root, 'workbench'), { recursive: true })
+      writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+        'targets:',
+        '  next:',
+        '    dsh: 0.1.1-rc.2',
+        '    cordis: 4.0.1',
+        '    node: 22.20.0',
+        '    pnpm: 11.7.0',
+        '    allowBuilds:',
+        '      esbuild: true',
+        '  master:',
+        '    repository: deepseek-ai/deepseek-harness',
+        `    commit: ${'1'.repeat(40)}`,
+        '    pnpm: 11.7.0',
+        '    node: ^22.19.0',
+        '',
+      ].join('\n'))
+      mkdirSync(join(externalRoot, 'src'), { recursive: true })
+      writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
+      writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/external-plugin"}\n')
+      const before = readdirSync(externalRoot, { recursive: true }).map(String).sort()
+      const fakeLauncher = join(root, 'fake-launcher.mjs')
+      writeFileSync(fakeLauncher, [
+        "import { writeFileSync } from 'node:fs'",
+        "writeFileSync(process.env.DSH_DEV_CAPTURE, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), home: process.env.DSH_HOME, nodeOptions: process.env.NODE_OPTIONS }))",
+        '',
+      ].join('\n'))
+      vi.mocked(pnpm).mockReset().mockReturnValue('')
+      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [fakeLauncher] })
+      const previousCapture = process.env.DSH_DEV_CAPTURE
+      process.env.DSH_DEV_CAPTURE = capturePath
+      const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/external-plugin' }
+      try {
+        await devPlugin({ root, plugin, target: 'next' })
+      } finally {
+        if (previousCapture === undefined) delete process.env.DSH_DEV_CAPTURE
+        else process.env.DSH_DEV_CAPTURE = previousCapture
+      }
+
+      const runtime = join(root, '.lab', 'runtime')
+      const overlay = join(runtime, 'overlays', 'external-plugin', 'cordis.patch.yml')
+      const profile = join(runtime, 'profiles', 'external-plugin-next-dev')
+      expect(readFileSync(overlay, 'utf8')).toContain(pathToFileURL(join(externalRoot, 'src', 'index.ts')).href)
+      expect(readFileSync(overlay, 'utf8')).toContain(join(externalRoot, 'src').replaceAll('\\', '/'))
+      expect(readFileSync(join(profile, 'pnpm-workspace.yaml'), 'utf8')).toContain('esbuild: true')
+      expect(vi.mocked(pnpm)).toHaveBeenCalledWith(
+        ['install', '--config.strictDepBuilds=false'],
+        expect.objectContaining({ cwd: profile }),
+      )
+      const boot = JSON.parse(readFileSync(capturePath, 'utf8')) as Record<string, unknown>
+      expect(boot.argv).toEqual(['--profile', 'external-plugin-next-dev', '--patch', overlay])
+      expect(boot.home).toBe(runtime.replaceAll('\\', '/'))
+      expect(boot.nodeOptions).toMatch(/tsx\/esm/)
+      expect(readdirSync(externalRoot, { recursive: true }).map(String).sort()).toEqual(before)
+      expect(existsSync(join(externalRoot, '.dsh-lab'))).toBe(false)
+    } finally {
+      vi.mocked(pnpmCommand).mockReset()
+      rmSync(root, { recursive: true, force: true })
+      rmSync(externalRoot, { recursive: true, force: true })
+    }
   })
 })
 

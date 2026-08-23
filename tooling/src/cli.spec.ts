@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { parsePluginSelector, runCli } from './cli.js'
 import { checkUpstream, updateUpstream } from './upstream-update.js'
 import { resolvePluginRef } from './plugin-ref.js'
 import { inspectPlugin } from './inspect.js'
 import { verifyPlugin } from './verify.js'
 import { derivePluginStatus } from './status.js'
+import { devPlugin } from './run.js'
 
 vi.mock('./upstream-update.js', () => ({
   checkUpstream: vi.fn(),
@@ -19,6 +21,10 @@ vi.mock('./plugin-ref.js', async importOriginal => ({
 vi.mock('./inspect.js', () => ({ inspectPlugin: vi.fn() }))
 vi.mock('./verify.js', () => ({ verifyPlugin: vi.fn() }))
 vi.mock('./status.js', () => ({ derivePluginStatus: vi.fn() }))
+vi.mock('./run.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('./run.js')>()),
+  devPlugin: vi.fn(),
+}))
 
 const PINNED = '1'.repeat(40)
 const REMOTE = '2'.repeat(40)
@@ -31,6 +37,7 @@ afterEach(() => {
   vi.mocked(inspectPlugin).mockReset()
   vi.mocked(verifyPlugin).mockReset()
   vi.mocked(derivePluginStatus).mockReset()
+  vi.mocked(devPlugin).mockReset()
 })
 
 function captureConsole() {
@@ -126,6 +133,67 @@ describe('plugin selector parsing', () => {
 
   it('rejects a positional catalog name combined with --path', () => {
     expect(() => parsePluginSelector(['demo', '--path', 'A:/plugin'])).toThrow(/exactly one/i)
+  })
+})
+
+describe('path-first dev CLI', () => {
+  const plugin = { sourcePath: 'A:/external', packageName: '@fixture/external' }
+
+  it.each([
+    [['dev', '--path', 'A:/external', '--target', 'next'], { path: 'A:/external' }],
+    [['dev', 'demo', '--target', 'master'], { name: 'demo' }],
+  ] as const)('routes path and catalog selectors through the same live dev seam: %j', async (argv, selector) => {
+    captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    vi.mocked(devPlugin).mockResolvedValue()
+
+    expect(await runCli([...argv])).toBe(0)
+    expect(resolvePluginRef).toHaveBeenCalledWith({ root: process.cwd(), selector })
+    expect(devPlugin).toHaveBeenCalledWith({
+      root: process.cwd(),
+      plugin,
+      target: argv.at(-1),
+    })
+  })
+
+  it('rejects invalid targets before starting dev', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+
+    expect(await runCli(['dev', '--path', 'A:/external', '--target', 'all'])).toBe(1)
+    expect(output.errors.join('\n')).toMatch(/next\|master/i)
+    expect(devPlugin).not.toHaveBeenCalled()
+  })
+})
+
+describe('agent-first command and documentation contract', () => {
+  it('advertises every first-slice command with catalog and path selectors only', async () => {
+    const output = captureConsole()
+
+    expect(await runCli(['--help'])).toBe(0)
+    const help = output.logs.join('\n')
+    expect(help).toMatch(/inspect\s+<name>\|--path\s+P[\s\S]*\[--json]/i)
+    expect(help).toMatch(/dev\s+<name>\|--path\s+P[\s\S]*--target\s+T/i)
+    expect(help).toMatch(/verify\s+<name>\|--path\s+P[\s\S]*--target\s+T[\s\S]*\[--json]/i)
+    expect(help).toMatch(/status\s+<name>\|--path\s+P[\s\S]*\[--json]/i)
+    expect(help).not.toMatch(/^\s*(?:ui|publish|init|generate-skills?)\b/im)
+  })
+
+  it('documents the mutation and isolation contract without claiming future UI or skill commands exist', () => {
+    const docs = [
+      readFileSync(new URL('../../README.md', import.meta.url), 'utf8'),
+      readFileSync(new URL('../../docs/using-the-lab.md', import.meta.url), 'utf8'),
+      readFileSync(new URL('../../AGENTS.md', import.meta.url), 'utf8'),
+    ].join('\n')
+
+    expect(docs).toMatch(/dev[\s\S]{0,160}(?:live|in-place)[\s\S]{0,160}read-only/i)
+    expect(docs).toMatch(/verify[\s\S]{0,240}temporary[\s\S]{0,160}(?:always|every)[\s\S]{0,80}(?:remove|clean)/i)
+    expect(docs).toMatch(/uncommitted[\s\S]{0,80}untracked[\s\S]{0,160}(?:included|copied)/i)
+    expect(docs).toMatch(/evidence[\s\S]{0,160}minimal[\s\S]{0,160}(?:memory|record)/i)
+    expect(docs).toMatch(/catalog[\s\S]{0,80}(?:init|initialization)[\s\S]{0,80}optional/i)
+    expect(docs).toMatch(/only explicit authoring commands[\s\S]{0,120}mutate/i)
+    expect(docs).toMatch(/UI[\s\S]{0,120}future work/i)
+    expect(docs).toMatch(/skill generation[\s\S]{0,120}future work/i)
   })
 })
 
