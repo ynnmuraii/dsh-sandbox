@@ -7,6 +7,7 @@ import { inspectPlugin } from './inspect.js'
 import { verifyPlugin } from './verify.js'
 import { derivePluginStatus } from './status.js'
 import { devPlugin } from './run.js'
+import { syncContext } from './sync.js'
 
 vi.mock('./upstream-update.js', () => ({
   checkUpstream: vi.fn(),
@@ -25,6 +26,10 @@ vi.mock('./run.js', async importOriginal => ({
   ...(await importOriginal<typeof import('./run.js')>()),
   devPlugin: vi.fn(),
 }))
+vi.mock('./sync.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('./sync.js')>()),
+  syncContext: vi.fn(),
+}))
 
 const PINNED = '1'.repeat(40)
 const REMOTE = '2'.repeat(40)
@@ -38,6 +43,7 @@ afterEach(() => {
   vi.mocked(verifyPlugin).mockReset()
   vi.mocked(derivePluginStatus).mockReset()
   vi.mocked(devPlugin).mockReset()
+  vi.mocked(syncContext).mockReset()
 })
 
 function captureConsole() {
@@ -47,6 +53,47 @@ function captureConsole() {
   vi.spyOn(console, 'error').mockImplementation((...args) => errors.push(args.join(' ')))
   return { logs, errors }
 }
+
+describe('portable agent skill CLI surface', () => {
+  it('documents skill regeneration under sync-context without adding a skill command', async () => {
+    const output = captureConsole()
+
+    expect(await runCli(['--help'])).toBe(0)
+
+    const help = output.logs.join('\n')
+    expect(help).toMatch(/sync-context.*(?:context projections|shared-context).*agent skill/i)
+    expect(help).not.toMatch(/^\s+skill(?:\s|$)/m)
+  })
+
+  it('reports plugin and agent-skill projections with existing synced/current words', async () => {
+    const output = captureConsole()
+    vi.mocked(syncContext).mockResolvedValue([
+      {
+        kind: 'plugin-context',
+        name: 'demo',
+        changed: true,
+        path: 'A:/lab/plugins/demo/.dsh-lab/shared-context.md',
+      },
+      {
+        kind: 'agent-skill',
+        name: 'dsh-plugin-development',
+        changed: false,
+        path: 'A:/lab/.agents/skills/dsh-plugin-development/SKILL.md',
+      },
+    ])
+
+    expect(await runCli(['sync-context', 'demo'])).toBe(0)
+    expect(syncContext).toHaveBeenCalledWith({
+      root: process.cwd(),
+      names: ['demo'],
+      all: false,
+    })
+    expect(output.logs).toEqual([
+      'synced  A:/lab/plugins/demo/.dsh-lab/shared-context.md',
+      'current A:/lab/.agents/skills/dsh-plugin-development/SKILL.md',
+    ])
+  })
+})
 
 describe('upstream CLI', () => {
   it('prints nested help with check, update, and --verify', async () => {
