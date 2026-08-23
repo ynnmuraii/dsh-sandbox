@@ -166,7 +166,17 @@ describe('publishRunResult', () => {
           id: 'inspect',
           status: 'fail',
           durationMs: 1,
-          summary: 'client_secret=mysecret access_token=token-value ERROR=ENOENT HTTP=200 PATH=/tmp/plugin',
+          summary: [
+            'client_secret=mysecret',
+            'access_token=token-value',
+            'db_password=db-pass',
+            'github_token=github-value',
+            'my_api_key=api-value',
+            'service_private_key=private-value',
+            'ERROR=ENOENT',
+            'HTTP=200',
+            'PATH=/tmp/plugin',
+          ].join(' '),
         }],
       }),
     })
@@ -175,8 +185,16 @@ describe('publishRunResult', () => {
 
     expect(summary).not.toContain('mysecret')
     expect(summary).not.toContain('token-value')
+    expect(summary).not.toContain('db-pass')
+    expect(summary).not.toContain('github-value')
+    expect(summary).not.toContain('api-value')
+    expect(summary).not.toContain('private-value')
     expect(summary).toContain('client_secret=[REDACTED]')
     expect(summary).toContain('access_token=[REDACTED]')
+    expect(summary).toContain('db_password=[REDACTED]')
+    expect(summary).toContain('github_token=[REDACTED]')
+    expect(summary).toContain('my_api_key=[REDACTED]')
+    expect(summary).toContain('service_private_key=[REDACTED]')
     expect(summary).toContain('ERROR=ENOENT')
     expect(summary).toContain('HTTP=200')
     expect(summary).toContain('PATH=/tmp/plugin')
