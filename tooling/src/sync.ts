@@ -4,8 +4,10 @@ import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 
 import { join } from 'node:path'
 import { loadCatalogFromFile } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
+import { normalizeGeneratedText } from './skill.js'
 
 export interface SyncedResult {
+  kind: 'plugin-context' | 'agent-skill'
   name: string
   changed: boolean
   path: string
@@ -19,11 +21,23 @@ export interface SyncOptions {
 
 const SNAPSHOT_HEADER = '# Shared context snapshot\n'
 
-export function snapshotContext(root: string, reads: string[]): string {
+export function contextDigest(reads: readonly string[]): string {
   const hash = createHash('sha256')
-  for (const text of reads) hash.update(text)
-  const digest = hash.digest('hex').slice(0, 12)
-  const body = reads.map(t => t.trimEnd()).join('\n\n---\n\n')
+  for (const read of reads) {
+    const normalized = normalizeGeneratedText(read)
+    const bytes = Buffer.from(normalized, 'utf8')
+    hash.update(String(bytes.byteLength))
+    hash.update('\0')
+    hash.update(bytes)
+  }
+  return hash.digest('hex').slice(0, 12)
+}
+
+export function snapshotContext(root: string, reads: string[]): string {
+  const digest = contextDigest(reads)
+  const body = reads
+    .map(text => normalizeGeneratedText(text).trimEnd())
+    .join('\n\n---\n\n')
   return `${SNAPSHOT_HEADER}\n> context version: ${digest}\n> regenerate with \`lab sync-context\`\n\n${body}\n`
 }
 
@@ -67,7 +81,7 @@ export async function syncContext({ root, names, all }: SyncOptions): Promise<Sy
     const existing = existsSync(path) ? readFileSync(path, 'utf8') : null
     const changed = existing !== snapshot
     if (changed) writeFileSync(path, snapshot)
-    results.push({ name, changed, path })
+    results.push({ kind: 'plugin-context', name, changed, path })
   }
   return results
 }
