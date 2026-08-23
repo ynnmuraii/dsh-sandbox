@@ -35,7 +35,7 @@ export function parsePluginSelector(args: string[]): {
     if (arg === '--path') {
       sawOption = true
       const value = args[i + 1]
-      if (value === undefined || value.startsWith('--')) {
+      if (value === undefined || value.trim().length === 0 || value.startsWith('--')) {
         throw new Error('--path requires a value')
       }
       if (path !== undefined) throw new Error('--path may be specified only once')
@@ -77,6 +77,9 @@ export function resolvePluginRef(opts: { root: string; selector: PluginSelector 
   const { root, selector } = opts
   const identifiers = Number(selector.name !== undefined) + Number(selector.path !== undefined)
   if (identifiers !== 1) throw new Error('exactly one of plugin name or path is required')
+  if (selector.path !== undefined && selector.path.trim().length === 0) {
+    throw new Error('path must not be empty')
+  }
 
   let sourcePath: string
   let catalogName: string | undefined
