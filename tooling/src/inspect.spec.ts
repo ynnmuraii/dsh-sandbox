@@ -247,6 +247,20 @@ describe('inspectPlugin', () => {
     expect(codes(result)).toContainEqual(['PRIVATE_UPSTREAM_IMPORT', 'error'])
   })
 
+  it.each([
+    'import {\n  privateThing,\n} from "../../upstream/deepseek-harness/src/private.js"',
+    'const loaded = import(\n  "../../upstream/deepseek-harness/src/private.js",\n)',
+    'const required = require(\n  "../../upstream/deepseek-harness/src/private.js",\n)',
+    'const rendered = `${require("../../upstream/deepseek-harness/src/private.js")}`',
+  ])('detects multiline or interpolated private module loading: %s', (source) => {
+    const subject = fixture()
+    writeFileSync(join(subject.plugin.sourcePath, 'src', 'index.ts'), `${source}\n`)
+
+    const result = inspectPlugin({ root: subject.root, plugin: subject.plugin })
+
+    expect(codes(result)).toContainEqual(['PRIVATE_UPSTREAM_IMPORT', 'error'])
+  })
+
   it('accepts a package files glob that covers runtime artifacts', () => {
     const subject = fixture()
     const pkg = manifest(subject.plugin.sourcePath)
