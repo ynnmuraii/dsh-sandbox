@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { loadRunResults, pluginEvidenceKey, type VerifyRunResultV1 } from './evidence.js'
+import { loadUiResults, type UiResultV1 } from './ui-evidence.js'
 import { inspectPlugin } from './inspect.js'
 import type { PluginRef } from './plugin-ref.js'
 import { computePluginDigest } from './plugin-snapshot.js'
@@ -13,6 +14,7 @@ export type ClaimState = 'pass' | 'fail' | 'stale' | 'not-run' | 'not-applicable
 export interface StatusClaim {
   state: ClaimState
   runId?: string
+  sessionId?: string
   reasons?: string[]
 }
 
@@ -38,12 +40,17 @@ export function derivePluginStatus(opts: {
   root: string
   plugin: PluginRef
   runsRoot?: string
+  uiRunsRoot?: string
 }): PluginStatus {
   const digest = computePluginDigest(opts.plugin.sourcePath).digest
   const compatibility = loadCompatibilityFromFile(rootPath(opts.root, ROOT_PATHS.compatibility))
   const contextDigest = currentContextDigest(opts.root)
   const runs = loadRunResults({
     runsRoot: opts.runsRoot ?? rootPath(opts.root, '.lab/runs'),
+    pluginKey: pluginEvidenceKey(opts.plugin),
+  })
+  const uiRuns = loadUiResults({
+    uiRunsRoot: opts.uiRunsRoot ?? rootPath(opts.root, ROOT_PATHS.uiRuns),
     pluginKey: pluginEvidenceKey(opts.plugin),
   })
 
@@ -83,13 +90,18 @@ export function derivePluginStatus(opts: {
   }
 
   let ui: StatusClaim
-  try {
-    const inspection = inspectPlugin({ root: opts.root, plugin: opts.plugin })
-    ui = inspection.faces.client === false ? { state: 'not-applicable' } : { state: 'not-run' }
-  } catch {
-    // UI applicability is intentionally conservative. A failed inspection
-    // cannot prove that no client face exists, so it remains not-run.
-    ui = { state: 'not-run' }
+  const uiRun = uiRuns[0]
+  if (uiRun !== undefined) {
+    ui = claimFromUiResult(uiRun, digest, contextDigest, compatibility.targets)
+  } else {
+    try {
+      const inspection = inspectPlugin({ root: opts.root, plugin: opts.plugin })
+      ui = inspection.faces.client === false ? { state: 'not-applicable' } : { state: 'not-run' }
+    } catch {
+      // UI applicability is intentionally conservative. A failed inspection
+      // cannot prove that no client face exists, so it remains not-run.
+      ui = { state: 'not-run' }
+    }
   }
 
   return {
@@ -131,6 +143,26 @@ function claimFromStatus(
   if (reasons.size > 0) {
     return { ...claim, state: 'stale', reasons: [...reasons].sort() }
   }
+  return claim
+}
+
+function claimFromUiResult(
+  result: UiResultV1,
+  currentDigest: `sha256:${string}`,
+  contextDigest: `sha256:${string}`,
+  targetPins: Compatibility['targets'],
+): StatusClaim {
+  const reasons = new Set<string>()
+  if (result.plugin.digest !== currentDigest) reasons.add('PLUGIN_CONTENT_CHANGED')
+  if (result.lab.contextDigest !== contextDigest) reasons.add('LAB_CONTEXT_CHANGED')
+  const pin = targetPins[result.target.name]
+  const targetMatches = result.target.name === 'next'
+    ? result.target.dsh === pin.dsh
+    : result.target.commit === pin.commit
+  if (!targetMatches) reasons.add('TARGET_PIN_CHANGED')
+
+  const claim: StatusClaim = { state: result.verdict, sessionId: result.sessionId }
+  if (reasons.size > 0) return { ...claim, state: 'stale', reasons: [...reasons].sort() }
   return claim
 }
 

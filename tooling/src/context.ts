@@ -7,6 +7,7 @@ export const ROOT_PATHS = {
   plugins: 'plugins',
   upstream: 'upstream/deepseek-harness',
   runtime: '.lab/runtime',
+  uiRuns: '.lab/ui-runs',
 } as const
 
 export function rootPath(root: string, rel: string): string {
