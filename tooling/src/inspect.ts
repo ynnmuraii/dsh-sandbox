@@ -491,12 +491,33 @@ const REGEX_PREFIX_KEYWORDS = new Set([
   'yield',
 ])
 
+const CONTROL_HEADER_KEYWORDS = new Set(['catch', 'for', 'if', 'switch', 'while', 'with'])
+
 function canStartRegex(tokens: SourceToken[]): boolean {
   const previous = tokens[tokens.length - 1]
   if (previous === undefined || previous.kind === 'newline') return true
   if (previous.kind === 'identifier') return REGEX_PREFIX_KEYWORDS.has(previous.value)
   if (previous.kind === 'string' || previous.kind === 'regex') return false
+  if (previous.value === ')') return closesControlHeader(tokens, tokens.length - 1)
   return previous.value !== ')' && previous.value !== ']' && previous.value !== '}'
+}
+
+function closesControlHeader(tokens: SourceToken[], closeIndex: number): boolean {
+  let depth = 0
+  for (let i = closeIndex; i >= 0; i -= 1) {
+    const token = tokens[i]!
+    if (token.kind !== 'punctuation') continue
+    if (token.value === ')') {
+      depth += 1
+    } else if (token.value === '(') {
+      depth -= 1
+      if (depth === 0) {
+        const keyword = tokens[i - 1]
+        return keyword?.kind === 'identifier' && CONTROL_HEADER_KEYWORDS.has(keyword.value)
+      }
+    }
+  }
+  return false
 }
 
 function regexLiteralEnd(content: string, start: number): number | undefined {
