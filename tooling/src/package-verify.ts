@@ -1,6 +1,6 @@
 import { dump as dumpYaml, load as loadYaml } from 'js-yaml'
 import { lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { isAbsolute, relative, resolve, win32 } from 'node:path'
+import { dirname, isAbsolute, relative, resolve, win32 } from 'node:path'
 import { pnpm, type RunOpts } from './proc.js'
 import type { RunStepResult } from './evidence.js'
 
@@ -222,22 +222,25 @@ function assertPreflightPath(
   let workspaceReal: string
   let targetReal: string
   try {
-    const workspaceStat = lstatSync(workspacePath)
-    if (workspaceStat.isSymbolicLink() || !workspaceStat.isDirectory()) {
-      throw new Error(`workspace must be a real directory (not a symlink or junction): ${workspacePath}`)
+    const targetResolved = resolve(targetPath)
+    const components = nativePathComponents(targetResolved)
+    for (const [index, component] of components.entries()) {
+      const componentStat = lstatSync(component)
+      if (componentStat.isSymbolicLink()) {
+        throw new Error(`${label} path component is a symlink or junction: ${component}`)
+      }
+      const isFinal = index === components.length - 1
+      if (!isFinal && !componentStat.isDirectory()) {
+        throw new Error(`${label} path component is not a directory: ${component}`)
+      }
+      if (isFinal && (expected === 'directory' ? !componentStat.isDirectory() : !componentStat.isFile())) {
+        throw new Error(`${label} has the wrong type; expected a ${expected}: ${targetResolved}`)
+      }
     }
     workspaceReal = realpathSync(workspacePath)
-
-    const targetStat = lstatSync(targetPath)
-    if (targetStat.isSymbolicLink()) {
-      throw new Error(`${label} must be a real path (not a symlink or junction): ${targetPath}`)
-    }
-    if (expected === 'directory' ? !targetStat.isDirectory() : !targetStat.isFile()) {
-      throw new Error(`${label} has the wrong type; expected a ${expected}: ${targetPath}`)
-    }
-    targetReal = realpathSync(targetPath)
+    targetReal = realpathSync(targetResolved)
   } catch (error) {
-    if (error instanceof Error && /real directory|real path|wrong type/.test(error.message)) throw error
+    if (error instanceof Error && /^(workspace|lockfile|workspace boundary|package\.json) /.test(error.message)) throw error
     throw new Error(`package verification ${label} is missing or inaccessible: ${targetPath}`, { cause: error })
   }
 
@@ -252,6 +255,21 @@ function assertPreflightPath(
     win32.isAbsolute(child)
   ) {
     throw new Error(`package verification ${label} is outside workspace: ${targetPath}`)
+  }
+}
+
+// Enumerate native path components by walking to the host filesystem root.
+// dirname() preserves drive roots and UNC share roots on Windows, while also
+// handling the ordinary `/` root on POSIX. Every returned component is an
+// existing path that can be checked with lstat without following aliases.
+function nativePathComponents(targetPath: string): string[] {
+  const components: string[] = []
+  let current = resolve(targetPath)
+  while (true) {
+    components.unshift(current)
+    const parent = dirname(current)
+    if (parent === current) return components
+    current = parent
   }
 }
 
