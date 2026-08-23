@@ -204,6 +204,12 @@ export function renderAgentSkill(input: {
   documents: readonly string[]
 }): string
 export function contextDigest(reads: readonly string[]): string
+export interface SyncedResult {
+  kind: 'plugin-context' | 'agent-skill'
+  name: string
+  changed: boolean
+  path: string
+}
 ```
 
 - [ ] **Step 1: Read the locked tests and confirm no test changes are needed**
@@ -216,7 +222,11 @@ appears contradictory, stop and ask the controller; do not edit it.
 In `tooling/src/sync.ts`, export `contextDigest`. Normalize each document with
 `normalizeGeneratedText`, prefix each normalized UTF-8 payload with its byte
 length and a NUL separator, and return the first 12 lowercase hex characters of
-SHA-256. Make `snapshotContext` use the same helper and normalized bodies.
+SHA-256. Make `snapshotContext` use the same helper and normalized bodies. Add
+the `SyncedResult.kind` union and mark the existing plugin snapshot results as
+`plugin-context`; Task 3 will begin producing the already-declared
+`agent-skill` variant. This interface foundation keeps the locked tests and
+`typecheck` valid without implementing the Task 3 write early.
 
 - [ ] **Step 3: Implement the pure renderer**
 
@@ -278,8 +288,8 @@ Luna implementer or a fresh fix Luna without changing tests, then re-review.
 - Create by command: `.agents/skills/dsh-plugin-development/SKILL.md`
 
 **Interfaces:**
-- Consumes: `AGENT_SKILL_PATH`, `SKILL_SOURCE_PATH`, `normalizeGeneratedText`, `renderAgentSkill`, and `contextDocuments`.
-- Produces:
+- Consumes: `AGENT_SKILL_PATH`, `SKILL_SOURCE_PATH`, `normalizeGeneratedText`, `renderAgentSkill`, `contextDocuments`, and the `SyncedResult` union introduced by Task 2.
+- Produces the first `agent-skill` result using the existing interface:
 
 ```ts
 export interface SyncedResult {
