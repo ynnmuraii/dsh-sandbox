@@ -77,14 +77,14 @@ The URL is loopback-only. It is session state, not finalized evidence.
 
 ### `ui status`
 
-`status` is read-only. It loads the named lease, validates it, refreshes process liveness, and compares the captured identities with current inputs. It returns the operational state, the loopback URL when known, and zero or more stale reasons.
+`status` does not create sessions, evidence, profiles, controls, or processes. It loads the named lease, validates it, refreshes process liveness, and compares the captured identities with current inputs. Its only permitted write is an atomic rewrite of that existing lease to latch a newly observed stale reason. It returns the operational state, the loopback URL when known, and zero or more stale reasons.
 
 Stable operational states are:
 
 - `starting` — the supervisor exists but DSH has not announced readiness;
 - `ready` — DSH announced a loopback URL and the process is alive;
 - `crashed` — startup or the running DSH child exited unexpectedly;
-- `stopping` — a finish or abort control request is being processed;
+- `stopping` — a finish or abort control request is being processed, or finish cleanup completed and evidence publication is pending;
 - `finished` — cleanup completed and immutable evidence was published;
 - `aborted` — cleanup completed without publishing evidence.
 
@@ -102,7 +102,7 @@ A `pass` verdict requires a session that reached `ready`. A `fail` verdict is ac
 
 The supervisor must stop the DSH process tree and remove the session's profile, overlay, temporary log, and control files before a result is finalized. Cleanup failure is an operation failure: a `pass` result must never be published while forge-owned runtime remains unaccounted for.
 
-After successful cleanup, the lab atomically publishes one immutable `UiResultV1`, changes the lease to `finished`, and removes the ordinary runtime descendants. The compact terminal lease may remain so `ui status <session-id>` can report `finished`; it contains no URL, PID, environment, log, or browser artifact.
+After successful cleanup, the supervisor rewrites `stopping` with `cleanup: 'pass'` and no live process fields. The finishing CLI atomically publishes one immutable `UiResultV1`, changes the lease to `finished`, and removes the ordinary runtime descendants. The compact terminal lease may remain so `ui status <session-id>` can report `finished`; it contains no URL, PID, environment, log, or browser artifact. Abort skips the publication boundary and the supervisor writes `aborted` after cleanup.
 
 ### `ui abort`
 
@@ -142,6 +142,7 @@ Every active session is contained by a validated, forge-owned directory:
 ```text
 .lab/runtime/ui-sessions/<session-id>/
   state.json
+  request.json
   control.json
   supervisor.log
   overlay/cordis.patch.yml
@@ -158,10 +159,12 @@ interface UiSessionStateV1 {
   plugin: { packageName: string; sourcePath: string; digest: string }
   target: { name: 'next'; dsh: string } | { name: 'master'; commit: string }
   contextDigest: string
+  staleReasons?: Array<'plugin-changed' | 'context-changed' | 'target-changed'>
   supervisorPid?: number
   childPid?: number
   url?: string
   error?: string
+  cleanup?: 'pass' | 'fail'
   startedAt: string
   updatedAt: string
 }
@@ -182,11 +185,13 @@ The supervisor:
 3. launches the pinned DSH entry point without a shell;
 4. passes the materialized profile, overlay, `--host 127.0.0.1`, `--port 0`, and `--no-open`;
 5. directs `DSH_HOME` and any generated state into the session runtime;
-6. captures stdout and stderr to a temporary bounded log;
-7. recognizes readiness only from `dsh web: http://127.0.0.1:<port>`;
-8. atomically publishes `ready` with the parsed URL;
-9. listens for a finish or abort control request;
-10. terminates the owned DSH process tree and removes session runtime descendants.
+6. builds the child environment in memory from the inherited environment plus the session-local `DSH_HOME`; no environment is serialized into `request.json` or state;
+7. captures stdout and stderr to a temporary log capped at 64 KiB;
+8. recognizes readiness only from an upstream `dsh web: http://127.0.0.1:<port>` line, tolerating its optional LAN display suffix while discarding that suffix;
+9. atomically publishes `ready` with only the parsed loopback URL;
+10. listens for a finish or abort control request;
+11. terminates the owned DSH process tree and removes session runtime descendants;
+12. writes `stopping` with `cleanup: 'pass'` for finish, or compact `aborted` for abort.
 
 The upstream contract explicitly supports port `0`, so the lab never probes and releases a port before launch. Wildcard binding is prohibited. Launch arguments are arrays passed without shell interpolation.
 
@@ -230,7 +235,7 @@ interface UiResultV1 {
 ui: {
   state: 'pass' | 'fail' | 'stale' | 'not-run' | 'not-applicable'
   sessionId?: string
-  reasons?: Array<'plugin-changed' | 'context-changed' | 'target-changed'>
+  reasons?: Array<'PLUGIN_CONTENT_CHANGED' | 'LAB_CONTEXT_CHANGED' | 'TARGET_PIN_CHANGED'>
 }
 ```
 
