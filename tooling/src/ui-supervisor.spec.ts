@@ -12,13 +12,14 @@ import {
 import type { UiRuntimePlan, UiRuntimePlugin } from './ui-runtime.js'
 import {
   parseDshReadyUrl,
+  openBoundedSupervisorLog,
   posixProcessGroup,
   runUiSupervisor,
   stopOwnedChildTree,
   windowsTreeKillArgs,
-  writeBoundedSupervisorLog,
   type UiChildExit,
   type UiChildHandle,
+  type UiDiagnosticLog,
   type UiProcessTreeDependencies,
   type UiSupervisorDependencies,
   type UiSupervisorRequestV1,
@@ -95,15 +96,23 @@ function dependencies(plan: UiRuntimePlan, child = fakeChild()) {
   const stopChildTree = vi.fn(async () => {
     child.exit({ code: 0, signal: 'SIGTERM' })
   })
-  const deps: UiSupervisorDependencies = {
+  const deps = {
     prepareRuntime: vi.fn(async () => plan),
     spawnChild: vi.fn(() => child.handle),
     stopChildTree,
-    writeLog: writeBoundedSupervisorLog,
+    openLog: openBoundedSupervisorLog,
     now: () => `2026-08-24T12:00:${String(++tick).padStart(2, '0')}.000Z`,
     sleep: ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 2))),
     pollIntervalMs: 1,
     maxLogBytes: 64 * 1024,
+  } as UiSupervisorDependencies & { writeLog(sessionDir: string, text: string, maxBytes: number): void }
+  // RED compatibility only: the reviewed implementation still calls the old
+  // chunk writer. The replacement implementation ignores this extra seam and
+  // owns one descriptor returned by openLog.
+  deps.writeLog = (sessionDir, value, maxBytes) => {
+    const path = join(sessionDir, 'supervisor.log')
+    const previous = existsSync(path) ? readFileSync(path) : Buffer.alloc(0)
+    writeFileSync(path, Buffer.concat([previous, Buffer.from(value)]).subarray(-maxBytes))
   }
   return { deps, child, stopChildTree }
 }
@@ -172,13 +181,13 @@ describe('parseDshReadyUrl', () => {
     await expect(stopOwnedChildTree(child, deps)).rejects.toThrow(/close|exit|timeout|terminate/i)
   })
 
-  it('refuses to write a bounded log through an externally linked file', () => {
+  it('refuses to open a bounded log through an externally linked file', () => {
     const current = fixture()
     const canary = join(current.root, 'outside.log')
     const log = join(current.sessionDir, 'supervisor.log')
     writeFileSync(canary, 'do-not-change')
     linkSync(canary, log)
-    expect(() => writeBoundedSupervisorLog(current.sessionDir, 'secret output', 32)).toThrow(/link|unsafe|regular/i)
+    expect(() => openBoundedSupervisorLog(current.sessionDir, 32)).toThrow(/exist|link|unsafe|regular/i)
     expect(readFileSync(canary, 'utf8')).toBe('do-not-change')
   })
 })
@@ -301,7 +310,12 @@ describe('runUiSupervisor', () => {
   it('turns an asynchronous diagnostic-log failure into owned cleanup failure', async () => {
     const current = fixture()
     const bundle = dependencies(current.plan)
-    bundle.deps.writeLog = vi.fn(() => { throw new Error('injected log failure') })
+    const log: UiDiagnosticLog = {
+      write: vi.fn(() => { throw new Error('injected log failure') }),
+      close: vi.fn(),
+    }
+    bundle.deps.openLog = vi.fn(() => log)
+    bundle.deps.writeLog = log.write
     const running = runUiSupervisor(current.request, bundle.deps)
     const fallback = setTimeout(() => {
       try {
@@ -323,6 +337,37 @@ describe('runUiSupervisor', () => {
       cleanup: 'fail',
     })
     expect(existsSync(current.plan.runtimeHome)).toBe(true)
+  })
+
+  it('ignores output arriving after control cleanup has taken ownership', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    let releaseStop!: () => void
+    const stopGate = new Promise<void>(resolve => { releaseStop = resolve })
+    bundle.deps.stopChildTree = vi.fn(async () => {
+      await stopGate
+      bundle.child.exit({ code: 0, signal: 'SIGTERM' })
+    })
+    const log: UiDiagnosticLog = { write: vi.fn(), close: vi.fn() }
+    bundle.deps.openLog = vi.fn(() => log)
+    bundle.deps.writeLog = vi.fn(() => { throw new Error('late output log failure') })
+    const running = runUiSupervisor(current.request, bundle.deps)
+    await waitFor(() => vi.mocked(bundle.deps.spawnChild).mock.calls.length === 1, 'child spawn')
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'finish', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+    await waitFor(() => vi.mocked(bundle.deps.stopChildTree).mock.calls.length === 1, 'control cleanup')
+    bundle.child.stderr.write('late output must be ignored\n')
+    releaseStop()
+    await expect(running).resolves.toBeUndefined()
+    expect(log.write).not.toHaveBeenCalled()
+    expect(log.close).toHaveBeenCalledTimes(1)
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'stopping',
+      cleanup: 'pass',
+    })
   })
 
   it('keeps concurrent supervisors and controls session-local', async () => {
