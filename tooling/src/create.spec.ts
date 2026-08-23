@@ -17,6 +17,7 @@ describe('createPlugin', () => {
     expect(created).toBe(target)
     expect(existsSync(join(target, '.git'))).toBe(true)
     expect(existsSync(join(target, 'src', 'index.ts'))).toBe(true)
+    expect(readFileSync(join(target, 'pnpm-workspace.yaml'), 'utf8')).toContain('packages:')
     expect(existsSync(join(target, '.dsh-lab', 'shared-context.md'))).toBe(true)
   })
 

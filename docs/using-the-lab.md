@@ -14,7 +14,7 @@ This guide is for plugin authors working inside the lab.
 ```
 dsh-sandbox/
 ├── context/                 root context library (shared snapshots derive from here)
-├── workbench/compatibility.yaml   target pins: next (rc.8), master (commit), node, pnpm
+├── workbench/compatibility.yaml   target pins: next (rc.2), master (commit), node, pnpm
 ├── catalog.yaml             index of every plugin in the lab (path / tracking / maturity)
 ├── plugins/<name>/          a standalone nested repo per plugin
 ├── upstream/deepseek-harness  pinned master submodule (Task 8)
@@ -26,7 +26,7 @@ Every plugin lives in its own **nested git repo** (`plugins/<name>`). The parent
 meta-repo deliberately does **not** track plugin internals (`tracking: local` is
 the only mode today); only `catalog.yaml` is committed in the parent.
 
-## The five commands
+## The six command families
 
 | Command | What it does |
 |---|---|
@@ -35,6 +35,12 @@ the only mode today); only `catalog.yaml` is committed in the parent.
 | `pnpm lab verify <name> --target next\|master\|all` | Build + pack the bundle, install the tarball into an ephemeral profile via the real `dsh plugin add`, and assert the composed `--dump-config` contains the plugin. |
 | `pnpm lab sync-context [name\|--all]` | Regenerate `.dsh-lab/shared-context.md` snapshots inside each plugin repo from `context/`, embedding a content hash. |
 | `pnpm lab doctor` | Validate toolchain, catalog, target pins, context-snapshot freshness, and the upstream submodule (present + pinned to `master.commit` + clean). Exit 0 only when green. |
+| `pnpm lab upstream check\|update [--verify]` | Read-only compare the pinned `master` SHA, or explicitly adopt it with clean-tree gates, detached checkout, doctor, and optional full plugin verification. |
+
+`upstream check` exits `0` when current, `2` when an update is available, and
+`1` on configuration/network errors. `upstream update` never commits, pushes,
+merges, resets, cleans, or rolls back; a failed adopted candidate remains
+visible for inspection.
 
 ## Recipe: scaffold a new plugin
 
@@ -61,7 +67,9 @@ This writes a source overlay to `.lab/runtime/overlays/my-plugin/cordis.patch.ym
 and boots the pinned `next` profile with `--patch <overlay>`. The overlay both
 inserts your `src/index.ts` and re-enables Cordis module HMR with a module `root`
 pointing at the plugin's `src/` dir, so an edit there is watched and the running
-instance reloads. Type-code, save, and watch.
+instance reloads. The entry is emitted as a `file:` URL and the child runtime
+loads `tsx/esm`, so Windows drive paths and full TypeScript/ESM source imports
+remain valid. The stable runtime profile is named `<plugin>-<target>-dev`.
 
 - Source mode proves your **live source** behaves; it does **not** prove the
   packed bundle works. Keep the two boundaries separate (see `lab verify`).
@@ -81,6 +89,11 @@ pnpm lab verify my-plugin --target all      # both
 reconciliation, and (4) its patch layer is observable in the composed profile
 config. This is the publish-tutorial path. Master composes against the **built**
 pinned upstream (`apps/cli/lib/bin.js`), never a profile-local install.
+Each target run uses a unique `<plugin>-<target>-verify-<run-id>` profile and
+cleans it up in a `finally` block. Target-specific `allowBuilds` policy is
+materialized from `workbench/compatibility.yaml`; it is not written into the
+plugin repository. Plugin installs use the plugin-local `pnpm-workspace.yaml`
+boundary with `--ignore-workspace`, so a parent workspace cannot capture them.
 
 ## Recipe: `lab sync-context` — refresh shared context
 

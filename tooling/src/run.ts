@@ -1,6 +1,8 @@
-import { join, relative, resolve, dirname } from 'node:path'
-import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs'
+import { join, relative, resolve } from 'node:path'
+import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, renameSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 import { loadPluginConfig } from './create.js'
 import {
   loadCatalogFromFile,
@@ -28,6 +30,32 @@ export interface VerifyOptions {
   root: string
   name: string
   target: 'next' | 'master' | 'all'
+  masterBin?: string
+}
+
+export function profileName(
+  name: string,
+  target: Target,
+  kind: 'dev' | 'verify',
+  runId?: string,
+): string {
+  if (kind === 'dev') return `${name}-${target}-dev`
+  if (!runId) throw new Error('verify profiles require a run id')
+  return `${name}-${target}-verify-${runId}`
+}
+
+export function buildProfileWorkspaceYaml(allowBuilds: Record<string, boolean>): string {
+  const lines = ['packages:', '  - "."']
+  const entries = Object.entries(allowBuilds).sort(([a], [b]) => a.localeCompare(b))
+  if (entries.length > 0) {
+    lines.push('allowBuilds:')
+    for (const [name, allowed] of entries) lines.push(`  ${name}: ${allowed ? 'true' : 'false'}`)
+  }
+  return `${lines.join('\n')}\n`
+}
+
+export function resolveTsxLoader(): string {
+  return import.meta.resolve('tsx/esm')
 }
 
 const PROFILE_BUNDLES = ['@deepseek-ai/dsh-base']
@@ -44,16 +72,16 @@ interface Command {
   args: string[]
 }
 
-// Resolve the source entry of a plugin to an absolute path on the host. On
-// Windows this yields backslashes (e.g. `C:\…`); the runtime overlay YAML
-// normalizes them to forward slashes before embedding.
+// Resolve the source entry as a file URL. Cordis Loader passes plugin names to
+// dynamic import(), so a Windows drive path must not be emitted as a bare URL
+// with an unsupported `A:` scheme.
 export function resolveSourceOverlay(
   root: string,
   pluginRel: string,
   entryRel: string,
   name: string,
 ): string {
-  return resolve(root, pluginRel, entryRel)
+  return pathToFileURL(resolve(root, pluginRel, entryRel)).href
 }
 
 // Build a workbench profile package.json, pinning the dsh launcher to an exact
@@ -129,18 +157,21 @@ function catalogEntry(root: string, name: string): CatalogEntry {
 
 // Materialize a pinned profile package.json (and workspace marker) into the
 // runtime dir, reading the target's pin from the compatibility manifest. The
-// materialized location is `.lab/runtime/profiles/<name>-<target>`, so the
+// materialized location is `.lab/runtime/profiles/<name>-<target>-<kind>`, so the
 // master source reference is computed as a path back to `upstream/` from
 // there (and forward-slash normalized for the `file:` spec).
 function materializeProfile(opts: {
   root: string
   name: string
   target: Target
+  profileKind: 'dev' | 'verify'
+  runId?: string
   bundles?: string[]
 }): string {
-  const { root, name, target, bundles = PROFILE_BUNDLES } = opts
+  const { root, name, target, profileKind, runId, bundles = PROFILE_BUNDLES } = opts
   const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
-  const profileDir = join(root, ROOT_PATHS.runtime, 'profiles', `${name}-${target}`)
+  const profile = profileName(name, target, profileKind, runId)
+  const profileDir = join(root, ROOT_PATHS.runtime, 'profiles', profile)
   let dsh: string
   if (target === 'master') {
     dsh = `file:${relative(profileDir, rootPath(root, ROOT_PATHS.upstream)).replace(/\\/g, '/')}`
@@ -151,10 +182,10 @@ function materializeProfile(opts: {
     }
     dsh = pin
   }
-  const spec: ProfileSpec = { name: `@dsh-lab/profile-${target}`, bundles }
+  const spec: ProfileSpec = { name: `@dsh-lab/profile-${profile}`, bundles }
   mkdirSync(profileDir, { recursive: true })
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify(buildProfilePackageJson(spec, { dsh }), null, 2))
-  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(compat.targets[target].allowBuilds ?? {}))
   return profileDir
 }
 
@@ -178,7 +209,7 @@ export function upstreamWorkingTreeDirty(dir: string): boolean {
 // pinning / cleanliness before reporting any master result). Mirrored by
 // `devSource` for master so both the dev and the verify flows run the SAME
 // pinned upstream CLI.
-async function buildUpstream(root: string, compat: Compatibility): Promise<string> {
+export async function buildUpstream(root: string, compat: Compatibility): Promise<string> {
   const masterPin = compat.targets.master
   const upstreamDir = rootPath(root, ROOT_PATHS.upstream)
   if (!masterPin.commit || !(await verifyUpstreamCommit(root, masterPin.commit))) {
@@ -244,6 +275,7 @@ export async function devSource(opts: DevOptions): Promise<void> {
     throw new Error('master target requires the pinned upstream checkout (see Task 8)')
   }
   const entryPath = resolveSourceOverlay(root, entry.path, 'src/index.ts', name)
+  const sourceRoot = resolve(root, entry.path, 'src')
 
   // Emit an absolute overlay into the runtime dir. The overlay both inserts the
   // plugin source entry AND re-enables Cordis module HMR with a module `root`
@@ -251,7 +283,7 @@ export async function devSource(opts: DevOptions): Promise<void> {
   const overlayDir = join(root, ROOT_PATHS.runtime, 'overlays', name)
   const overlayPath = join(overlayDir, 'cordis.patch.yml')
   mkdirSync(overlayDir, { recursive: true })
-  writeFileSync(overlayPath, buildDevOverlay(name, entryPath, dirname(entryPath)))
+  writeFileSync(overlayPath, buildDevOverlay(name, entryPath, sourceRoot))
 
   // Materialize the pinned profile (carrying the full WEB bundle stack so a
   // real web composition boots), then boot THE ACTUAL profile by name with the
@@ -260,12 +292,13 @@ export async function devSource(opts: DevOptions): Promise<void> {
   // The `--profile <name>-<target>` flag boots the materialized web profile
   // (NOT the `web` built-in alias); master boots the pinned upstream's built
   // CLI directly (no `dsh` bin exists on dsh-root).
-  const profileDir = materializeProfile({ root, name, target, bundles: DEV_WEB_BUNDLES })
-  const profileName = `${name}-${target}`
-  const env = { ...process.env, DSH_HOME: rootPath(root, ROOT_PATHS.runtime).replace(/\\/g, '/') }
+  const profileDir = materializeProfile({ root, name, target, profileKind: 'dev', bundles: DEV_WEB_BUNDLES })
+  const bootProfileName = profileName(name, target, 'dev')
+  const nodeOptions = [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' ')
+  const env = { ...process.env, NODE_OPTIONS: nodeOptions, DSH_HOME: rootPath(root, ROOT_PATHS.runtime).replace(/\\/g, '/') }
   console.log(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
   console.log(`[dev] generated overlay: ${overlayPath}`)
-  console.log(`[dev] booting materialized web profile '${profileName}' with DSH_HOME=${env.DSH_HOME}`)
+  console.log(`[dev] booting materialized web profile '${bootProfileName}' with DSH_HOME=${env.DSH_HOME}`)
 
   const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
   const launcher = await resolveLauncher(root, compat, target)
@@ -273,7 +306,7 @@ export async function devSource(opts: DevOptions): Promise<void> {
     if (target !== 'master') {
       pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
     }
-    bootProfile(launcher, profileDir, profileName, env, ['--patch', overlayPath])
+    bootProfile(launcher, profileDir, bootProfileName, env, ['--patch', overlayPath])
   } catch (e) {
     throw new Error(`dsh boot failed for profile '${target}': ${(e as Error).message}`, { cause: e })
   }
@@ -342,7 +375,7 @@ export async function verifyBundle(opts: VerifyOptions): Promise<void> {
   // `--config.minimumReleaseAge=0` relaxes just that host guard; the plugin's
   // committed lockfile still pins every version.
   if (!existsSync(join(pluginDir, 'node_modules'))) {
-    pnpm(['install', '--config.minimumReleaseAge=0'], { cwd: pluginDir, stdio: 'inherit' })
+    pnpm(['install', '--ignore-workspace', '--config.minimumReleaseAge=0'], { cwd: pluginDir, stdio: 'inherit' })
   }
 
   // P1-3: run the plugin's OWN checks (typecheck + behavior/lifecycle/deps
@@ -366,7 +399,14 @@ export async function verifyBundle(opts: VerifyOptions): Promise<void> {
   const failures: string[] = []
   for (const target of resolvedTargets) {
     try {
-      await verifyBundleTarget({ root, name, target, tarball, compat })
+      await verifyBundleTarget({
+        root,
+        name,
+        target,
+        tarball,
+        compat,
+        ...(opts.masterBin === undefined ? {} : { masterBin: opts.masterBin }),
+      })
     } catch (e) {
       failures.push(`${target}: ${(e as Error).message}`)
     }
@@ -409,19 +449,20 @@ async function verifyBundleTarget(opts: {
   target: Target
   tarball: string
   compat: Compatibility
+  masterBin?: string
 }): Promise<void> {
-  const { root, name, target, tarball, compat } = opts
+  const { root, name, target, tarball, compat, masterBin } = opts
 
   // Ephemeral profile under the runtime home. The launcher resolves
   // `--profile <name>` under `$DSH_HOME/profiles`, so DSH_HOME is pointed at
   // the runtime dir and the profile lands at
-  // `<root>/.lab/runtime/profiles/<name>-<target>`.
+  // `<root>/.lab/runtime/profiles/<name>-<target>-verify-<run-id>`.
   const home = rootPath(root, ROOT_PATHS.runtime)
-  const profileName = `${name}-${target}`
-  const profileDir = join(home, 'profiles', profileName)
-  rmSync(profileDir, { recursive: true, force: true })
+  const runId = randomUUID()
+  const profileNameValue = profileName(name, target, 'verify', runId)
+  const profileDir = join(home, 'profiles', profileNameValue)
   mkdirSync(profileDir, { recursive: true })
-  const spec: ProfileSpec = { name: `@dsh-lab/profile-${target}`, bundles: PROFILE_BUNDLES }
+  const spec: ProfileSpec = { name: `@dsh-lab/profile-${profileNameValue}`, bundles: PROFILE_BUNDLES }
   const dsh = target === 'master' ? undefined : compat.targets.next.dsh
   if (target !== 'master' && !dsh) {
     throw new CompatibilityError(`target '${target}' requires a pinned dsh version`)
@@ -431,10 +472,8 @@ async function verifyBundleTarget(opts: {
     join(profileDir, 'package.json'),
     JSON.stringify(buildProfilePackageJson(spec, pin), null, 2) + '\n',
   )
-  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), 'packages:\n  - "."\n')
+  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(opts.compat.targets[target].allowBuilds ?? {}))
   const env = { ...process.env, DSH_HOME: home.replace(/\\/g, '/') }
-
-  const launcher = await resolveLauncher(root, compat, target)
 
   // 3. Install the packed bundle through dsh's own plugin manager. `plugin add`
   //    forwards to pnpm and reconciles `dsh.profile.bundles` against installed
@@ -444,35 +483,52 @@ async function verifyBundleTarget(opts: {
   //    keeps pnpm from hard-failing on dsh's native build scripts, and the
   //    tarball path is passed as a single argument (no shell tokenization, so
   //    Windows paths with spaces are safe).
-  if (target !== 'master') {
-    pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
-  }
-  execFileSync(
-    launcher.cmd,
-    [
-      ...launcher.args,
-      'plugin',
-      '--profile',
-      profileName,
-      'add',
-      `file:${tarball.replace(/\\/g, '/')}`,
-      '--config.strictDepBuilds=false',
-    ],
-    { cwd: profileDir, env, stdio: 'inherit' },
-  )
+  try {
+    const launcher = target === 'master' && masterBin
+      ? { cmd: process.execPath, args: [masterBin] }
+      : await resolveLauncher(root, compat, target)
+    if (target !== 'master') {
+      pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
+    }
+    execFileSync(
+      launcher.cmd,
+      [
+        ...launcher.args,
+        'plugin',
+        '--profile',
+        profileNameValue,
+        'add',
+        `file:${tarball.replace(/\\/g, '/')}`,
+        '--config.strictDepBuilds=false',
+      ],
+      { cwd: profileDir, env, stdio: 'inherit' },
+    )
 
-  // 4. Compose the profile config for THIS target WITHOUT binding a port/server
-  //    (a live dsh is already bound on 3080), then assert the plugin's patch
-  //    layer surfaces. The plugin's execution contract itself is proven earlier
-  //    by the pack-smoke; this per-target check confirms the tarball composes
-  //    into the specific target's profile.
-  const out = execFileSync(
-    launcher.cmd,
-    [...launcher.args, '--profile', profileName, '--dump-config'],
-    { cwd: profileDir, env, encoding: 'utf8' },
-  ) as string
-  if (!out.includes(name)) {
-    throw new Error(`plugin '${name}' missing from composed profile config under ${target}`)
+    // 4. Compose the profile config for THIS target WITHOUT binding a port/server
+    //    (a live dsh is already bound on 3080), then assert the plugin's patch
+    //    layer surfaces. The plugin's execution contract itself is proven earlier
+    //    by the pack-smoke; this per-target check confirms the tarball composes
+    //    into the specific target's profile.
+    const out = execFileSync(
+      launcher.cmd,
+      [...launcher.args, '--profile', profileNameValue, '--dump-config'],
+      { cwd: profileDir, env, encoding: 'utf8' },
+    ) as string
+    if (!out.includes(name)) {
+      throw new Error(`plugin '${name}' missing from composed profile config under ${target}`)
+    }
+    console.log(`[verify] bundled plugin '${name}' composes under ${target}`)
+  } finally {
+    try {
+      rmSync(profileDir, { recursive: true, force: true })
+    } catch (e) {
+      const stale = `${profileDir}.stale-${runId}`
+      try {
+        if (existsSync(profileDir)) renameSync(profileDir, stale)
+        console.warn(`[verify] profile cleanup deferred; moved stale profile to ${stale}`)
+      } catch (rollback) {
+        throw new AggregateError([e, rollback], `failed to clean verify profile '${profileDir}'`)
+      }
+    }
   }
-  console.log(`[verify] bundled plugin '${name}' composes under ${target}`)
 }

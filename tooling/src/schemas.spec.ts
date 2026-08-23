@@ -16,6 +16,21 @@ targets:
 `
 
 describe('loadCompatibility', () => {
+  it('normalizes target-owned allowBuilds policy to booleans', () => {
+    const c = loadCompatibility(fixture.replace(
+      '    pnpm: 11.7.0\n  master:',
+      '    pnpm: 11.7.0\n    allowBuilds:\n      esbuild: true\n  master:',
+    ))
+    expect(c.targets.next.allowBuilds).toEqual({ esbuild: true })
+  })
+
+  it('rejects allowBuilds values that are not package-to-boolean maps', () => {
+    const text = fixture.replace(
+      '    pnpm: 11.7.0\n  master:',
+      '    pnpm: 11.7.0\n    allowBuilds: true\n  master:',
+    )
+    expect(() => loadCompatibility(text)).toThrow(/allowBuilds must be a package-to-boolean map/)
+  })
   it('parses both next and master targets', () => {
     const c = loadCompatibility(fixture)
     expect(c.targets.next.dsh).toBe('0.1.0-rc.8')

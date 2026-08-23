@@ -3,6 +3,7 @@ import { doctor } from './doctor.js'
 import { createPlugin } from './create.js'
 import { syncContext } from './sync.js'
 import { devSource, verifyBundle, type VerifyOptions } from './run.js'
+import { checkUpstream, updateUpstream } from './upstream-update.js'
 
 const HELP = `
 Usage: lab <command> [args]
@@ -13,6 +14,16 @@ Commands:
   verify <name> [--target T] run plugin checks + target compatibility
   sync-context [name|--all] regenerate shared-context snapshots
   doctor                   validate toolchain, catalog, and target pins
+  upstream check           compare the pinned master commit with the remote
+  upstream update [--verify] explicitly adopt the fetched master commit
+`
+
+const UPSTREAM_HELP = `
+Usage: lab upstream <command>
+
+Commands:
+  upstream check             print pinned/remote master commits (stale exits 2)
+  upstream update [--verify] adopt remote master; optionally run full verification
 `
 
 export async function runCli(argv: string[]): Promise<number> {
@@ -74,6 +85,8 @@ export async function runCli(argv: string[]): Promise<number> {
         return 1
       }
     }
+    case 'upstream':
+      return runUpstream(rest)
     case '--help':
     case '-h':
     case undefined:
@@ -82,6 +95,42 @@ export async function runCli(argv: string[]): Promise<number> {
     default:
       console.error(`error: unknown command '${cmd}'\n${HELP}`)
       return 1
+  }
+}
+
+async function runUpstream(rest: string[]): Promise<number> {
+  const [subcommand, ...flags] = rest
+  if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+    console.log(UPSTREAM_HELP)
+    return 0
+  }
+  try {
+    if (subcommand === 'check' && flags.length === 0) {
+      const status = checkUpstream({ root: process.cwd() })
+      console.log(`pinned: ${status.pinned}`)
+      console.log(`remote: ${status.remote}`)
+      console.log(status.current ? 'status: current' : 'status: update available')
+      return status.current ? 0 : 2
+    }
+    if (subcommand === 'update' && flags.every(flag => flag === '--verify')) {
+      if (flags.filter(flag => flag === '--verify').length > 1) {
+        throw new Error('--verify may be specified only once')
+      }
+      const verify = flags.includes('--verify')
+      const result = await updateUpstream({ root: process.cwd(), verify })
+      console.log(`previous: ${result.previous}`)
+      console.log(`adopted: ${result.adopted}`)
+      console.log(`changed: ${result.changed ? 'yes' : 'no'}`)
+      if (verify) {
+        console.log(`verified plugins: ${result.verifiedPlugins.join(', ') || 'none'}`)
+      }
+      return 0
+    }
+    console.error(`error: usage: lab upstream check | update [--verify]\n${UPSTREAM_HELP}`)
+    return 1
+  } catch (e) {
+    console.error(`error: ${(e as Error).message}`)
+    return 1
   }
 }
 

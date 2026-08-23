@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   resolveSourceOverlay,
   buildProfilePackageJson,
@@ -11,13 +12,16 @@ import {
   verifyAllTargets,
   upstreamWorkingTreeDirty,
   DEV_WEB_BUNDLES,
+  buildProfileWorkspaceYaml,
+  profileName,
+  resolveTsxLoader,
 } from './run.js'
 
 describe('resolveSourceOverlay', () => {
   it('produces an absolute path to the plugin entry', () => {
     const p = resolveSourceOverlay('workspace', 'plugins/example', 'src/index.ts', 'example')
-    expect(isAbsolute(p)).toBe(true)
-    expect(p.endsWith(join('plugins', 'example', 'src', 'index.ts'))).toBe(true)
+    expect(p).toBe(pathToFileURL(resolve('workspace', 'plugins/example', 'src/index.ts')).href)
+    expect(p).toMatch(/^file:/)
   })
 })
 
@@ -72,15 +76,15 @@ describe('verifyAllTargets', () => {
 
 describe('buildSourceOverlay', () => {
   it('escapes apostrophes by doubling them for the YAML single-quoted scalar', () => {
-    const overlay = buildSourceOverlay('example', `A:/plugins/o'brien/src/index.ts`)
-    expect(overlay).toContain(`name: 'A:/plugins/o''brien/src/index.ts'`)
+    const overlay = buildSourceOverlay('example', `file:///A:/plugins/o'brien/src/index.ts`)
+    expect(overlay).toContain(`name: 'file:///A:/plugins/o''brien/src/index.ts'`)
     expect(overlay).not.toContain(`\\'`)
   })
 })
 
 describe('buildDevOverlay', () => {
   it('re-enables the hmr row and points its module root at the plugin source dir', () => {
-    const overlay = buildDevOverlay('example', `A:/plugins/example/src/index.ts`, `A:/plugins/example/src`)
+    const overlay = buildDevOverlay('example', `file:///A:/plugins/example/src/index.ts`, `A:/plugins/example/src`)
     // The shared hmr row (disabled by the web bundle) is re-enabled…
     expect(overlay).toContain('- id: hmr')
     expect(overlay).toContain('disabled: false')
@@ -89,12 +93,33 @@ describe('buildDevOverlay', () => {
     expect(overlay).toContain(`- 'A:/plugins/example/src'`)
     // The plugin source entry is still inserted.
     expect(overlay).toContain(`- insert:`)
-    expect(overlay).toContain(`name: 'A:/plugins/example/src/index.ts'`)
+    expect(overlay).toContain(`name: 'file:///A:/plugins/example/src/index.ts'`)
   })
 
   it('escapes apostrophes in the hmr root the same way as the entry', () => {
-    const overlay = buildDevOverlay('example', `A:/o'brien/src/index.ts`, `A:/o'brien/src`)
+    const overlay = buildDevOverlay('example', `file:///A:/o'brien/src/index.ts`, `A:/o'brien/src`)
     expect(overlay).toContain(`- 'A:/o''brien/src'`)
+  })
+})
+
+describe('profile boundaries', () => {
+  it('resolves the public tsx/esm loader export to an installed file', () => {
+    const loader = resolveTsxLoader()
+    expect(loader).toMatch(/^file:/)
+    expect(existsSync(fileURLToPath(loader))).toBe(true)
+  })
+
+  it('keeps dev stable and gives verify a unique namespace', () => {
+    expect(profileName('example', 'next', 'dev')).toBe('example-next-dev')
+    expect(profileName('example', 'next', 'verify', 'run-123')).toBe(
+      'example-next-verify-run-123',
+    )
+  })
+
+  it('materializes only target-owned build policy in the profile workspace', () => {
+    expect(buildProfileWorkspaceYaml({ esbuild: true, koffi: false })).toBe(
+      'packages:\n  - "."\nallowBuilds:\n  esbuild: true\n  koffi: false\n',
+    )
   })
 })
 

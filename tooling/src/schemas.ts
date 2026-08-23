@@ -8,6 +8,7 @@ export interface TargetPin {
   pnpm?: string
   repository?: string
   commit?: string
+  allowBuilds?: Record<string, boolean>
 }
 
 export interface Compatibility {
@@ -74,6 +75,24 @@ function assertPin(kind: 'next' | 'master', pin: TargetPin): void {
   }
 }
 
+function normalizeAllowBuilds(pin: TargetPin, kind: 'next' | 'master'): void {
+  if (pin.allowBuilds === undefined) return
+  const raw = pin.allowBuilds as unknown
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new CompatibilityError(`target '${kind}' allowBuilds must be a package-to-boolean map`)
+  }
+  const normalized: Record<string, boolean> = {}
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (value !== 'true' && value !== 'false' && typeof value !== 'boolean') {
+      throw new CompatibilityError(
+        `target '${kind}' allowBuilds.${name} must be boolean true or false`,
+      )
+    }
+    normalized[name] = value === true || value === 'true'
+  }
+  pin.allowBuilds = normalized
+}
+
 function parseYaml(text: string, what: string): unknown {
   // FAILSAFE_SCHEMA keeps all scalars as strings. The default schema would
   // coerce an all-digit commit (e.g. the all-zero placeholder) to a number and
@@ -92,6 +111,8 @@ export function loadCompatibility(text: string): Compatibility {
   }
   assertPin('next', raw.targets.next)
   assertPin('master', raw.targets.master)
+  normalizeAllowBuilds(raw.targets.next, 'next')
+  normalizeAllowBuilds(raw.targets.master, 'master')
   return raw
 }
 
