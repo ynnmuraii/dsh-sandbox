@@ -43,8 +43,8 @@ export function renderAgentSkill(input: {
     '# DSH Plugin Development',
     '',
     note,
-    '> regenerate with `pnpm lab sync-context`',
     version,
+    '> regenerate with `pnpm lab sync-context`',
     '',
     remainder,
   ].join('\n')).replace(/\n*$/, '\n')
