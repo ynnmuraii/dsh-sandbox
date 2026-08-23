@@ -32,7 +32,10 @@ export interface VerifyRunResultV1 {
   operation: 'verify'
   result: RunOutcome
   plugin: { packageName: string; sourcePath: string; digest: `sha256:${string}` }
-  targets: Record<string, { dsh?: string; commit?: string; result: StepStatus }>
+  targets: Record<string, { dsh?: string; commit?: string; result: StepStatus }> & {
+    next: { dsh?: string; commit?: string; result: StepStatus }
+    master?: { dsh?: string; commit?: string; result: StepStatus }
+  }
   lab: { contextDigest: string }
   environment: { node: string; pnpm: string; platform: NodeJS.Platform }
   steps: RunStepResult[]
@@ -377,7 +380,7 @@ function sanitizeResult(result: VerifyRunResultV1): VerifyRunResultV1 {
         ...(target.commit === undefined ? {} : { commit: target.commit }),
         result: target.result,
       }]),
-    ),
+    ) as VerifyRunResultV1['targets'],
     lab: { contextDigest: result.lab.contextDigest },
     environment: {
       node: result.environment.node,

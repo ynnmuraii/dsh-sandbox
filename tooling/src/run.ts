@@ -1,5 +1,5 @@
 import { join, relative, resolve } from 'node:path'
-import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, renameSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync, rmSync, renameSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
@@ -14,6 +14,8 @@ import {
 import { ROOT_PATHS, rootPath } from './context.js'
 import { verifyUpstreamCommit } from './upstream.js'
 import { pnpm, pnpmCommand } from './proc.js'
+import { resolvePluginRef } from './plugin-ref.js'
+import { verifyPlugin } from './verify.js'
 
 export interface ProfileSpec {
   name: string
@@ -334,124 +336,26 @@ export async function verifyAllTargets(
   }
 }
 
-// Enforce a plugin's DECLARED compatibility targets (P1-4). `--target all`
-// derives from the declared list, and a requested target the plugin does not
-// declare is rejected outright rather than silently run.
-function resolveVerifyTargets(
-  requested: 'next' | 'master' | 'all',
-  declared: string[],
-  name: string,
-): Target[] {
-  for (const d of declared) {
-    if (!(TARGETS as readonly string[]).includes(d)) {
-      throw new Error(`plugin '${name}' declares unknown target '${d}'`)
-    }
-  }
-  if (requested === 'all') {
-    return TARGETS.filter(t => declared.includes(t))
-  }
-  if (!declared.includes(requested)) {
-    throw new Error(
-      `plugin '${name}' does not declare target '${requested}' (declared: ${declared.join(', ') || 'none'})`,
-    )
-  }
-  return [requested]
-}
-
 export async function verifyBundle(opts: VerifyOptions): Promise<void> {
-  const { root, name } = opts
-  const entry = catalogEntry(root, name)
-  const pluginDir = resolve(root, entry.path)
-  const cfg = loadPluginConfig(join(pluginDir, '.dsh-lab', 'plugin.yaml'))
-  const resolvedTargets = resolveVerifyTargets(opts.target, cfg.targets, name)
-  if (resolvedTargets.length === 0) {
-    throw new Error(`plugin '${name}' declares no supported compatibility targets`)
-  }
-  const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
-
-  // Install plugin deps only when absent: a fresh clone needs them, but this
-  // host enforces a global pnpm `minimumReleaseAge` supply-chain policy that
-  // rejects a same-day dev dependency on an unconditional reinstall.
-  // `--config.minimumReleaseAge=0` relaxes just that host guard; the plugin's
-  // committed lockfile still pins every version.
-  if (!existsSync(join(pluginDir, 'node_modules'))) {
-    pnpm(['install', '--ignore-workspace', '--config.minimumReleaseAge=0'], { cwd: pluginDir, stdio: 'inherit' })
-  }
-
-  // P1-3: run the plugin's OWN checks (typecheck + behavior/lifecycle/deps
-  // tests) before any target compatibility run. These are the source-level
-  // observable-contract proofs the plugin owns.
-  pnpm(['typecheck'], { cwd: pluginDir, stdio: 'inherit' })
-  pnpm(['test'], { cwd: pluginDir, stdio: 'inherit' })
-
-  // Build + pack the bundle once, then EXECUTE the produced tarball's built
-  // entry through the plugin's own packed-bundle smoke (P1-6/P1-9/P1-2). This
-  // replaces the old source-regex gate with a plugin-owned observable smoke
-  // contract, and turns the verify pass into a real keyless execution (imports
-  // the built lib/index.js, mounts the fiber, asserts the registered tool)
-  // rather than a `--dump-config` name match alone.
-  pnpm(['build'], { cwd: pluginDir, stdio: 'inherit' })
-  const tarball = packTarball(pluginDir)
-  runPackSmoke(pluginDir, tarball)
-
-  // Target compatibility: install the tarball into an ephemeral profile via the
-  // real harness plugin manager and assert it composes for EACH declared target.
-  const failures: string[] = []
-  for (const target of resolvedTargets) {
-    try {
-      await verifyBundleTarget({
-        root,
-        name,
-        target,
-        tarball,
-        compat,
-        ...(opts.masterBin === undefined ? {} : { masterBin: opts.masterBin }),
-      })
-    } catch (e) {
-      failures.push(`${target}: ${(e as Error).message}`)
-    }
-  }
-  if (failures.length > 0) {
-    throw new Error(`verify failed:\n  ${failures.join('\n  ')}`)
-  }
+  const plugin = resolvePluginRef({ root: opts.root, selector: { name: opts.name } })
+  const result = await verifyPlugin({
+    root: opts.root,
+    plugin,
+    target: opts.target,
+    ...(opts.masterBin === undefined ? {} : { masterBin: opts.masterBin }),
+  })
+  if (result.result !== 'pass') throw new Error(`verify ${result.result}`)
 }
 
-// Produce the plugin's packed tarball name via `pnpm pack --json` and return its
-// absolute path.
-function packTarball(pluginDir: string): string {
-  const out = pnpm(['pack', '--json'], { cwd: pluginDir, encoding: 'utf8' }) as string
-  const packed = JSON.parse(out) as { filename: string } | { filename: string }[]
-  const first = Array.isArray(packed) ? packed[0] : packed
-  if (!first) throw new Error('pnpm pack produced an empty package list')
-  return join(pluginDir, first.filename)
-}
-
-// Run the plugin's OWN packed-bundle smoke against the produced tarball. The
-// plugin owns its observable contract; the smoke installs the tarball and
-// executes its built entry keyless (no model/API key). A plugin without a
-// pack-smoke cannot claim a bundle-verified pass.
-function runPackSmoke(pluginDir: string, tarball: string): void {
-  const pkg = JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8')) as {
-    scripts?: Record<string, string>
-  }
-  if (!pkg.scripts?.['pack-smoke']) {
-    throw new Error(
-      `plugin at ${pluginDir} does not define a 'pack-smoke' script (add scripts/pack-smoke.mjs ` +
-        `to own the packed-bundle observable contract)`,
-    )
-  }
-  pnpm(['pack-smoke', tarball], { cwd: pluginDir, stdio: 'inherit' })
-}
-
-async function verifyBundleTarget(opts: {
+export async function verifyPackedTarget(opts: {
   root: string
-  name: string
+  pluginName: string
   target: Target
   tarball: string
   compat: Compatibility
   masterBin?: string
 }): Promise<void> {
-  const { root, name, target, tarball, compat, masterBin } = opts
+  const { root, pluginName, target, tarball, compat, masterBin } = opts
 
   // Ephemeral profile under the runtime home. The launcher resolves
   // `--profile <name>` under `$DSH_HOME/profiles`, so DSH_HOME is pointed at
@@ -459,7 +363,7 @@ async function verifyBundleTarget(opts: {
   // `<root>/.lab/runtime/profiles/<name>-<target>-verify-<run-id>`.
   const home = rootPath(root, ROOT_PATHS.runtime)
   const runId = randomUUID()
-  const profileNameValue = profileName(name, target, 'verify', runId)
+  const profileNameValue = profileName(pluginName, target, 'verify', runId)
   const profileDir = join(home, 'profiles', profileNameValue)
   mkdirSync(profileDir, { recursive: true })
   const spec: ProfileSpec = { name: `@dsh-lab/profile-${profileNameValue}`, bundles: PROFILE_BUNDLES }
@@ -514,10 +418,9 @@ async function verifyBundleTarget(opts: {
       [...launcher.args, '--profile', profileNameValue, '--dump-config'],
       { cwd: profileDir, env, encoding: 'utf8' },
     ) as string
-    if (!out.includes(name)) {
-      throw new Error(`plugin '${name}' missing from composed profile config under ${target}`)
+    if (!out.includes(pluginName)) {
+      throw new Error(`plugin '${pluginName}' missing from composed profile config under ${target}`)
     }
-    console.log(`[verify] bundled plugin '${name}' composes under ${target}`)
   } finally {
     try {
       rmSync(profileDir, { recursive: true, force: true })

@@ -2,10 +2,11 @@
 import { doctor } from './doctor.js'
 import { createPlugin } from './create.js'
 import { syncContext } from './sync.js'
-import { devSource, verifyBundle, type VerifyOptions } from './run.js'
+import { devSource } from './run.js'
 import { checkUpstream, updateUpstream } from './upstream-update.js'
 import { parsePluginSelector, resolvePluginRef } from './plugin-ref.js'
 import { inspectPlugin } from './inspect.js'
+import { verifyPlugin } from './verify.js'
 
 export { parsePluginSelector } from './plugin-ref.js'
 
@@ -15,7 +16,7 @@ Usage: lab <command> [args]
 Commands:
   new <name>               create a standalone plugin repo from the template
   dev <name> --target T    run source overlay + HMR against target (next|master)
-  verify <name> [--target T] run plugin checks + target compatibility
+  verify <name> [--target T] [--json] run plugin checks + target compatibility
   inspect <name> [--target T] inspect standalone plugin contracts
   sync-context [name|--all] regenerate shared-context snapshots
   doctor                   validate toolchain, catalog, and target pins
@@ -85,12 +86,19 @@ export async function runCli(argv: string[]): Promise<number> {
       }
       try {
         const parsed = parsePluginSelector(rest)
-        if (parsed.selector.path !== undefined) {
-          throw new Error('path selectors are not supported by lab verify yet')
+        const flags = parseVerifyFlags(parsed.rest)
+        const plugin = resolvePluginRef({ root: process.cwd(), selector: parsed.selector })
+        const target = flags.target ?? inferVerifyTarget(plugin)
+        const result = await verifyPlugin({ root: process.cwd(), plugin, target })
+        if (flags.json) {
+          console.log(JSON.stringify(result))
+        } else {
+          for (const step of result.steps) {
+            console.log(`[${step.status}] ${step.id} (${step.durationMs}ms)`)
+          }
+          console.log(`verify: ${result.result}; cleanup: ${result.cleanup}`)
         }
-        const target = parseTarget(parsed.rest, ['next', 'master', 'all']) as VerifyOptions['target']
-        await verifyBundle({ root: process.cwd(), name: parsed.selector.name!, target })
-        return 0
+        return result.result === 'pass' ? 0 : 1
       } catch (e) {
         console.error(`error: ${(e as Error).message}`)
         return 1
@@ -197,6 +205,40 @@ function parseTarget(rest: string[], allowed: readonly string[]): string {
     throw new Error(`invalid --target '${value}' (expected ${allowed.join('|')})`)
   }
   return value
+}
+
+function parseVerifyFlags(rest: string[]): { target?: 'next' | 'master' | 'all'; json: boolean } {
+  let target: 'next' | 'master' | 'all' | undefined
+  let json = false
+  for (let i = 0; i < rest.length; i += 1) {
+    const flag = rest[i]
+    if (flag === '--json') {
+      if (json) throw new Error('--json may be specified only once')
+      json = true
+      continue
+    }
+    if (flag === '--target') {
+      if (target !== undefined) throw new Error('--target may be specified only once')
+      const value = rest[i + 1]
+      if (value !== 'next' && value !== 'master' && value !== 'all') {
+        throw new Error(`invalid --target '${value ?? ''}' (expected next|master|all)`)
+      }
+      target = value
+      i += 1
+      continue
+    }
+    throw new Error(`unknown verify flag '${flag}'`)
+  }
+  return target === undefined ? { json } : { target, json }
+}
+
+function inferVerifyTarget(plugin: { metadata?: { targets?: string[] } }): 'next' | 'master' | 'all' {
+  const declared = plugin.metadata?.targets?.filter(
+    (target): target is 'next' | 'master' => target === 'next' || target === 'master',
+  ) ?? []
+  if (declared.length === 1) return declared[0]!
+  if (declared.length > 1) return 'all'
+  throw new Error('verify requires --target when plugin metadata does not declare a target')
 }
 
 function parseInspectFlags(rest: string[]): { target?: 'next' | 'master'; json: boolean } {
