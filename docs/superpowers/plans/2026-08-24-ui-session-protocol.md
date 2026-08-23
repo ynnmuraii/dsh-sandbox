@@ -79,8 +79,17 @@ export interface UiResultV1 {
 }
 
 export function normalizeUiSummary(value: string): string
-export function publishUiResult(opts: { uiRunsRoot: string; result: UiResultV1 }): string
-export function loadUiResults(opts: { uiRunsRoot: string; pluginKey: string }): UiResultV1[]
+export function publishUiResult(opts: {
+  uiRunsRoot: string
+  result: UiResultV1
+  renameFile?: (from: string, to: string) => void
+  beforePublishWrite?: (sessionDirectory: string) => void
+}): string
+export function loadUiResults(opts: {
+  uiRunsRoot: string
+  pluginKey: string
+  beforeResultRead?: (resultPath: string) => void
+}): UiResultV1[]
 ```
 
 - [ ] **Step 1: Add a valid result fixture and exact-schema tests**
