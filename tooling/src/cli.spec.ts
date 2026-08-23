@@ -226,7 +226,7 @@ describe('agent-first command and documentation contract', () => {
     expect(help).not.toMatch(/^\s*(?:ui|publish|init|generate-skills?)\b/im)
   })
 
-  it('documents the mutation and isolation contract without claiming future UI or skill commands exist', () => {
+  it('documents mutation/isolation and the portable skill without claiming UI or skill commands exist', () => {
     const docs = [
       readFileSync(new URL('../../README.md', import.meta.url), 'utf8'),
       readFileSync(new URL('../../docs/using-the-lab.md', import.meta.url), 'utf8'),
@@ -239,8 +239,9 @@ describe('agent-first command and documentation contract', () => {
     expect(docs).toMatch(/evidence[\s\S]{0,160}minimal[\s\S]{0,160}(?:memory|record)/i)
     expect(docs).toMatch(/catalog[\s\S]{0,80}(?:init|initialization)[\s\S]{0,80}optional/i)
     expect(docs).toMatch(/only explicit authoring commands[\s\S]{0,120}mutate/i)
-    expect(docs).toMatch(/UI[\s\S]{0,120}future work/i)
-    expect(docs).toMatch(/skill generation[\s\S]{0,120}future work/i)
+    expect(docs).toMatch(/UI[\s\S]{0,120}(?:not provided|not implemented|future work)/i)
+    expect(docs).toMatch(/portable agent (?:entrypoint|skill)[\s\S]{0,200}advisory/i)
+    expect(docs).not.toMatch(/\b(?:pnpm\s+)?lab\s+(?:ui|skill)\b/i)
   })
 })
 
