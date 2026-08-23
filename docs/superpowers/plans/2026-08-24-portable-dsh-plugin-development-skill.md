@@ -22,7 +22,10 @@
 - Normalize CRLF and lone CR to LF for rendering and comparison; generated output ends with exactly one newline.
 - The controller writes and commits every test before Luna changes production code.
 - Luna workers must not modify `*.spec.ts`, evaluation prompts, or controller test commits without explicit controller approval.
-- Preserve current catalog-name behavior, plugin snapshot behavior, and root/plugin mutation boundaries.
+- Require every explicitly named target to be an own catalog key and fail with
+  all unknown names before any plugin snapshot or root-skill write. Preserve
+  catalog order for `--all`, root-only behavior for an empty names list, plugin
+  snapshot behavior, and root/plugin mutation boundaries.
 - Do not modify `catalog.yaml`, unrelated root files, plugin Git state, or stage-3 UI code.
 
 ## Planned file structure
@@ -219,7 +222,7 @@ appears contradictory, stop and ask the controller; do not edit it.
 
 - [ ] **Step 2: Implement normalized context identity**
 
-In `tooling/src/sync.ts`, export `contextDigest`. Normalize each document with
+In `tooling/src/skill.ts`, export `contextDigest`. Normalize each document with
 `normalizeGeneratedText`, prefix each normalized UTF-8 payload with its byte
 length and a NUL separator, and return the first 12 lowercase hex characters of
 SHA-256. Make `snapshotContext` use the same helper and normalized bodies. Add
@@ -488,8 +491,20 @@ pnpm typecheck
 pnpm lab doctor
 ```
 
-Also prove with `rg --files -g 'SKILL.md'` that the only repo projection is the
-approved `.agents/skills/dsh-plugin-development/SKILL.md`.
+Also inventory the tracked projection and scan real plugin repositories with
+hidden files and ignore rules enabled explicitly:
+
+```bash
+git ls-files -- '*SKILL.md'
+rg --hidden --no-ignore --files plugins -g 'SKILL.md' \
+  -g '!**/.git/**' -g '!**/node_modules/**' -g '!**/upstream/**' \
+  -g '!**/.superpowers/**' -g '!**/.worktrees/**' -g '!**/worktrees/**'
+```
+
+The first command must list only the approved
+`.agents/skills/dsh-plugin-development/SKILL.md`; the second must find no
+skill in a real plugin repository while excluding Git metadata, dependencies,
+upstream checkouts, and scratch worktrees.
 
 - [ ] **Step 8: Remove the temporary stage-2 worktree**
 

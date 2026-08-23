@@ -48,6 +48,10 @@ export function contextDocuments(root: string): string[] {
 export async function syncContext({ root, names, all }: SyncOptions): Promise<SyncedResult[]> {
   const catalogPath = rootPath(root, ROOT_PATHS.catalog)
   const catalog = existsSync(catalogPath) ? loadCatalogFromFile(catalogPath) : { plugins: {} }
+  const unknown = names.filter(name => !Object.hasOwn(catalog.plugins, name))
+  if (unknown.length > 0) {
+    throw new Error(`cannot sync-context: unknown plugin(s): ${unknown.join(', ')}`)
+  }
   const docs = contextDocuments(root)
   const snapshot = snapshotContext(root, docs)
   const skillBody = readFileSync(rootPath(root, SKILL_SOURCE_PATH), 'utf8')
@@ -55,7 +59,7 @@ export async function syncContext({ root, names, all }: SyncOptions): Promise<Sy
 
   const targets = all
     ? Object.keys(catalog.plugins)
-    : names.filter(n => Object.hasOwn(catalog.plugins, n))
+    : names
 
   // Refuse to "synchronize" a missing plugin repo: creating `.dsh-lab` inside a
   // directory that is not an existing nested git repo would manufacture a

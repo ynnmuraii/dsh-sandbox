@@ -27,7 +27,7 @@ export function renderAgentSkill(input: {
   if (lines[0] !== '# DSH Plugin Development') {
     throw new Error('canonical body must start with # DSH Plugin Development')
   }
-  if (lines.slice(1).some(line => line.startsWith('# '))) {
+  if (hasAlternateTopLevelHeading(lines.slice(1))) {
     throw new Error('canonical body must contain only one top-level heading')
   }
 
@@ -48,4 +48,33 @@ export function renderAgentSkill(input: {
     '',
     remainder,
   ].join('\n')).replace(/\n*$/, '\n')
+}
+
+function hasAlternateTopLevelHeading(lines: readonly string[]): boolean {
+  let fenced = false
+  let previous: string | undefined
+
+  for (const line of lines) {
+    const fence = /^ {0,3}(`{3,}|~{3,})/.exec(line)
+    if (fence) {
+      fenced = !fenced
+      previous = undefined
+      continue
+    }
+    if (fenced) continue
+
+    // A single-hash ATX heading may use spaces, a tab, or no heading text.
+    // `##` and deeper headings are valid body content and are intentionally
+    // left alone.
+    if (/^ {0,3}#[ \t]+/.test(line) || /^ {0,3}#$/.test(line)) return true
+
+    // A Setext underline makes the preceding paragraph a top-level H1. Skip
+    // indented code, whose equals signs are ordinary body content.
+    if (!/^(?: {4}|\t)/.test(line) && /^ {0,3}=+\s*$/.test(line)) {
+      if (previous !== undefined && previous.trim() !== '') return true
+    }
+
+    previous = line
+  }
+  return false
 }

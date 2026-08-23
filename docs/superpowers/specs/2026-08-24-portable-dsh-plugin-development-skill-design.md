@@ -49,6 +49,11 @@ That file contains the Markdown body beginning with `# DSH Plugin Development`.
 It has no YAML frontmatter and no generated digest. The generator supplies those
 mechanical parts.
 
+Links in this editable canonical body are deliberately relative to the generated
+projection, not to the canonical source file. Validate them from
+`.agents/skills/dsh-plugin-development/SKILL.md`, where the projection is
+committed and consumed.
+
 The generated file has this shape:
 
 ```markdown
@@ -112,10 +117,10 @@ reading the skill.
 
 ## Deterministic context identity
 
-`tooling/src/sync.ts` owns a reusable context digest function. It normalizes
+`tooling/src/skill.ts` owns the reusable context digest function. It normalizes
 line endings and hashes the ordered context document contents with unambiguous
-boundaries. Both `snapshotContext` and the agent-skill renderer use that exact
-digest.
+boundaries. `snapshotContext` re-exports and uses that exact digest alongside
+the agent-skill renderer, keeping the pure identity helper independent of I/O.
 
 `contextDocuments(root)` keeps its current sorted filename order. Adding,
 removing, or changing any `context/*.md` file changes the digest and therefore
@@ -142,7 +147,10 @@ up front, it:
 Calling `pnpm lab sync-context` without a name is the minimal way to regenerate
 only the root skill. Calling it with a name or `--all` also regenerates the root
 skill. If any requested plugin repo is missing or invalid, validation fails
-before either projection is written.
+before either projection is written. Every explicitly named target must be an
+own key in `catalog.yaml`; unknown names are reported together and fail before
+any plugin snapshot or root projection write. `--all` follows catalog order,
+while an empty names list with `all: false` remains root-only.
 
 `lab new` does not regenerate the root skill. A missing root skill is repository
 drift, not a side effect for plugin creation to conceal.

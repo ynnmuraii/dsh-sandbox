@@ -43,41 +43,44 @@ function workingTreeDirty(dir: string): boolean {
 
 export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[]> {
   const out: DiagnosticResult[] = []
+  // Run the isolated, read-only skill gate first so diagnostics survive any
+  // unrelated compatibility, catalog, or toolchain failure below.
+  out.push(...portableSkillDiagnostics(root))
   const compatPath = rootPath(root, ROOT_PATHS.compatibility)
+  let compat: ReturnType<typeof loadCompatibilityFromFile> | undefined
   if (!existsSync(compatPath)) {
     out.push({ level: 'error', message: `missing compatibility manifest: ${compatPath}` })
-    return out
-  }
-
-  let compat
-  try {
-    compat = loadCompatibilityFromFile(compatPath)
-  } catch (e) {
-    out.push({ level: 'error', message: `invalid compatibility manifest: ${(e as Error).message}` })
-    return out
-  }
-
-  const expectedNode = compat.targets.next.node
-  if (expectedNode) {
-    const actual = process.versions.node
-    if (actual !== expectedNode) {
-      out.push({
-        level: 'error',
-        message: `node version mismatch: manifest pins ${expectedNode}, running ${actual}`,
-      })
+  } else {
+    try {
+      compat = loadCompatibilityFromFile(compatPath)
+    } catch (e) {
+      out.push({ level: 'error', message: `invalid compatibility manifest: ${(e as Error).message}` })
     }
   }
 
-  // Toolchain pin gate (§14): the pinned pnpm version must match the running
-  // one, or a later install/verify against the pinned targets is not faithful.
-  const expectedPnpm = compat.targets.next.pnpm
-  if (expectedPnpm) {
-    const actual = pnpm(['--version'], { encoding: 'utf8' }).toString().trim()
-    if (actual !== expectedPnpm) {
-      out.push({
-        level: 'error',
-        message: `pnpm version mismatch: manifest pins ${expectedPnpm}, running ${actual}`,
-      })
+  if (compat) {
+    const expectedNode = compat.targets.next.node
+    if (expectedNode) {
+      const actual = process.versions.node
+      if (actual !== expectedNode) {
+        out.push({
+          level: 'error',
+          message: `node version mismatch: manifest pins ${expectedNode}, running ${actual}`,
+        })
+      }
+    }
+
+    // Toolchain pin gate (§14): the pinned pnpm version must match the running
+    // one, or a later install/verify against the pinned targets is not faithful.
+    const expectedPnpm = compat.targets.next.pnpm
+    if (expectedPnpm) {
+      const actual = pnpm(['--version'], { encoding: 'utf8' }).toString().trim()
+      if (actual !== expectedPnpm) {
+        out.push({
+          level: 'error',
+          message: `pnpm version mismatch: manifest pins ${expectedPnpm}, running ${actual}`,
+        })
+      }
     }
   }
 
@@ -102,17 +105,19 @@ export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[
       message: `upstream checkout missing or not a git dir: ${upstreamPath}`,
     })
   } else {
-    const pin = compat.targets.master.commit
-    if (!pin) {
-      out.push({
-        level: 'error',
-        message: 'compatibility manifest is missing the master commit pin',
-      })
-    } else if (!(await verifyUpstreamCommit(root, pin))) {
-      out.push({
-        level: 'error',
-        message: `upstream HEAD does not match pinned master commit ${pin} (run in ${upstreamPath})`,
-      })
+    if (compat) {
+      const pin = compat.targets.master.commit
+      if (!pin) {
+        out.push({
+          level: 'error',
+          message: 'compatibility manifest is missing the master commit pin',
+        })
+      } else if (!(await verifyUpstreamCommit(root, pin))) {
+        out.push({
+          level: 'error',
+          message: `upstream HEAD does not match pinned master commit ${pin} (run in ${upstreamPath})`,
+        })
+      }
     }
     if (workingTreeDirty(upstreamPath)) {
       out.push({
@@ -182,7 +187,9 @@ export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[
               devDependencies?: Record<string, string>
             }
             for (const target of cfg.targets ?? []) {
-              const pin = (compat.targets as Record<string, { cordis?: string }>)[target]?.cordis
+              const pin = compat
+                ? (compat.targets as Record<string, { cordis?: string }>)[target]?.cordis
+                : undefined
               if (!pin) continue
               for (const field of ['peerDependencies', 'devDependencies'] as const) {
                 const actual = pkg[field]?.['@deepseek-ai/cordis']
@@ -218,28 +225,72 @@ export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[
     }
   }
 
-  // Render the portable skill in memory. Doctor is read-only; only the
-  // explicit `lab sync-context` command may repair a stale projection.
-  const skillPath = rootPath(root, AGENT_SKILL_PATH)
-  const skillBodyPath = rootPath(root, SKILL_SOURCE_PATH)
-  if (existsSync(skillBodyPath)) {
-    const expectedSkill = renderAgentSkill({
-      body: readFileSync(skillBodyPath, 'utf8'),
-      documents: contextDocuments(root),
+  return out
+}
+
+function portableSkillDiagnostics(root: string): DiagnosticResult[] {
+  const out: DiagnosticResult[] = []
+  const sourcePath = rootPath(root, SKILL_SOURCE_PATH)
+  const projectionPath = rootPath(root, AGENT_SKILL_PATH)
+
+  let body: string
+  try {
+    body = readFileSync(sourcePath, 'utf8')
+  } catch (error) {
+    const kind = errorCode(error) === 'ENOENT' ? 'missing' : 'unreadable'
+    out.push({
+      level: 'error',
+      message: `agent skill source ${kind}: ${sourcePath}${formatError(error)}`,
     })
-    const actualSkill = existsSync(skillPath) ? readFileSync(skillPath, 'utf8') : undefined
-    if (
-      actualSkill === undefined ||
-      normalizeGeneratedText(actualSkill) !== normalizeGeneratedText(expectedSkill)
-    ) {
-      out.push({
-        level: 'error',
-        message: `stale agent skill: ${skillPath} (run \`lab sync-context\`)`,
-      })
-    }
+    return out
   }
 
+  let expected: string
+  try {
+    expected = renderAgentSkill({ body, documents: contextDocuments(root) })
+  } catch (error) {
+    out.push({
+      level: 'error',
+      message: `agent skill source invalid: ${sourcePath}${formatError(error)}`,
+    })
+    return out
+  }
+
+  let actual: string
+  try {
+    actual = readFileSync(projectionPath, 'utf8')
+  } catch (error) {
+    if (errorCode(error) !== 'ENOENT') {
+      out.push({
+        level: 'error',
+        message: `agent skill projection unreadable: ${projectionPath}${formatError(error)}`,
+      })
+      return out
+    }
+    out.push({
+      level: 'error',
+      message: `stale agent skill: ${projectionPath} (run \`lab sync-context\`)`,
+    })
+    return out
+  }
+
+  if (normalizeGeneratedText(actual) !== normalizeGeneratedText(expected)) {
+    out.push({
+      level: 'error',
+      message: `stale agent skill: ${projectionPath} (run \`lab sync-context\`)`,
+    })
+  }
   return out
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
+}
+
+function formatError(error: unknown): string {
+  return ` (${error instanceof Error ? error.message : String(error)})`
 }
 
 // Diagnostics for a cataloged `tracking: submodule` plugin repo, without
