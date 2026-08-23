@@ -225,7 +225,7 @@ function validateState(value: unknown): asserts value is UiSessionStateV1 {
     if (state.error !== undefined || state.cleanup !== undefined) throw new Error('ready state cannot contain error or cleanup')
   } else if (phase === 'crashed') {
     if (state.error === undefined) throw new Error('crashed state requires error')
-    if (state.url !== undefined || state.cleanup !== undefined) throw new Error('crashed state cannot contain url or cleanup')
+    if (state.url !== undefined || (state.cleanup !== undefined && state.cleanup !== 'fail')) throw new Error('crashed state cannot contain url or cleanup: pass')
   } else if (phase === 'starting') {
     if (state.url !== undefined || state.error !== undefined || state.cleanup !== undefined) throw new Error('starting state cannot contain url, error, or cleanup')
   } else if (phase === 'stopping') {
