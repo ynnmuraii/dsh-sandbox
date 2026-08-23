@@ -4,7 +4,8 @@ import { createPlugin } from './create.js'
 import { syncContext } from './sync.js'
 import { devSource, verifyBundle, type VerifyOptions } from './run.js'
 import { checkUpstream, updateUpstream } from './upstream-update.js'
-import { parsePluginSelector } from './plugin-ref.js'
+import { parsePluginSelector, resolvePluginRef } from './plugin-ref.js'
+import { inspectPlugin } from './inspect.js'
 
 export { parsePluginSelector } from './plugin-ref.js'
 
@@ -15,6 +16,7 @@ Commands:
   new <name>               create a standalone plugin repo from the template
   dev <name> --target T    run source overlay + HMR against target (next|master)
   verify <name> [--target T] run plugin checks + target compatibility
+  inspect <name> [--target T] inspect standalone plugin contracts
   sync-context [name|--all] regenerate shared-context snapshots
   doctor                   validate toolchain, catalog, and target pins
   upstream check           compare the pinned master commit with the remote
@@ -94,6 +96,35 @@ export async function runCli(argv: string[]): Promise<number> {
         return 1
       }
     }
+    case 'inspect': {
+      if (rest.length === 0) {
+        console.error('error: usage: lab inspect <name> [--target next|master] [--json]')
+        return 1
+      }
+      try {
+        const parsed = parsePluginSelector(rest)
+        const flags = parseInspectFlags(parsed.rest)
+        const plugin = resolvePluginRef({ root: process.cwd(), selector: parsed.selector })
+        const result = inspectPlugin({
+          root: process.cwd(),
+          plugin,
+          ...(flags.target === undefined ? {} : { target: flags.target }),
+        })
+        if (flags.json) {
+          console.log(JSON.stringify(result))
+        } else {
+          console.log(`plugin ${result.plugin.packageName} (${result.plugin.sourcePath})`)
+          for (const diagnostic of result.diagnostics) {
+            console.log(`[${diagnostic.severity}] ${diagnostic.code}: ${diagnostic.message}`)
+            if (diagnostic.remediation) console.log(`  fix: ${diagnostic.remediation}`)
+          }
+        }
+        return result.ok ? 0 : 1
+      } catch (e) {
+        console.error(`error: ${(e as Error).message}`)
+        return 1
+      }
+    }
     case 'upstream':
       return runUpstream(rest)
     case '--help':
@@ -166,6 +197,31 @@ function parseTarget(rest: string[], allowed: readonly string[]): string {
     throw new Error(`invalid --target '${value}' (expected ${allowed.join('|')})`)
   }
   return value
+}
+
+function parseInspectFlags(rest: string[]): { target?: 'next' | 'master'; json: boolean } {
+  let target: 'next' | 'master' | undefined
+  let json = false
+  for (let i = 0; i < rest.length; i += 1) {
+    const flag = rest[i]
+    if (flag === '--json') {
+      if (json) throw new Error('--json may be specified only once')
+      json = true
+      continue
+    }
+    if (flag === '--target') {
+      if (target !== undefined) throw new Error('--target may be specified only once')
+      const value = rest[i + 1]
+      if (value !== 'next' && value !== 'master') {
+        throw new Error(`invalid --target '${value ?? ''}' (expected next|master)`)
+      }
+      target = value
+      i += 1
+      continue
+    }
+    throw new Error(`unknown inspect flag '${flag}'`)
+  }
+  return target === undefined ? { json } : { target, json }
 }
 
 // Allow direct node execution.
