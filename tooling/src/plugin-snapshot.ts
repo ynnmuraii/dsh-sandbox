@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto'
 import {
-  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -12,6 +11,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 
@@ -26,6 +26,8 @@ export interface PluginSnapshot {
 export interface CreatePluginSnapshotOptions {
   sourcePath: string
   runtimeRoot: string
+  /** Test seam invoked after collection and digesting, immediately before copy. */
+  beforeCopy?: () => void
   /** Test seam for asserting cleanup failures without changing Node globals. */
   removeRunRoot?: (runRoot: string) => void
 }
@@ -39,12 +41,14 @@ interface BaseEntry {
 
 interface FileEntry extends BaseEntry {
   kind: 'file'
+  bytes: Buffer
 }
 
 interface SymlinkEntry extends BaseEntry {
   kind: 'symlink'
   linkTarget: string
   digestTarget: string
+  targetRelativePath: string
   linkType: 'file' | 'dir'
 }
 
@@ -76,6 +80,7 @@ export function createPluginSnapshot(opts: CreatePluginSnapshotOptions): PluginS
     runRoot = mkdtempSync(join(opts.runtimeRoot, 'verify-'))
     const workspacePath = join(runRoot, 'workspace')
     mkdirSync(workspacePath)
+    opts.beforeCopy?.()
     copyEntries(entries, workspacePath)
 
     let cleaned = false
@@ -147,7 +152,7 @@ function visitDirectory(
     }
 
     if (stats.isFile()) {
-      entries.push({ absolutePath, relativePath, kind: 'file' })
+      entries.push({ absolutePath, relativePath, kind: 'file', bytes: readFileSync(absolutePath) })
       continue
     }
 
@@ -200,6 +205,7 @@ function validateSymlink(
     digestTarget: isAbsolute(linkTarget)
       ? normalizeRelativePath(relative(sourceRoot, resolvedTarget))
       : normalizeSymlinkTarget(linkTarget),
+    targetRelativePath: normalizeRelativePath(relative(sourceRoot, resolvedTarget)),
     linkType,
   }
 }
@@ -210,17 +216,15 @@ function digestEntries(entries: SnapshotEntry[]): {
 } {
   const hash = createHash('sha256')
   for (const entry of entries) {
-    hash.update(entry.relativePath, 'utf8')
-    hash.update('\0', 'utf8')
-    hash.update(entry.kind, 'utf8')
-    hash.update('\0', 'utf8')
-
-    if (entry.kind === 'file') {
-      hash.update(readFileSync(entry.absolutePath))
-    } else {
-      hash.update(entry.digestTarget, 'utf8')
-    }
-    hash.update('\0', 'utf8')
+    updateDigestField(hash, Buffer.from('entry', 'utf8'))
+    updateDigestField(hash, Buffer.from(entry.relativePath, 'utf8'))
+    updateDigestField(hash, Buffer.from(entry.kind, 'utf8'))
+    updateDigestField(
+      hash,
+      entry.kind === 'file'
+        ? entry.bytes
+        : Buffer.from(entry.digestTarget, 'utf8'),
+    )
   }
 
   return {
@@ -235,11 +239,32 @@ function copyEntries(entries: SnapshotEntry[], workspacePath: string): void {
     mkdirSync(dirname(destinationPath), { recursive: true })
 
     if (entry.kind === 'file') {
-      copyFileSync(entry.absolutePath, destinationPath)
+      writeFileSync(destinationPath, entry.bytes)
     } else {
-      symlinkSync(entry.linkTarget, destinationPath, entry.linkType)
+      symlinkSync(copyLinkTarget(entry, workspacePath), destinationPath, copyLinkType(entry))
     }
   }
+}
+
+function updateDigestField(hash: ReturnType<typeof createHash>, value: Buffer): void {
+  const length = Buffer.allocUnsafe(8)
+  length.writeBigUInt64BE(BigInt(value.byteLength))
+  hash.update(length)
+  hash.update(value)
+}
+
+function copyLinkTarget(entry: SymlinkEntry, workspacePath: string): string {
+  if (process.platform === 'win32' && entry.linkType === 'dir') {
+    return join(workspacePath, ...entry.targetRelativePath.split('/'))
+  }
+  if (!isAbsolute(entry.linkTarget)) return entry.linkTarget
+
+  const copiedTarget = relative(dirname(entry.relativePath), entry.targetRelativePath || '.')
+  return normalizeRelativePath(copiedTarget || '.')
+}
+
+function copyLinkType(entry: SymlinkEntry): 'file' | 'dir' | 'junction' {
+  return process.platform === 'win32' && entry.linkType === 'dir' ? 'junction' : entry.linkType
 }
 
 function defaultRemoveRunRoot(runRoot: string): void {
