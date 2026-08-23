@@ -6,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -62,6 +63,26 @@ describe('pluginEvidenceKey', () => {
       pluginEvidenceKey({ packageName: '@fixture/demo', sourcePath: 'A:/Work/Other' }),
     ).not.toBe(windows)
   })
+
+  it('includes the full package identity in the hash even when readable fragments collide or truncate', () => {
+    expect(pluginEvidenceKey({ packageName: '@a/b-c', sourcePath: 'A:/same' })).not.toBe(
+      pluginEvidenceKey({ packageName: '@a-b/c', sourcePath: 'A:/same' }),
+    )
+    const prefix = `@scope/${'a'.repeat(100)}`
+    const first = pluginEvidenceKey({ packageName: `${prefix}x`, sourcePath: 'A:/same' })
+    const second = pluginEvidenceKey({ packageName: `${prefix}y`, sourcePath: 'A:/same' })
+    expect(first).not.toBe(second)
+    expect(first.length).toBeLessThanOrEqual(80)
+  })
+
+  it('canonicalizes Windows drive case without conflating UNC and POSIX roots', () => {
+    expect(pluginEvidenceKey({ packageName: 'demo', sourcePath: 'C:\\Work\\Plugin' })).toBe(
+      pluginEvidenceKey({ packageName: 'demo', sourcePath: 'c:/work/plugin/' }),
+    )
+    expect(pluginEvidenceKey({ packageName: 'demo', sourcePath: '\\\\server\\share\\plugin' })).not.toBe(
+      pluginEvidenceKey({ packageName: 'demo', sourcePath: '/server/share/plugin' }),
+    )
+  })
 })
 
 describe('publishRunResult', () => {
@@ -106,6 +127,45 @@ describe('publishRunResult', () => {
       }),
     })).toThrow(/summary/i)
   })
+
+  it('persists only a single-line redacted summary and bounds the number of steps', () => {
+    const root = runsRoot()
+    const leaked = 'failed\nTOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz\npassword=hunter2'
+    const path = publishRunResult({
+      runsRoot: root,
+      result: result({
+        steps: [{ id: 'inspect', status: 'fail', durationMs: 1, summary: leaked }],
+      }),
+    })
+    const stored = JSON.parse(readFileSync(path, 'utf8')) as VerifyRunResultV1
+    const summary = stored.steps[0]!.summary!
+    expect(summary).not.toContain('ghp_1234567890abcdefghijklmnopqrstuvwxyz')
+    expect(summary).not.toContain('hunter2')
+    expect(summary).not.toMatch(/[\r\n]/)
+    expect(summary).toContain('[REDACTED]')
+    expect(summary.length).toBeLessThanOrEqual(500)
+
+    expect(() => publishRunResult({
+      runsRoot: runsRoot(),
+      result: result({
+        steps: Array.from({ length: 257 }, (_, index) => ({
+          id: `step-${index}`,
+          status: 'pass' as const,
+          durationMs: 0,
+        })),
+      }),
+    })).toThrow(/steps.*256|too many steps/i)
+  })
+
+  it.each(['CON', 'con.txt', 'PRN', 'AUX', 'NUL', 'COM1', 'lpt9', 'run.'])(
+    'rejects non-portable Windows run id %j',
+    runId => {
+      expect(() => publishRunResult({
+        runsRoot: runsRoot(),
+        result: result({ runId }),
+      })).toThrow(/runId.*reserved|runId.*portable|invalid runId/i)
+    },
+  )
 
   it('writes run-id temp then atomically renames to result.json', () => {
     const root = runsRoot()
@@ -153,6 +213,41 @@ describe('publishRunResult', () => {
     expect(existsSync(temporary)).toBe(false)
     expect(existsSync(join(runDirectory, 'result.json'))).toBe(false)
   })
+
+  it('rejects a symlinked plugin evidence directory instead of writing outside runsRoot', () => {
+    const root = runsRoot()
+    const outside = runsRoot()
+    const value = result()
+    const key = pluginEvidenceKey(value.plugin)
+    symlinkSyncDirectory(outside, join(root, key))
+
+    expect(() => publishRunResult({ runsRoot: root, result: value })).toThrow(/symlink|junction|escape/i)
+    expect(existsSync(join(outside, value.runId, 'result.json'))).toBe(false)
+    expect(() => loadRunResults({ runsRoot: root, pluginKey: key })).toThrow(/symlink|junction|escape/i)
+  })
+
+  it('rejects a symlinked runsRoot itself', () => {
+    const parent = runsRoot()
+    const outside = runsRoot()
+    const linkedRoot = join(parent, 'linked-runs')
+    symlinkSyncDirectory(outside, linkedRoot)
+
+    expect(() => publishRunResult({ runsRoot: linkedRoot, result: result() })).toThrow(
+      /runsRoot.*symlink|junction|escape/i,
+    )
+  })
+
+  it('reports an orphan publication lock with its exact actionable path', () => {
+    const root = runsRoot()
+    const value = result()
+    const lock = join(root, pluginEvidenceKey(value.plugin), value.runId, '.publication.lock')
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(dirname(lock), `${value.runId}.tmp`), 'orphan')
+
+    expect(() => publishRunResult({ runsRoot: root, result: value })).toThrow(
+      new RegExp(`${escapeRegex(lock)}.*(?:stale|orphan|remove|recover)`, 'i'),
+    )
+  })
 })
 
 describe('loadRunResults', () => {
@@ -185,7 +280,28 @@ describe('loadRunResults', () => {
       new RegExp(escapeRegex(path)),
     )
   })
+
+  it('uses a locale-independent code-point tie-breaker for equal completion times', () => {
+    const root = runsRoot()
+    const timestamp = '2026-08-23T10:00:01.000Z'
+    const upper = result({ runId: 'B', finishedAt: timestamp })
+    const lower = result({ runId: 'a', finishedAt: timestamp })
+    const key = pluginEvidenceKey(upper.plugin)
+    publishRunResult({ runsRoot: root, result: upper })
+    publishRunResult({ runsRoot: root, result: lower })
+
+    expect(loadRunResults({ runsRoot: root, pluginKey: key }).map(run => run.runId)).toEqual([
+      'a',
+      'B',
+    ])
+  })
 })
+
+function symlinkSyncDirectory(target: string, path: string): void {
+  // Junctions are available to ordinary Windows users; POSIX uses a directory symlink.
+  const type = process.platform === 'win32' ? 'junction' : 'dir'
+  symlinkSync(target, path, type)
+}
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
