@@ -236,6 +236,20 @@ describe('inspectPlugin', () => {
   })
 
   it.each([
+    'export const pattern = /require("upstream\\/deepseek-harness\\/src\\/private\\.js")/',
+    'export const pattern = /import("upstream\\/deepseek-harness\\/src\\/private\\.js")/',
+  ])('does not mistake a regex literal for a private module load: %s', (source) => {
+    const subject = fixture()
+    writeFileSync(join(subject.plugin.sourcePath, 'src', 'index.ts'), `${source}\n`)
+
+    const result = inspectPlugin({ root: subject.root, plugin: subject.plugin })
+
+    expect(result.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'PRIVATE_UPSTREAM_IMPORT' }),
+    )
+  })
+
+  it.each([
     'const load = () => import("../../upstream/deepseek-harness/src/private.js")',
     'register(require("../../upstream/deepseek-harness/src/private.js"))',
   ])('detects private module loading nested in an expression: %s', (source) => {
