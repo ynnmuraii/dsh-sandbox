@@ -458,9 +458,9 @@ function hasPrivateUpstreamImport(content: string): boolean {
     // `obj.require(...)` is a method call, not a module require. The same
     // guard keeps property names called "import" from being misclassified.
     if (tokens[i - 1]?.value === '.') continue
-    const next = tokens[i + 1]
+    const next = nextCodeToken(tokens, i + 1)
     if (next?.kind === 'punctuation' && next.value === '(') {
-      const argument = tokens[i + 2]
+      const argument = nextCodeToken(tokens, next.index + 1)
       if (argument?.kind === 'string' && specifier.test(argument.value)) return true
       continue
     }
@@ -475,9 +475,22 @@ interface SourceToken {
 }
 
 function tokenizeSource(content: string): SourceToken[] {
+  return tokenizeCode(content, 0).tokens
+}
+
+function tokenizeCode(
+  content: string,
+  start: number,
+  stopAtBrace = false,
+): { tokens: SourceToken[]; index: number } {
   const tokens: SourceToken[] = []
-  for (let i = 0; i < content.length;) {
+  let braceDepth = 0
+  let i = start
+  for (; i < content.length;) {
     const character = content[i]!
+    if (stopAtBrace && character === '}' && braceDepth === 0) {
+      return { tokens, index: i + 1 }
+    }
     if (character === '\n' || character === '\r') {
       if (character === '\r' && content[i + 1] === '\n') i += 1
       tokens.push({ kind: 'newline', value: '\n' })
@@ -500,6 +513,12 @@ function tokenizeSource(content: string): SourceToken[] {
       continue
     }
     if (character === "'" || character === '"' || character === '`') {
+      if (character === '`') {
+        const template = tokenizeTemplate(content, i)
+        tokens.push(...template.tokens)
+        i = template.index
+        continue
+      }
       const quote = character
       let value = ''
       i += 1
@@ -528,9 +547,42 @@ function tokenizeSource(content: string): SourceToken[] {
       continue
     }
     tokens.push({ kind: 'punctuation', value: character })
+    if (stopAtBrace && character === '{') braceDepth += 1
+    if (stopAtBrace && character === '}') braceDepth -= 1
     i += 1
   }
-  return tokens
+  return { tokens, index: i }
+}
+
+function tokenizeTemplate(
+  content: string,
+  start: number,
+): { tokens: SourceToken[]; index: number } {
+  const tokens: SourceToken[] = []
+  let i = start + 1
+  while (i < content.length) {
+    const character = content[i]!
+    if (character === '\\') {
+      i += Math.min(2, content.length - i)
+      continue
+    }
+    if (character === '`') return { tokens, index: i + 1 }
+    if (character === '$' && content[i + 1] === '{') {
+      const interpolation = tokenizeCode(content, i + 2, true)
+      tokens.push(...interpolation.tokens)
+      i = interpolation.index
+      continue
+    }
+    i += 1
+  }
+  return { tokens, index: i }
+}
+
+function nextCodeToken(tokens: SourceToken[], start: number): (SourceToken & { index: number }) | undefined {
+  for (let i = start; i < tokens.length; i += 1) {
+    if (tokens[i]!.kind !== 'newline') return { ...tokens[i]!, index: i }
+  }
+  return undefined
 }
 
 function privateExportOrImportSource(
@@ -542,11 +594,17 @@ function privateExportOrImportSource(
   if (keyword !== 'import' && keyword !== 'export') return false
   const immediate = tokens[start + 1]
   if (keyword === 'import' && immediate?.kind === 'string') return specifier.test(immediate.value)
+  let depth = 0
   for (let i = start + 1; i < tokens.length; i += 1) {
     const token = tokens[i]!
-    if (token.kind === 'newline' || (token.kind === 'punctuation' && token.value === ';')) return false
+    if (token.kind === 'punctuation') {
+      if (token.value === '{' || token.value === '[' || token.value === '(') depth += 1
+      if (token.value === '}' || token.value === ']' || token.value === ')') depth = Math.max(0, depth - 1)
+      if (token.value === ';' && depth === 0) return false
+    }
+    if (token.kind === 'newline' && depth === 0) return false
     if (token.kind === 'identifier' && token.value === 'from') {
-      const source = tokens[i + 1]
+      const source = nextCodeToken(tokens, i + 1)
       return source?.kind === 'string' && specifier.test(source.value)
     }
   }
