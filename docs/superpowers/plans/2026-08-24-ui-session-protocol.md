@@ -363,6 +363,7 @@ Require approval of path safety, exact target pinning, no plugin writes, and no 
 
 **Files:**
 - Create: `tooling/src/ui-supervisor.spec.ts`
+- Create: `tooling/src/ui-supervisor-bin.spec.ts`
 
 **Interfaces under test:**
 
@@ -392,16 +393,40 @@ export interface UiSupervisorDependencies {
   prepareRuntime(opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string }): Promise<UiRuntimePlan>
   spawnChild(plan: UiRuntimePlan): UiChildHandle
   stopChildTree(handle: UiChildHandle): Promise<void>
+  writeLog(sessionDir: string, text: string, maxBytes: number): void
   now(): string
   sleep(ms: number): Promise<void>
   pollIntervalMs: number
   maxLogBytes: number
 }
 
+export interface UiProcessTreeDependencies {
+  platform: 'windows' | 'posix'
+  taskkill(args: string[]): Promise<void>
+  signalGroup(group: number, signal: 'SIGTERM' | 'SIGKILL'): void
+  waitForExit(exited: Promise<UiChildExit>, timeoutMs: number): Promise<boolean>
+  termGraceMs: number
+  killGraceMs: number
+}
+
 export function parseDshReadyUrl(line: string): string | undefined
 export function windowsTreeKillArgs(pid: number): string[]
 export function posixProcessGroup(pid: number): number
+export function writeBoundedSupervisorLog(sessionDir: string, text: string, maxBytes: number): void
+export async function stopOwnedChildTree(handle: UiChildHandle, deps?: UiProcessTreeDependencies): Promise<void>
 export async function runUiSupervisor(request: UiSupervisorRequestV1, deps?: UiSupervisorDependencies): Promise<void>
+```
+
+The bin exposes an injected test seam without changing its production invocation:
+
+```ts
+export interface UiSupervisorBinDependencies {
+  runSupervisor(request: UiSupervisorRequestV1): Promise<void>
+  stderr(message: string): void
+  now(): string
+}
+
+export async function runSupervisorBin(argv?: string[], deps?: UiSupervisorBinDependencies): Promise<number>
 ```
 
 - [ ] **Step 1: Test strict readiness parsing and bounded logs**
@@ -433,6 +458,7 @@ Commit only the test with message `test: define UI supervisor lifecycle`.
 - Create: `tooling/src/ui-supervisor-bin.ts`
 - Modify: `tooling/src/ui-session.ts` (only the controller-tested `crashed + cleanup: 'fail'` validator rule)
 - Test: `tooling/src/ui-supervisor.spec.ts`
+- Test: `tooling/src/ui-supervisor-bin.spec.ts`
 - Test: `tooling/src/ui-session.spec.ts`
 
 **Interfaces:**
@@ -453,7 +479,7 @@ The live supervisor may use `taskkill.exe` with validated numeric PID on Windows
 
 - [ ] **Step 4: Run tests and commit production only**
 
-Run `pnpm vitest run tooling/src/ui-supervisor.spec.ts tooling/src/ui-session.spec.ts` and `pnpm typecheck`.
+Run `pnpm vitest run tooling/src/ui-supervisor.spec.ts tooling/src/ui-supervisor-bin.spec.ts tooling/src/ui-session.spec.ts` and `pnpm typecheck`.
 
 Commit only the two production files with message `feat: supervise UI runtime lifecycle`.
 
