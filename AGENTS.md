@@ -45,8 +45,8 @@ pnpm lab doctor
 - `new` creates an autonomous nested Git repo from the template (tracked as `local`).
 - `dev` runs a source overlay + HMR against the chosen target.
 - `verify` runs the plugin's own checks, then compatibility checks.
-- `sync-context` regenerates `plugin/.dsh-lab/shared-context.md` snapshots.
-- `doctor` checks toolchain, catalog, target pins, submodules, and context hashes.
+- `sync-context` regenerates `plugin/.dsh-lab/shared-context.md` snapshots and `.agents/skills/dsh-plugin-development/SKILL.md`.
+- `doctor` checks toolchain, catalog, target pins, submodules, context hashes, and portable-skill drift without writing files.
 - Root tooling never changes plugin version or publishes packages.
 
 ## Catalog policy

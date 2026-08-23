@@ -19,9 +19,11 @@ overlays stay under the forge's `.lab/runtime`. `verify` copies that current
 source into a temporary workspace and always removes the temporary workspace;
 the forge keeps only minimal evidence as memory of the result. Catalog lookup
 is convenient and `init`/initialization is optional; only explicit authoring commands mutate plugin repositories. The portable agent entrypoint is
-`.agents/skills/dsh-plugin-development/SKILL.md`;
-regenerate it from the canonical context with `pnpm lab sync-context`. UI review
-sessions are not provided by this slice.
+`.agents/skills/dsh-plugin-development/SKILL.md`, generated from the canonical
+body at `context/dsh-plugin-development-skill.md` and all context documents.
+It provides advisory methodology for the agent; `pnpm lab sync-context`
+regenerates it, while `pnpm lab doctor` reports missing or stale content without
+writing files. UI review sessions are not provided by this slice.
 
 - **Author guide & recipes** — [docs/using-the-lab.md](docs/using-the-lab.md)
 - **Root context library** — [context/](context/) (shared snapshots derive from it)
