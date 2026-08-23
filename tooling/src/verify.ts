@@ -65,8 +65,8 @@ type VerifyResultWithNext = VerifyRunResultV1 & {
   }
 }
 
-export function verifyPlugin(opts: VerifyPluginOptions & { target: 'master' }): Promise<VerifyRunResultV1>
-export function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyResultWithNext>
+export function verifyPlugin(opts: VerifyPluginOptions & { target: 'next' }): Promise<VerifyResultWithNext>
+export function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyRunResultV1>
 export async function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyRunResultV1> {
   const deps = defaults(opts.dependencies)
   const runId = deps.createRunId()
@@ -223,9 +223,15 @@ function defaults(overrides: Partial<VerifyPluginDependencies> | undefined): Ver
 }
 
 function resolveTargets(requested: VerifyPluginOptions['target'], plugin: PluginRef): Target[] {
-  const declared = plugin.metadata?.targets?.filter((value): value is Target =>
+  const rawDeclared = plugin.metadata?.targets ?? []
+  for (const value of rawDeclared) {
+    if (value !== 'next' && value !== 'master') {
+      throw new Error(`unknown target '${value}' in plugin metadata`)
+    }
+  }
+  const declared = rawDeclared.filter((value): value is Target =>
     value === 'next' || value === 'master',
-  ) ?? []
+  )
   if (requested === 'all') {
     const selected = TARGETS.filter(target => declared.length === 0 || declared.includes(target))
     if (selected.length === 0) throw new Error(`plugin '${pluginName(plugin)}' declares no supported compatibility targets`)

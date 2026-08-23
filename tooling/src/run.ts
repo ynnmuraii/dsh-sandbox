@@ -226,8 +226,11 @@ export async function buildUpstream(root: string, compat: Compatibility): Promis
         `(git -C ${upstreamDir} status); refusing to report a master pass on modified tracked files`,
     )
   }
-  pnpm(['install', '--config.strictDepBuilds=false'], { cwd: upstreamDir, stdio: 'inherit' })
-  pnpm(['run', 'build'], { cwd: upstreamDir, stdio: 'inherit' })
+  // Keep build output captured: verify --json must reserve stdout for its
+  // single finalized evidence document. Callers retain the thrown command
+  // error and can summarize it through their normal failure step.
+  pnpm(['install', '--config.strictDepBuilds=false'], { cwd: upstreamDir, stdio: 'pipe' })
+  pnpm(['run', 'build'], { cwd: upstreamDir, stdio: 'pipe' })
   return rootPath(root, ROOT_PATHS.upstream + '/apps/cli/lib/bin.js').replace(/\\/g, '/')
 }
 

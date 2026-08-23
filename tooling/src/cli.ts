@@ -88,6 +88,7 @@ export async function runCli(argv: string[]): Promise<number> {
         const parsed = parsePluginSelector(rest)
         const flags = parseVerifyFlags(parsed.rest)
         const plugin = resolvePluginRef({ root: process.cwd(), selector: parsed.selector })
+        validateMetadataTargets(plugin)
         const target = flags.target ?? inferVerifyTarget(plugin)
         const run = () => verifyPlugin({ root: process.cwd(), plugin, target })
         const result = flags.json ? await suppressConsoleProgress(run) : await run()
@@ -234,12 +235,22 @@ function parseVerifyFlags(rest: string[]): { target?: 'next' | 'master' | 'all';
 }
 
 function inferVerifyTarget(plugin: { metadata?: { targets?: string[] } }): 'next' | 'master' | 'all' {
-  const declared = plugin.metadata?.targets?.filter(
-    (target): target is 'next' | 'master' => target === 'next' || target === 'master',
-  ) ?? []
+  const declared = validateMetadataTargets(plugin)
   if (declared.length === 1) return declared[0]!
   if (declared.length > 1) return 'all'
   throw new Error('verify requires --target when plugin metadata does not declare a target')
+}
+
+function validateMetadataTargets(plugin: { metadata?: { targets?: string[] } }): Array<'next' | 'master'> {
+  const raw = plugin.metadata?.targets ?? []
+  for (const target of raw) {
+    if (target !== 'next' && target !== 'master') {
+      throw new Error(`unknown target '${target}' in plugin metadata`)
+    }
+  }
+  return raw.filter(
+    (target): target is 'next' | 'master' => target === 'next' || target === 'master',
+  )
 }
 
 async function suppressConsoleProgress<T>(operation: () => Promise<T>): Promise<T> {
