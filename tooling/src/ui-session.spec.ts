@@ -141,6 +141,23 @@ describe('UI session store', () => {
     })).not.toThrow()
   })
 
+  it('represents a failed cleanup as a crashed session without claiming success', () => {
+    const root = runtimeRoot()
+    expect(() => createUiSession({
+      runtimeRoot: root,
+      state: state({
+        state: 'crashed',
+        error: 'failed to stop owned child tree',
+        cleanup: 'fail',
+        updatedAt: '2026-08-24T12:00:01.000Z',
+      }),
+    })).not.toThrow()
+    expect(readUiSession({ runtimeRoot: root, sessionId: SESSION })).toMatchObject({
+      state: 'crashed',
+      cleanup: 'fail',
+    })
+  })
+
   it('allows only monotonic lifecycle transitions and identical terminal rewrites', () => {
     const root = runtimeRoot()
     createUiSession({ runtimeRoot: root, state: state() })
