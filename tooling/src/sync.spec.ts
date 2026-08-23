@@ -101,7 +101,7 @@ describe('syncContext', () => {
     writeFileSync(join(dir, 'catalog.yaml'), 'plugins:\n  a:\n    path: plugins/a\n    tracking: local\n')
     mkdirSync(join(dir, 'plugins', 'a'), { recursive: true })
     const res = await syncContext({ root: dir, names: ['constructor'], all: false })
-    expect(res).toHaveLength(0)
+    expect(res.map(result => result.kind)).toEqual(['agent-skill'])
   })
 
   it('does not crash when catalog is missing and a name collides with a prototype key', async () => {
