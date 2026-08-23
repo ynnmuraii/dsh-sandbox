@@ -350,6 +350,16 @@ describe('status CLI', () => {
     }
   }
 
+  it('documents the distinct success, incomplete, and tooling-error exit codes', async () => {
+    const output = captureConsole()
+
+    expect(await runCli(['--help'])).toBe(0)
+    const help = output.logs.join('\n')
+    expect(help).toMatch(/status[\s\S]*exit\s*0[\s\S]*(?:current|applicable.*pass)/i)
+    expect(help).toMatch(/exit\s*2[\s\S]*(?:stale|not-run|failed)/i)
+    expect(help).toMatch(/exit\s*1[\s\S]*(?:selector|tooling|error)/i)
+  })
+
   it.each([
     [['status', '--path', 'A:/standalone'], { path: 'A:/standalone' }],
     [['status', 'demo'], { name: 'demo' }],
