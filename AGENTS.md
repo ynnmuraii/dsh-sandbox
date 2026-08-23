@@ -15,17 +15,18 @@ pnpm lab status <name>|--path P [--json]
 `dev` is live/in-place read-only for the plugin and keeps profiles/overlays in
 `.lab/runtime`. `verify` includes current uncommitted and untracked files in a
 temporary workspace and always removes that workspace; only minimal evidence is
-kept as forge memory. Catalog lookup and init/initialization are optional. Only explicit authoring commands mutate plugin repositories. UI sessions and skill generation are future work, not commands provided here.
+kept as forge memory. Catalog lookup and init/initialization are optional. Only explicit authoring commands mutate plugin repositories. The portable agent entrypoint is `.agents/skills/dsh-plugin-development/SKILL.md`; regenerate it with `pnpm lab sync-context`. UI sessions are not provided here.
 
 ## Source of truth
 
-`context/*` is the single source of truth for shared rules — edit there, never in plugin snapshots:
+`context/*` is the single source of truth for shared rules and the portable agent skill — edit there, never in generated projections or plugin snapshots:
 
 - `context/harness-contracts.md` — public plugin contracts and integration paths.
 - `context/cordis-model.md` — Fiber/effect/inject model.
 - `context/plugin-anatomy.md` — standalone plugin repo layout and package contract.
 - `context/testing-policy.md` — required test levels and HMR-safety rules.
 - `context/compatibility.md` — targets, `workbench/compatibility.yaml`, per-plugin target claims.
+- `context/dsh-plugin-development-skill.md` — canonical body for the generated `.agents/skills/dsh-plugin-development/SKILL.md` entrypoint.
 
 Per-plugin `AGENTS.md` files hold only local rules and must read `.dsh-lab/shared-context.md` first.
 

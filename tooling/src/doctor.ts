@@ -4,7 +4,13 @@ import { join } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
 import { loadCompatibility, loadCompatibilityFromFile, loadCatalogFromFile } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
-import { snapshotContext, contextDocuments } from './sync.js'
+import { contextDocuments, snapshotContext } from './sync.js'
+import {
+  AGENT_SKILL_PATH,
+  normalizeGeneratedText,
+  renderAgentSkill,
+  SKILL_SOURCE_PATH,
+} from './skill.js'
 import { verifyUpstreamCommit } from './upstream.js'
 import { pnpm } from './proc.js'
 
@@ -208,6 +214,27 @@ export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[
       out.push({
         level: 'error',
         message: `cannot read catalog for plugin pin check: ${(e as Error).message}`,
+      })
+    }
+  }
+
+  // Render the portable skill in memory. Doctor is read-only; only the
+  // explicit `lab sync-context` command may repair a stale projection.
+  const skillPath = rootPath(root, AGENT_SKILL_PATH)
+  const skillBodyPath = rootPath(root, SKILL_SOURCE_PATH)
+  if (existsSync(skillBodyPath)) {
+    const expectedSkill = renderAgentSkill({
+      body: readFileSync(skillBodyPath, 'utf8'),
+      documents: contextDocuments(root),
+    })
+    const actualSkill = existsSync(skillPath) ? readFileSync(skillPath, 'utf8') : undefined
+    if (
+      actualSkill === undefined ||
+      normalizeGeneratedText(actualSkill) !== normalizeGeneratedText(expectedSkill)
+    ) {
+      out.push({
+        level: 'error',
+        message: `stale agent skill: ${skillPath} (run \`lab sync-context\`)`,
       })
     }
   }
