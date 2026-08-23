@@ -431,7 +431,9 @@ Commit only the test with message `test: define UI supervisor lifecycle`.
 **Files:**
 - Create: `tooling/src/ui-supervisor.ts`
 - Create: `tooling/src/ui-supervisor-bin.ts`
+- Modify: `tooling/src/ui-session.ts` (only the controller-tested `crashed + cleanup: 'fail'` validator rule)
 - Test: `tooling/src/ui-supervisor.spec.ts`
+- Test: `tooling/src/ui-session.spec.ts`
 
 **Interfaces:**
 - Consumes Task 5's exact interfaces and Task 4's session/runtime APIs. Runtime preparation and package installation happen inside the detached supervisor, not in the short-lived `ui start` CLI process.
