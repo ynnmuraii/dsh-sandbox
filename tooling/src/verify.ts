@@ -59,23 +59,41 @@ interface PackageVerifyResultLike {
 const TARGETS = ['next', 'master'] as const
 type Target = (typeof TARGETS)[number]
 
+type VerifyResultWithNext = VerifyRunResultV1 & {
+  targets: VerifyRunResultV1['targets'] & {
+    next: { dsh?: string; commit?: string; result: RunStepResult['status'] }
+  }
+}
+
+export function verifyPlugin(opts: VerifyPluginOptions & { target: 'master' }): Promise<VerifyRunResultV1>
+export function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyResultWithNext>
 export async function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyRunResultV1> {
   const deps = defaults(opts.dependencies)
   const runId = deps.createRunId()
   const startedAt = deps.now().toISOString()
   const selectedTargets = resolveTargets(opts.target, opts.plugin)
 
-  const inspection = deps.inspectPlugin({
-    root: opts.root,
-    plugin: opts.plugin,
-    ...(opts.target === 'all' ? {} : { target: opts.target }),
-  })
-  if (!inspection.ok) {
-    const errors = inspection.diagnostics
-      .filter(diagnostic => diagnostic.severity === 'error')
-      .map(diagnostic => `${diagnostic.code}: ${diagnostic.message}`)
-      .join('; ')
-    throw new Error(`inspection failed${errors ? `: ${errors}` : ''}`)
+  const inspectionErrors: string[] = []
+  for (const target of selectedTargets) {
+    try {
+      const inspection = deps.inspectPlugin({
+        root: opts.root,
+        plugin: opts.plugin,
+        target,
+      })
+      if (!inspection.ok) {
+        const errors = inspection.diagnostics
+          .filter(diagnostic => diagnostic.severity === 'error')
+          .map(diagnostic => `${diagnostic.code}: ${diagnostic.message}`)
+          .join('; ')
+        inspectionErrors.push(`${target}${errors ? `: ${errors}` : ''}`)
+      }
+    } catch (error) {
+      inspectionErrors.push(`${target}: ${errorMessage(error)}`)
+    }
+  }
+  if (inspectionErrors.length > 0) {
+    throw new Error(`inspection failed: ${inspectionErrors.join('; ')}`)
   }
 
   const runtimeRoot = rootPath(opts.root, ROOT_PATHS.runtime)

@@ -365,29 +365,29 @@ export async function verifyPackedTarget(opts: {
   const runId = randomUUID()
   const profileNameValue = profileName(pluginName, target, 'verify', runId)
   const profileDir = join(home, 'profiles', profileNameValue)
-  mkdirSync(profileDir, { recursive: true })
-  const spec: ProfileSpec = { name: `@dsh-lab/profile-${profileNameValue}`, bundles: PROFILE_BUNDLES }
-  const dsh = target === 'master' ? undefined : compat.targets.next.dsh
-  if (target !== 'master' && !dsh) {
-    throw new CompatibilityError(`target '${target}' requires a pinned dsh version`)
-  }
-  const pin: { dsh?: string } = dsh === undefined ? {} : { dsh }
-  writeFileSync(
-    join(profileDir, 'package.json'),
-    JSON.stringify(buildProfilePackageJson(spec, pin), null, 2) + '\n',
-  )
-  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(opts.compat.targets[target].allowBuilds ?? {}))
-  const env = { ...process.env, DSH_HOME: home.replace(/\\/g, '/') }
-
-  // 3. Install the packed bundle through dsh's own plugin manager. `plugin add`
-  //    forwards to pnpm and reconciles `dsh.profile.bundles` against installed
-  //    state, so a tarball whose manifest declares `dsh.bundle.patch` joins the
-  //    layer stack — the real publish path. `next` first installs the pinned
-  //    launcher so `pnpm exec dsh` resolves; its `--config.strictDepBuilds=false`
-  //    keeps pnpm from hard-failing on dsh's native build scripts, and the
-  //    tarball path is passed as a single argument (no shell tokenization, so
-  //    Windows paths with spaces are safe).
   try {
+    mkdirSync(profileDir, { recursive: true })
+    const spec: ProfileSpec = { name: `@dsh-lab/profile-${profileNameValue}`, bundles: PROFILE_BUNDLES }
+    const dsh = target === 'master' ? undefined : compat.targets.next.dsh
+    if (target !== 'master' && !dsh) {
+      throw new CompatibilityError(`target '${target}' requires a pinned dsh version`)
+    }
+    const pin: { dsh?: string } = dsh === undefined ? {} : { dsh }
+    writeFileSync(
+      join(profileDir, 'package.json'),
+      JSON.stringify(buildProfilePackageJson(spec, pin), null, 2) + '\n',
+    )
+    writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(opts.compat.targets[target].allowBuilds ?? {}))
+    const env = { ...process.env, DSH_HOME: home.replace(/\\/g, '/') }
+
+    // 3. Install the packed bundle through dsh's own plugin manager. `plugin add`
+    //    forwards to pnpm and reconciles `dsh.profile.bundles` against installed
+    //    state, so a tarball whose manifest declares `dsh.bundle.patch` joins the
+    //    layer stack — the real publish path. `next` first installs the pinned
+    //    launcher so `pnpm exec dsh` resolves; its `--config.strictDepBuilds=false`
+    //    keeps pnpm from hard-failing on dsh's native build scripts, and the
+    //    tarball path is passed as a single argument (no shell tokenization, so
+    //    Windows paths with spaces are safe).
     const launcher = target === 'master' && masterBin
       ? { cmd: process.execPath, args: [masterBin] }
       : await resolveLauncher(root, compat, target)
@@ -405,7 +405,7 @@ export async function verifyPackedTarget(opts: {
         `file:${tarball.replace(/\\/g, '/')}`,
         '--config.strictDepBuilds=false',
       ],
-      { cwd: profileDir, env, stdio: 'inherit' },
+      { cwd: profileDir, env, stdio: ['ignore', 'pipe', 'pipe'] },
     )
 
     // 4. Compose the profile config for THIS target WITHOUT binding a port/server

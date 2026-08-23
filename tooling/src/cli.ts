@@ -89,7 +89,8 @@ export async function runCli(argv: string[]): Promise<number> {
         const flags = parseVerifyFlags(parsed.rest)
         const plugin = resolvePluginRef({ root: process.cwd(), selector: parsed.selector })
         const target = flags.target ?? inferVerifyTarget(plugin)
-        const result = await verifyPlugin({ root: process.cwd(), plugin, target })
+        const run = () => verifyPlugin({ root: process.cwd(), plugin, target })
+        const result = flags.json ? await suppressConsoleProgress(run) : await run()
         if (flags.json) {
           console.log(JSON.stringify(result))
         } else {
@@ -239,6 +240,16 @@ function inferVerifyTarget(plugin: { metadata?: { targets?: string[] } }): 'next
   if (declared.length === 1) return declared[0]!
   if (declared.length > 1) return 'all'
   throw new Error('verify requires --target when plugin metadata does not declare a target')
+}
+
+async function suppressConsoleProgress<T>(operation: () => Promise<T>): Promise<T> {
+  const originalLog = console.log
+  console.log = () => undefined
+  try {
+    return await operation()
+  } finally {
+    console.log = originalLog
+  }
 }
 
 function parseInspectFlags(rest: string[]): { target?: 'next' | 'master'; json: boolean } {
