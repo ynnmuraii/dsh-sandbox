@@ -393,11 +393,16 @@ export interface UiSupervisorDependencies {
   prepareRuntime(opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string }): Promise<UiRuntimePlan>
   spawnChild(plan: UiRuntimePlan): UiChildHandle
   stopChildTree(handle: UiChildHandle): Promise<void>
-  writeLog(sessionDir: string, text: string, maxBytes: number): void
+  openLog(sessionDir: string, maxBytes: number): UiDiagnosticLog
   now(): string
   sleep(ms: number): Promise<void>
   pollIntervalMs: number
   maxLogBytes: number
+}
+
+export interface UiDiagnosticLog {
+  write(text: string): void
+  close(): void
 }
 
 export interface UiProcessTreeDependencies {
@@ -412,7 +417,7 @@ export interface UiProcessTreeDependencies {
 export function parseDshReadyUrl(line: string): string | undefined
 export function windowsTreeKillArgs(pid: number): string[]
 export function posixProcessGroup(pid: number): number
-export function writeBoundedSupervisorLog(sessionDir: string, text: string, maxBytes: number): void
+export function openBoundedSupervisorLog(sessionDir: string, maxBytes: number): UiDiagnosticLog
 export async function stopOwnedChildTree(handle: UiChildHandle, deps?: UiProcessTreeDependencies): Promise<void>
 export async function runUiSupervisor(request: UiSupervisorRequestV1, deps?: UiSupervisorDependencies): Promise<void>
 ```
