@@ -235,13 +235,7 @@ function validateUiResult(value: unknown): UiResultV1 {
   if (result.cleanup !== 'pass') throw new Error('cleanup must be pass')
   validateTimestamp(result.startedAt, 'startedAt')
   validateTimestamp(result.finishedAt, 'finishedAt')
-  // Session identifiers carry the session's UTC hour. When the supplied start
-  // timestamp belongs to that same hour, an end before it is definitively an
-  // invalid chronology. Older imported evidence can legitimately have a
-  // historical finishedAt while callers retain a common fixture start time.
-  const sessionHour = (result.sessionId as string).slice(3, 15)
-  const startedHour = (result.startedAt as string).replace(/[-:]/g, '').slice(0, 12)
-  if (sessionHour === startedHour && Date.parse(result.startedAt as string) > Date.parse(result.finishedAt as string)) {
+  if (Date.parse(result.startedAt as string) > Date.parse(result.finishedAt as string)) {
     throw new Error('finishedAt must not be before startedAt')
   }
   return value as UiResultV1
