@@ -446,18 +446,111 @@ function matchesPackageGlob(pattern: string, path: string): boolean {
 
 function hasPrivateUpstreamImport(content: string): boolean {
   const specifier = /(?:upstream[\\/]+deepseek-harness|deepseek-harness[\\/]src)/i
-  const declarationPatterns = [
-    /^\s*import\s+(?:type\s+)?(?:[^'";]+?\s+from\s+)?['"]([^'"]+)['"]/gm,
-    /^\s*export\s+(?:[^'";]+?\s+from\s+)?['"]([^'"]+)['"]/gm,
-    /^\s*(?:(?:(?:const|let|var)\s+[^=;]+?\s*=\s*)|(?:await\s+))?import\s*\(\s*['"]([^'"]+)['"]\s*\)/gm,
-    /^\s*(?:(?:const|let|var)\s+[^=;]+?\s*=\s*)?require\s*\(\s*['"]([^'"]+)['"]\s*\)/gm,
-  ]
-  return declarationPatterns.some(pattern => {
-    for (const match of content.matchAll(pattern)) {
-      if (specifier.test(match[1] ?? '')) return true
+  const tokens = tokenizeSource(content)
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]!
+    if (token.kind !== 'identifier' || (token.value !== 'import' && token.value !== 'require')) {
+      if (token.kind === 'identifier' && (token.value === 'export' || token.value === 'import')) {
+        if (privateExportOrImportSource(tokens, i, specifier)) return true
+      }
+      continue
     }
-    return false
-  })
+    // `obj.require(...)` is a method call, not a module require. The same
+    // guard keeps property names called "import" from being misclassified.
+    if (tokens[i - 1]?.value === '.') continue
+    const next = tokens[i + 1]
+    if (next?.kind === 'punctuation' && next.value === '(') {
+      const argument = tokens[i + 2]
+      if (argument?.kind === 'string' && specifier.test(argument.value)) return true
+      continue
+    }
+    if (token.value === 'import' && privateExportOrImportSource(tokens, i, specifier)) return true
+  }
+  return false
+}
+
+interface SourceToken {
+  kind: 'identifier' | 'string' | 'punctuation' | 'newline'
+  value: string
+}
+
+function tokenizeSource(content: string): SourceToken[] {
+  const tokens: SourceToken[] = []
+  for (let i = 0; i < content.length;) {
+    const character = content[i]!
+    if (character === '\n' || character === '\r') {
+      if (character === '\r' && content[i + 1] === '\n') i += 1
+      tokens.push({ kind: 'newline', value: '\n' })
+      i += 1
+      continue
+    }
+    if (/\s/.test(character)) {
+      i += 1
+      continue
+    }
+    if (character === '/' && content[i + 1] === '/') {
+      i += 2
+      while (i < content.length && content[i] !== '\n' && content[i] !== '\r') i += 1
+      continue
+    }
+    if (character === '/' && content[i + 1] === '*') {
+      i += 2
+      while (i < content.length && !(content[i] === '*' && content[i + 1] === '/')) i += 1
+      if (i < content.length) i += 2
+      continue
+    }
+    if (character === "'" || character === '"' || character === '`') {
+      const quote = character
+      let value = ''
+      i += 1
+      while (i < content.length) {
+        const current = content[i]!
+        if (current === '\\' && i + 1 < content.length) {
+          value += content[i + 1]!
+          i += 2
+          continue
+        }
+        if (current === quote) {
+          i += 1
+          break
+        }
+        value += current
+        i += 1
+      }
+      tokens.push({ kind: 'string', value })
+      continue
+    }
+    if (/[A-Za-z_$]/.test(character)) {
+      const start = i
+      i += 1
+      while (i < content.length && /[A-Za-z0-9_$]/.test(content[i]!)) i += 1
+      tokens.push({ kind: 'identifier', value: content.slice(start, i) })
+      continue
+    }
+    tokens.push({ kind: 'punctuation', value: character })
+    i += 1
+  }
+  return tokens
+}
+
+function privateExportOrImportSource(
+  tokens: SourceToken[],
+  start: number,
+  specifier: RegExp,
+): boolean {
+  const keyword = tokens[start]?.value
+  if (keyword !== 'import' && keyword !== 'export') return false
+  const immediate = tokens[start + 1]
+  if (keyword === 'import' && immediate?.kind === 'string') return specifier.test(immediate.value)
+  for (let i = start + 1; i < tokens.length; i += 1) {
+    const token = tokens[i]!
+    if (token.kind === 'newline' || (token.kind === 'punctuation' && token.value === ';')) return false
+    if (token.kind === 'identifier' && token.value === 'from') {
+      const source = tokens[i + 1]
+      return source?.kind === 'string' && specifier.test(source.value)
+    }
+  }
+  return false
 }
 
 function asObject(value: unknown): JsonObject | undefined {
