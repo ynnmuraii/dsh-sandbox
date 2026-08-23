@@ -192,4 +192,92 @@ describe('inspectPlugin', () => {
       expect.objectContaining({ code: 'DEPENDENCY_PIN_MISMATCH' }),
     )
   })
+
+  it('rejects a bundle patch path that escapes the plugin root', () => {
+    const subject = fixture()
+    writeFileSync(join(subject.root, 'outside.patch.yml'), '- insert: []\n')
+    const pkg = manifest(subject.plugin.sourcePath)
+    pkg.dsh.bundle.patch = '../outside.patch.yml'
+    pkg.files = ['lib', '../outside.patch.yml']
+    writePackage(subject.plugin.sourcePath, pkg)
+
+    const result = inspectPlugin({ root: subject.root, plugin: subject.plugin })
+
+    expect(codes(result)).toContainEqual(['BUNDLE_PATCH_MISSING', 'error'])
+  })
+
+  it('keeps malformed scalar client metadata unknown', () => {
+    const subject = fixture()
+    const pkg = manifest(subject.plugin.sourcePath)
+    pkg.dsh.client = 'false'
+    writePackage(subject.plugin.sourcePath, pkg)
+
+    const result = inspectPlugin({ root: subject.root, plugin: subject.plugin })
+
+    expect(result.faces.client).toBe('unknown')
+  })
+
+  it('does not mistake comments or strings for private imports', () => {
+    const subject = fixture()
+    writeFileSync(
+      join(subject.plugin.sourcePath, 'src', 'index.ts'),
+      [
+        '// Never import from upstream/deepseek-harness.',
+        'export const documentation = "upstream/deepseek-harness is private"',
+        '',
+      ].join('\n'),
+    )
+
+    const result = inspectPlugin({ root: subject.root, plugin: subject.plugin })
+
+    expect(result.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'PRIVATE_UPSTREAM_IMPORT' }),
+    )
+  })
+
+  it('accepts a package files glob that covers runtime artifacts', () => {
+    const subject = fixture()
+    const pkg = manifest(subject.plugin.sourcePath)
+    pkg.files = ['lib/**', 'cordis.patch.yml']
+    writePackage(subject.plugin.sourcePath, pkg)
+
+    const result = inspectPlugin({ root: subject.root, plugin: subject.plugin })
+
+    expect(result.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'FILES_COVERAGE_MISSING' }),
+    )
+  })
+
+  it('returns a stable diagnostic when package.json is valid non-object JSON', () => {
+    const subject = fixture()
+    writeFileSync(join(subject.plugin.sourcePath, 'package.json'), 'null\n')
+
+    const result = inspectPlugin({ root: subject.root, plugin: subject.plugin })
+
+    expect(result.ok).toBe(false)
+    expect(codes(result)).toContainEqual(['PACKAGE_JSON_UNREADABLE', 'error'])
+  })
+
+  it('checks every metadata target when no explicit target is selected', () => {
+    const subject = fixture()
+    subject.plugin.metadata!.targets = ['next', 'master']
+    const compatibilityPath = join(subject.root, 'workbench', 'compatibility.yaml')
+    const compatibility = readFileSync(compatibilityPath, 'utf8')
+    writeFileSync(
+      compatibilityPath,
+      compatibility.replace(
+        '    pnpm: 11.7.0\n    node: ^22.19.0',
+        '    pnpm: 10.0.0\n    node: ^22.19.0',
+      ),
+    )
+
+    const result = inspectPlugin({ root: subject.root, plugin: subject.plugin })
+
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'PACKAGE_MANAGER_MISMATCH',
+        message: expect.stringContaining('pnpm@10.0.0'),
+      }),
+    )
+  })
 })
