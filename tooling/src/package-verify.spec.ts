@@ -275,6 +275,25 @@ describe('verifyPackageInWorkspace', () => {
     expect(escaped.calls.at(-1)?.args[0]).toBe('pack')
   })
 
+  it('rejects a symlinked workspace root before policy mutation or process execution', () => {
+    const source = workspace()
+    const policyPath = join(source, 'pnpm-workspace.yaml')
+    const before = readFileSync(policyPath, 'utf8')
+    const aliasParent = mkdtempSync(join(tmpdir(), 'dsh-lab-package-alias-'))
+    roots.push(aliasParent)
+    const workspacePath = join(aliasParent, 'workspace')
+    symlinkSync(source, workspacePath, process.platform === 'win32' ? 'junction' : 'dir')
+    const subject = runner()
+
+    expect(() => verifyPackageInWorkspace({
+      workspacePath,
+      allowBuilds: { esbuild: true },
+      runner: subject.runner,
+    })).toThrow(/workspace.*symlink|workspace.*junction|workspace.*real directory/i)
+    expect(subject.calls).toEqual([])
+    expect(readFileSync(policyPath, 'utf8')).toBe(before)
+  })
+
   it('attaches structured pass/fail/skipped results with a sanitized failure summary', () => {
     const workspacePath = workspace()
     const subject = runner({ failAt: 'test' })
