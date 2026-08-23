@@ -238,6 +238,8 @@ export function createUiSession(opts: { runtimeRoot: string; state: UiSessionSta
 export function readUiSession(opts: { runtimeRoot: string; sessionId: string }): UiSessionStateV1
 export function writeUiSession(opts: { runtimeRoot: string; state: UiSessionStateV1 }): void
 export function writeUiControl(opts: { runtimeRoot: string; sessionId: string; control: UiControlV1 }): void
+export function readUiControl(opts: { runtimeRoot: string; sessionId: string }): UiControlV1 | undefined
+export function clearUiControl(opts: { runtimeRoot: string; sessionId: string }): void
 export function latchUiStaleReasons(state: UiSessionStateV1, reasons: UiStaleReason[], now: string): UiSessionStateV1
 ```
 
