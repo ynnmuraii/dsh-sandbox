@@ -103,6 +103,7 @@ export function writeUiSession(opts: { runtimeRoot: string; state: UiSessionStat
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.state.sessionId}`)
   const current = readUiSession({ runtimeRoot: opts.runtimeRoot, sessionId: opts.state.sessionId })
+  assertStaleReasonsRetained(current, opts.state)
   if (isTerminal(current.state)) {
     if (JSON.stringify(current) !== JSON.stringify(opts.state)) {
       throw new Error(`terminal UI session ${opts.state.sessionId} is immutable`)
@@ -166,7 +167,9 @@ export function clearUiControl(opts: { runtimeRoot: string; sessionId: string })
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
   const entry = existingEntry(paths.controlPath)
   if (entry === undefined) return
-  if (entry.isSymbolicLink() || !entry.isFile()) throw new Error(`UI control at ${paths.controlPath} is not a regular file`)
+  // Parse and validate before unlinking so corrupt controls remain available
+  // for diagnosis instead of being silently discarded.
+  readUiControl(opts)
   unlinkSync(paths.controlPath)
 }
 
@@ -285,6 +288,15 @@ function canTransition(from: UiSessionPhase, to: UiSessionPhase): boolean {
     stopping: ['finished', 'aborted'], finished: [], aborted: [],
   }
   return allowed[from].includes(to)
+}
+
+function assertStaleReasonsRetained(current: UiSessionStateV1, next: UiSessionStateV1): void {
+  const nextReasons = new Set(next.staleReasons ?? [])
+  for (const reason of current.staleReasons ?? []) {
+    if (!nextReasons.has(reason)) {
+      throw new Error(`latched stale reason ${reason} cannot be removed from a UI session`)
+    }
+  }
 }
 
 function isTerminal(phase: UiSessionPhase): boolean { return phase === 'finished' || phase === 'aborted' }
