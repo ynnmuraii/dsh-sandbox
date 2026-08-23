@@ -1,8 +1,12 @@
 import { createHash } from 'node:crypto'
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -42,6 +46,7 @@ export interface PublishRunResultOptions {
   result: VerifyRunResultV1
   /** Synchronous seam for testing the publication boundary. */
   renameFile?: (from: string, to: string) => void
+  beforePublishWrite?: (runDirectory: string) => void
 }
 
 type RecordValue = Record<string, unknown>
@@ -130,36 +135,51 @@ export function publishRunResult(opts: PublishRunResultOptions): string {
     if (existsSync(finalPath)) {
       throw new Error(`Run ${result.runId} is already finalized; immutable evidence cannot be replaced`)
     }
-    if (existsSync(temporaryPath)) {
-      throw new Error(`Temporary evidence already exists for run ${result.runId}`)
+    opts.beforePublishWrite?.(runDirectory)
+    assertSafeEvidencePath(opts.runsRoot, runDirectory, 'run evidence directory')
+    assertDirectoryEntry(runDirectory, 'run evidence directory')
+    if (existsSync(finalPath)) {
+      throw new Error(`Run ${result.runId} is already finalized; immutable evidence cannot be replaced`)
+    }
+    const existingTemporary = existingFileEntry(temporaryPath)
+    if (existingTemporary) {
+      throw new Error(
+        `Temporary evidence already exists at ${temporaryPath}; it may be stale or orphaned. ` +
+          `Confirm no publisher is active, then remove ${temporaryPath} or recover it before retrying.`,
+      )
     }
 
     try {
       // wx avoids replacing a stale temporary file if another process has not
       // obeyed the publication lock. The temporary and final files share a
       // directory so rename remains atomic on the target filesystem.
-      temporaryCreated = true
       const stored = sanitizeResult(result)
-      writeFileSync(temporaryPath, `${JSON.stringify(stored, null, 2)}\n`, {
-        encoding: 'utf8',
-        flag: 'wx',
-      })
+      assertSafeEvidencePath(opts.runsRoot, runDirectory, 'run evidence directory')
+      assertDirectoryEntry(runDirectory, 'run evidence directory')
+      temporaryCreated = true
+      writeTemporaryNoFollow(temporaryPath, `${JSON.stringify(stored, null, 2)}\n`)
+      assertSafeEvidencePath(opts.runsRoot, runDirectory, 'run evidence directory')
+      assertDirectoryEntry(runDirectory, 'run evidence directory')
       ;(opts.renameFile ?? renameSync)(temporaryPath, finalPath)
       temporaryCreated = false
       publicationSucceeded = true
     } catch (error) {
-      if (temporaryCreated || existsSync(temporaryPath)) removeTemporary(temporaryPath)
+      if (temporaryCreated) removeTemporary(opts.runsRoot, runDirectory, temporaryPath)
       throw error
     }
 
     return finalPath
   } finally {
-    const lockError = removeLock(lockPath)
+    const lockError = removeLock(opts.runsRoot, runDirectory, lockPath)
     if (lockError && publicationSucceeded) throw lockError
   }
 }
 
-export function loadRunResults(opts: { runsRoot: string; pluginKey: string }): VerifyRunResultV1[] {
+export function loadRunResults(opts: {
+  runsRoot: string
+  pluginKey: string
+  beforeResultRead?: (resultPath: string) => void
+}): VerifyRunResultV1[] {
   if (!isNonEmptyString(opts.runsRoot)) throw new Error('runsRoot must be a non-empty string')
   validatePluginKey(opts.pluginKey)
   const pluginRoot = join(opts.runsRoot, opts.pluginKey)
@@ -198,10 +218,18 @@ export function loadRunResults(opts: { runsRoot: string; pluginKey: string }): V
       throw corruptionError(resultPath, error)
     }
     if (!resultFile.isFile()) throw corruptionError(resultPath, 'result.json is not a regular file')
+    opts.beforeResultRead?.(resultPath)
+    try {
+      assertSafeEvidencePath(opts.runsRoot, runDirectory, 'run evidence directory')
+      assertDirectoryEntry(runDirectory, 'run evidence directory')
+      assertRegularFile(resultPath)
+    } catch (error) {
+      throw corruptionError(resultPath, error)
+    }
 
     let parsed: unknown
     try {
-      parsed = JSON.parse(readFileSync(resultPath, 'utf8'))
+      parsed = JSON.parse(readResultNoFollow(resultPath))
     } catch (error) {
       throw corruptionError(resultPath, error)
     }
@@ -370,12 +398,8 @@ function sanitizeSummary(summary: string): string {
     '[REDACTED]',
   )
   sanitized = sanitized.replace(
-    /\b(?:token|password|passwd|pwd|secret|api[-_]?key|access[-_]?token|authorization|private[-_]?key)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
-    '[REDACTED]',
-  )
-  sanitized = sanitized.replace(
-    /\b[A-Z][A-Z0-9_]{1,}\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/g,
-    '[REDACTED]',
+    /\b((?:client[_-]?secret|server[_-]?secret|consumer[_-]?secret|client[_-]?token|server[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|auth[_-]?token|api[_-]?key|private[_-]?key|secret[_-]?key|token|password|passwd|pwd|authorization|credential)s?)\b\s*([:=])\s*(?:"[^"]*"|'[^']*'|Bearer\s+[^\s,;]+|[^\s,;]+)/gi,
+    (_match, key: string, separator: string) => `${key}${separator}[REDACTED]`,
   )
   sanitized = sanitized.replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
   return Array.from(sanitized).slice(0, MAX_SUMMARY_LENGTH).join('')
@@ -501,6 +525,31 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error
 }
 
+function noFollowFlag(): number {
+  return (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0
+}
+
+function writeTemporaryNoFollow(path: string, contents: string): void {
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag()
+  const descriptor = openSync(path, flags, 0o600)
+  try {
+    writeFileSync(descriptor, contents, { encoding: 'utf8' })
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
+function readResultNoFollow(path: string): string {
+  const descriptor = openSync(path, constants.O_RDONLY | noFollowFlag())
+  try {
+    const stat = fstatSync(descriptor)
+    if (!stat.isFile()) throw new Error('result.json is not a regular file')
+    return readFileSync(descriptor, { encoding: 'utf8' })
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
 function assertSafeEvidencePath(runsRoot: string, candidate: string, label: string): void {
   const rootPath = resolve(runsRoot)
   const candidatePath = resolve(candidate)
@@ -566,16 +615,20 @@ function compareCodePointStrings(left: string, right: string): number {
   return leftPoints.length === rightPoints.length ? 0 : leftPoints.length < rightPoints.length ? -1 : 1
 }
 
-function removeTemporary(path: string): void {
+function removeTemporary(runsRoot: string, runDirectory: string, path: string): void {
   try {
+    assertSafeEvidencePath(runsRoot, runDirectory, 'run evidence directory')
+    assertDirectoryEntry(runDirectory, 'run evidence directory')
     rmSync(path, { force: true })
   } catch {
     // Preserve the publication error; cleanup is best effort.
   }
 }
 
-function removeLock(path: string): Error | undefined {
+function removeLock(runsRoot: string, runDirectory: string, path: string): Error | undefined {
   try {
+    assertSafeEvidencePath(runsRoot, runDirectory, 'run evidence directory')
+    assertDirectoryEntry(runDirectory, 'run evidence directory')
     rmSync(path, { recursive: true, force: true })
     return undefined
   } catch {
@@ -583,6 +636,29 @@ function removeLock(path: string): Error | undefined {
       `Publication lock ${path} could not be removed; it may be orphaned. ` +
         'Confirm no publisher is active, then remove the lock and retry.',
     )
+  }
+}
+
+function existingFileEntry(path: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if (isNotFoundError(error)) return undefined
+    throw error
+  }
+}
+
+function assertDirectoryEntry(path: string, label: string): void {
+  const entry = lstatSync(path)
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new Error(`${label} is not a regular directory; symlink or junction replacement detected`)
+  }
+}
+
+function assertRegularFile(path: string): void {
+  const entry = lstatSync(path)
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw new Error('result.json is not a regular file; symlink or junction replacement detected')
   }
 }
 
