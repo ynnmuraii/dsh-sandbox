@@ -86,6 +86,16 @@ describe('computePluginDigest', () => {
     expect(computePluginDigest(first).digest).not.toBe(baseline.digest)
   })
 
+  it('length-frames records so embedded NUL bytes cannot collide with another tree shape', () => {
+    const single = temporaryRoot('dsh-lab-digest-frame-single-')
+    const split = temporaryRoot('dsh-lab-digest-frame-split-')
+    writeFileSync(join(single, 'a'), Buffer.from('X\0b\0file\0Y'))
+    writeFileSync(join(split, 'a'), Buffer.from('X'))
+    writeFileSync(join(split, 'b'), Buffer.from('Y'))
+
+    expect(computePluginDigest(single).digest).not.toBe(computePluginDigest(split).digest)
+  })
+
   it('hashes safe internal symlinks deterministically and rejects external or unresolved links', () => {
     const first = temporaryRoot('dsh-lab-links-first-')
     const second = temporaryRoot('dsh-lab-links-second-')
@@ -148,6 +158,54 @@ describe('createPluginSnapshot', () => {
 
     expect(lstatSync(copied).isSymbolicLink()).toBe(true)
     expect(readlinkSync(copied)).toBe('src/target.txt')
+  })
+
+  it('rewrites an absolute internal symlink to stay inside the copied workspace', () => {
+    const sourcePath = temporaryRoot('dsh-lab-copy-absolute-link-')
+    const runtimeRoot = temporaryRoot('dsh-lab-copy-absolute-runtime-')
+    const sourceTarget = join(sourcePath, 'linked')
+    const sourceFile = join(sourceTarget, 'target.txt')
+    write(sourceFile, 'snapshot bytes\n')
+    try {
+      symlinkSync(sourceTarget, join(sourcePath, 'internal'), process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      if (isSymlinkUnavailable(error)) return
+      throw error
+    }
+
+    const snapshot = createPluginSnapshot({ sourcePath, runtimeRoot })
+    const copiedLink = join(snapshot.workspacePath, 'internal')
+    const copiedTarget = join(snapshot.workspacePath, 'linked', 'target.txt')
+
+    expect(readlinkSync(copiedLink)).not.toBe(sourceTarget)
+    expect(readFileSync(join(copiedLink, 'target.txt'), 'utf8')).toBe('snapshot bytes\n')
+    writeFileSync(sourceFile, 'mutated source\n')
+    expect(readFileSync(join(copiedLink, 'target.txt'), 'utf8')).toBe('snapshot bytes\n')
+    expect(readFileSync(copiedTarget, 'utf8')).toBe('snapshot bytes\n')
+  })
+
+  it('uses one immutable file read for both digest and copied bytes', () => {
+    const sourcePath = temporaryRoot('dsh-lab-copy-immutable-')
+    const runtimeRoot = temporaryRoot('dsh-lab-copy-immutable-runtime-')
+    const sourceFile = join(sourcePath, 'src', 'index.ts')
+    write(sourceFile, 'original bytes\n')
+    const expected = computePluginDigest(sourcePath)
+    let beforeCopyCalled = false
+
+    const snapshot = createPluginSnapshot({
+      sourcePath,
+      runtimeRoot,
+      beforeCopy() {
+        beforeCopyCalled = true
+        writeFileSync(sourceFile, 'changed after collection\n')
+      },
+    })
+
+    expect(beforeCopyCalled).toBe(true)
+    expect(snapshot.digest).toBe(expected.digest)
+    expect(readFileSync(join(snapshot.workspacePath, 'src', 'index.ts'), 'utf8')).toBe(
+      'original bytes\n',
+    )
   })
 
   it('cleanup removes runRoot and is idempotent', () => {
