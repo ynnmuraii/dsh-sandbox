@@ -84,6 +84,7 @@ export function publishUiResult(opts: {
   result: UiResultV1
   renameFile?: (from: string, to: string) => void
   beforePublishWrite?: (sessionDirectory: string) => void
+  beforeFinalize?: (finalPath: string) => void
 }): string
 export function loadUiResults(opts: {
   uiRunsRoot: string
@@ -115,7 +116,7 @@ const result = (overrides: Partial<UiResultV1> = {}): UiResultV1 => ({
 })
 ```
 
-Assert publication produces exactly `<root>/<pluginEvidenceKey(plugin)>/<sessionId>/result.json`, preserves the exact allowed keys, sorts loaded results newest-first, and rejects unknown top-level or nested keys, invalid hashes, mismatched target fields, invalid timestamps, `cleanup: 'fail'`, and replacement of an existing final file.
+Assert publication produces exactly `<root>/<pluginEvidenceKey(plugin)>/<sessionId>/result.json`, preserves the exact allowed keys, sorts loaded results newest-first, and rejects unknown top-level or nested keys, invalid hashes, mismatched target fields, invalid timestamps, `cleanup: 'fail'`, replacement of an existing final file, and a final file created immediately before finalization.
 
 - [ ] **Step 2: Add summary and forbidden-data tests**
 
@@ -175,7 +176,7 @@ Use exact-key validation at every object level. Validate the session pattern `^u
 
 - [ ] **Step 2: Implement safe immutable publication and loading**
 
-Mirror the proven safety properties in `evidence.ts`: validate containment, reject symlink/junction components, create an exclusive publication lock, write an exclusive temporary regular file with mode `0600`, atomically rename, remove only the temporary file on failure, and reject an existing final result. Load only regular `result.json` files and return newest `finishedAt` first with deterministic `sessionId` tie-breaking.
+Keep the proven containment and symlink/junction protections from `evidence.ts`, create an exclusive publication lock, and write an exclusive temporary regular file with mode `0600`. Publish with an atomic no-replace hard link from temporary to final, then unlink the temporary name; if another creator wins, preserve its final file and fail immutable. Load only regular `result.json` files and return newest `finishedAt` first with deterministic `sessionId` tie-breaking.
 
 - [ ] **Step 3: Integrate the newest UI result into status**
 

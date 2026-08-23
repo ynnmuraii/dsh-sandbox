@@ -184,6 +184,25 @@ describe('publishUiResult', () => {
     expect(readFileSync(path, 'utf8')).toBe(before)
   })
 
+  it('preserves a finalized result created immediately before atomic finalization', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const finalPath = join(root, pluginEvidenceKey(value.plugin), value.sessionId, 'result.json')
+    const competing = '{"owner":"concurrent publisher"}\n'
+
+    expect(() => publishUiResult({
+      uiRunsRoot: root,
+      result: value,
+      beforeFinalize(path) {
+        expect(path).toBe(finalPath)
+        writeFileSync(path, competing)
+      },
+    })).toThrow(/already.*final|immutable|exist/i)
+
+    expect(readFileSync(finalPath, 'utf8')).toBe(competing)
+    expect(existsSync(join(dirname(finalPath), `${value.sessionId}.tmp`))).toBe(false)
+  })
+
   it('removes only the temporary file when atomic publication fails', () => {
     const root = uiRunsRoot()
     const value = result()

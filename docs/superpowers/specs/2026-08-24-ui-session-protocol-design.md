@@ -207,7 +207,7 @@ Finalized UI evidence is separate from ordinary verify evidence:
 .lab/ui-runs/<plugin-key>/<session-id>/result.json
 ```
 
-The plugin key uses the same collision-resistant package/source identity strategy as verify evidence. Publication uses the same containment, non-symlink, temporary-file, atomic-rename, and immutable-finalization guarantees.
+The plugin key uses the same collision-resistant package/source identity strategy as verify evidence. Publication uses containment and non-symlink checks, an exclusive temporary file, and an atomic no-replace final link so a concurrent creator can never be overwritten. The temporary link is removed only after the final name exists; finalized evidence remains immutable.
 
 ```ts
 interface UiResultV1 {
