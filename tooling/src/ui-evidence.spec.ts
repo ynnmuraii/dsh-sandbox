@@ -239,6 +239,7 @@ describe('loadUiResults', () => {
     const root = uiRunsRoot()
     const older = result({
       sessionId: 'ui-20260824T100000000Z-11111111',
+      startedAt: '2026-08-24T10:00:00.000Z',
       finishedAt: '2026-08-24T10:01:00.000Z',
     })
     const tiedB = result({
