@@ -3,7 +3,7 @@ import {
   readdirSync,
   statSync,
 } from 'node:fs'
-import { extname, join } from 'node:path'
+import { extname, isAbsolute, join, resolve, sep } from 'node:path'
 import type { PluginRef } from './plugin-ref.js'
 import { ROOT_PATHS, rootPath } from './context.js'
 import { loadCompatibilityFromFile, type Compatibility, type TargetPin } from './schemas.js'
@@ -48,7 +48,11 @@ export function inspectPlugin(opts: {
   let pkg: JsonObject = {}
 
   try {
-    pkg = JSON.parse(readFileSync(packagePath, 'utf8')) as JsonObject
+    const parsed: unknown = JSON.parse(readFileSync(packagePath, 'utf8'))
+    if (!isJsonObject(parsed)) {
+      throw new Error('package.json must contain a JSON object')
+    }
+    pkg = parsed
   } catch (error) {
     diagnostics.push({
       code: 'PACKAGE_JSON_UNREADABLE',
@@ -61,11 +65,11 @@ export function inspectPlugin(opts: {
 
   packageRules(pkg, packagePath, sourcePath, diagnostics)
   bundleRules(pkg, packagePath, sourcePath, diagnostics)
-  fileCoverageRules(pkg, packagePath, diagnostics)
+  fileCoverageRules(pkg, packagePath, sourcePath, diagnostics)
   privateImportRules(sourcePath, diagnostics)
 
-  const selectedTarget = opts.target ?? metadataTarget(plugin)
-  if (selectedTarget !== undefined) {
+  const selectedTargets = opts.target === undefined ? metadataTargets(plugin) : [opts.target]
+  for (const selectedTarget of selectedTargets) {
     compatibilityRules(root, pkg, selectedTarget, packagePath, diagnostics)
   }
 
@@ -186,8 +190,8 @@ function bundleRules(
     })
     return
   }
-  const patchPath = join(sourcePath, patch)
-  if (!isFile(patchPath)) {
+  const patchPath = resolve(sourcePath, patch)
+  if (!isSafeManifestPath(sourcePath, patch) || !isPathWithinRoot(sourcePath, patchPath) || !isFile(patchPath)) {
     diagnostics.push({
       code: 'BUNDLE_PATCH_MISSING',
       severity: 'error',
@@ -201,22 +205,33 @@ function bundleRules(
 function fileCoverageRules(
   pkg: JsonObject,
   packagePath: string,
+  sourcePath: string,
   diagnostics: InspectDiagnostic[],
 ): void {
-  const files = Array.isArray(pkg.files) ? pkg.files.filter((value): value is string => typeof value === 'string') : []
+  const files = Array.isArray(pkg.files)
+    ? pkg.files.filter((value): value is string => typeof value === 'string')
+    : []
   const main = packagePathValue(pkg.main)
   const types = packagePathValue(pkg.types)
   const patch = bundlePatch(pkg)
+  const unsafeEntries = files.filter(entry => !isSafeManifestPath(sourcePath, entry))
+  for (const entry of unsafeEntries) {
+    diagnostics.push({
+      code: 'FILES_COVERAGE_MISSING',
+      severity: 'error',
+      message: `package files entry is outside the plugin root: ${entry}`,
+      location: `${packagePath}#/files`,
+      remediation: 'Use package-relative files entries without absolute or parent-traversing paths.',
+    })
+  }
+  const safeFiles = files.filter(entry => isSafeManifestPath(sourcePath, entry))
   const covered = (path: string | undefined): boolean => {
     if (path === undefined) return false
     const normalized = normalizePackagePath(path)
-    return files.some(entry => {
-      const candidate = normalizePackagePath(entry)
-      return candidate === normalized || normalized.startsWith(`${candidate}/`) || candidate === normalizePackagePath(dirnameFor(path))
-    })
+    return matchesPackageFilesPath(safeFiles, normalized)
   }
   for (const [label, path] of [['main', main], ['types', types], ['bundle patch', patch]] as const) {
-    if (path !== undefined && !covered(path)) {
+    if (path !== undefined && (!isSafeManifestPath(sourcePath, path) || !covered(path))) {
       diagnostics.push({
         code: 'FILES_COVERAGE_MISSING',
         severity: 'error',
@@ -246,7 +261,7 @@ function privateImportRules(sourcePath: string, diagnostics: InspectDiagnostic[]
     } catch {
       continue
     }
-    if (!/(?:upstream[\\/]+deepseek-harness|deepseek-harness[\\/]src)/i.test(content)) continue
+    if (!hasPrivateUpstreamImport(content)) continue
     diagnostics.push({
       code: 'PRIVATE_UPSTREAM_IMPORT',
       severity: 'error',
@@ -333,7 +348,7 @@ function inferClientFace(pkg: JsonObject, plugin: PluginRef): boolean | 'unknown
   const metadataFaces = asObject(metadata?.faces)
   for (const value of [dsh?.client, dshFaces?.client, metadata?.client, metadataFaces?.client]) {
     if (typeof value === 'boolean') return value
-    if (value !== undefined && value !== null) return true
+    if (isJsonObject(value)) return true
   }
   const exportsValue = asObject(pkg.exports)
   if (exportsValue) {
@@ -348,11 +363,10 @@ function hasRootExport(pkg: JsonObject): boolean {
   return typeof pkg.exports === 'string' || Boolean(asObject(pkg.exports)?.['.'])
 }
 
-function metadataTarget(plugin: PluginRef): 'next' | 'master' | undefined {
+function metadataTargets(plugin: PluginRef): Array<'next' | 'master'> {
   const targets = plugin.metadata?.targets
-  if (!Array.isArray(targets)) return undefined
-  const target = targets.find(value => value === 'next' || value === 'master')
-  return target as 'next' | 'master' | undefined
+  if (!Array.isArray(targets)) return []
+  return [...new Set(targets.filter((value): value is 'next' | 'master' => value === 'next' || value === 'master'))]
 }
 
 function bundlePatch(pkg: JsonObject): string | undefined {
@@ -376,14 +390,82 @@ function normalizePackagePath(value: string): string {
   return value.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '')
 }
 
-function dirnameFor(value: string): string {
-  const normalized = normalizePackagePath(value)
-  const slash = normalized.lastIndexOf('/')
-  return slash < 0 ? normalized : normalized.slice(0, slash)
+function isSafeManifestPath(root: string, value: string): boolean {
+  const candidate = value.startsWith('!') ? value.slice(1) : value
+  if (candidate.length === 0 || isAbsolute(candidate)) return false
+  const normalized = normalizePackagePath(candidate)
+  if (normalized.split('/').some(segment => segment === '..')) return false
+  return isPathWithinRoot(root, resolve(root, candidate))
+}
+
+function isPathWithinRoot(root: string, candidate: string): boolean {
+  const resolvedRoot = resolve(root)
+  const resolvedCandidate = resolve(candidate)
+  const boundary = resolvedRoot.endsWith(sep) ? resolvedRoot : `${resolvedRoot}${sep}`
+  return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(boundary)
+}
+
+function matchesPackageFilesPath(entries: string[], path: string): boolean {
+  let included = false
+  for (const entry of entries) {
+    const negated = entry.startsWith('!')
+    const pattern = normalizePackagePath(negated ? entry.slice(1) : entry)
+    if (pattern.length === 0) continue
+    if (!matchesPackageGlob(pattern, path)) continue
+    included = !negated
+  }
+  return included
+}
+
+function matchesPackageGlob(pattern: string, path: string): boolean {
+  const normalizedPattern = normalizePackagePath(pattern)
+  if (normalizedPattern === path || path.startsWith(`${normalizedPattern}/`)) return true
+  let expression = '^'
+  for (let i = 0; i < normalizedPattern.length; i += 1) {
+    const character = normalizedPattern[i]!
+    if (character === '*') {
+      if (normalizedPattern[i + 1] === '*') {
+        i += 1
+        if (normalizedPattern[i + 1] === '/') {
+          i += 1
+          expression += '(?:.*/)?'
+        } else {
+          expression += '.*'
+        }
+      } else {
+        expression += '[^/]*'
+      }
+    } else if (character === '?') {
+      expression += '[^/]'
+    } else {
+      expression += /[\\^$+?.()|[\]{}]/.test(character) ? `\\${character}` : character
+    }
+  }
+  return new RegExp(`${expression}$`).test(path)
+}
+
+function hasPrivateUpstreamImport(content: string): boolean {
+  const specifier = /(?:upstream[\\/]+deepseek-harness|deepseek-harness[\\/]src)/i
+  const declarationPatterns = [
+    /^\s*import\s+(?:type\s+)?(?:[^'";]+?\s+from\s+)?['"]([^'"]+)['"]/gm,
+    /^\s*export\s+(?:[^'";]+?\s+from\s+)?['"]([^'"]+)['"]/gm,
+    /^\s*(?:(?:(?:const|let|var)\s+[^=;]+?\s*=\s*)|(?:await\s+))?import\s*\(\s*['"]([^'"]+)['"]\s*\)/gm,
+    /^\s*(?:(?:const|let|var)\s+[^=;]+?\s*=\s*)?require\s*\(\s*['"]([^'"]+)['"]\s*\)/gm,
+  ]
+  return declarationPatterns.some(pattern => {
+    for (const match of content.matchAll(pattern)) {
+      if (specifier.test(match[1] ?? '')) return true
+    }
+    return false
+  })
 }
 
 function asObject(value: unknown): JsonObject | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as JsonObject : undefined
+  return isJsonObject(value) ? value : undefined
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isFile(path: string): boolean {
