@@ -19,7 +19,9 @@ Commands:
   dev <name> --target T    run source overlay + HMR against target (next|master)
   verify <name> [--target T] [--json] run plugin checks + target compatibility
   inspect <name> [--target T] inspect standalone plugin contracts
-  status <name> [--json] derive current verification status (exit 2 means incomplete)
+  status <name> [--json] derive current verification status
+    exit 0 all applicable claims current/pass; exit 2 any applicable stale/not-run/failed;
+    exit 1 selector/tooling error
   sync-context [name|--all] regenerate shared-context snapshots
   doctor                   validate toolchain, catalog, and target pins
   upstream check           compare the pinned master commit with the remote
