@@ -357,8 +357,12 @@ export async function verifyPackedTarget(opts: {
   tarball: string
   compat: Compatibility
   masterBin?: string
+  removeProfile?: (profileDir: string) => void
 }): Promise<void> {
   const { root, pluginName, target, tarball, compat, masterBin } = opts
+  const removeProfile = opts.removeProfile ?? ((profileDir: string) => {
+    rmSync(profileDir, { recursive: true, force: true })
+  })
 
   // Ephemeral profile under the runtime home. The launcher resolves
   // `--profile <name>` under `$DSH_HOME/profiles`, so DSH_HOME is pointed at
@@ -426,15 +430,26 @@ export async function verifyPackedTarget(opts: {
     }
   } finally {
     try {
-      rmSync(profileDir, { recursive: true, force: true })
+      removeProfile(profileDir)
     } catch (e) {
       const stale = `${profileDir}.stale-${runId}`
-      try {
-        if (existsSync(profileDir)) renameSync(profileDir, stale)
+      if (existsSync(profileDir)) {
+        try {
+          renameSync(profileDir, stale)
+        } catch (rollback) {
+          throw new AggregateError([e, rollback], `failed to clean verify profile '${profileDir}'`)
+        }
         console.warn(`[verify] profile cleanup deferred; moved stale profile to ${stale}`)
-      } catch (rollback) {
-        throw new AggregateError([e, rollback], `failed to clean verify profile '${profileDir}'`)
+        throw new Error(
+          `failed to clean verify profile '${profileDir}'; moved stale profile to '${stale}': ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          { cause: e },
+        )
       }
+      throw new Error(`failed to clean verify profile '${profileDir}': ${e instanceof Error ? e.message : String(e)}`, {
+        cause: e,
+      })
     }
   }
 }

@@ -32,7 +32,11 @@ export interface VerifyRunResultV1 {
   operation: 'verify'
   result: RunOutcome
   plugin: { packageName: string; sourcePath: string; digest: `sha256:${string}` }
-  targets: Record<string, { dsh?: string; commit?: string; result: StepStatus }>
+  targets:
+    | Record<string, { dsh?: string; commit?: string; result: StepStatus }>
+    | (Record<string, { dsh?: string; commit?: string; result: StepStatus }> & {
+      next: { dsh?: string; commit?: string; result: StepStatus }
+    })
   lab: { contextDigest: string }
   environment: { node: string; pnpm: string; platform: NodeJS.Platform }
   steps: RunStepResult[]
