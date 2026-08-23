@@ -10,6 +10,7 @@ import { verifyPackageInWorkspace } from './package-verify.js'
 import { publishRunResult, type RunOutcome, type RunStepResult, type VerifyRunResultV1 } from './evidence.js'
 import type { PluginRef } from './plugin-ref.js'
 import { verifyPackedTarget } from './run.js'
+import { assertRuntimePluginIdentity } from './runtime-identity.js'
 
 export interface VerifyPluginOptions {
   root: string
@@ -68,6 +69,8 @@ type VerifyResultWithNext = VerifyRunResultV1 & {
 export function verifyPlugin(opts: VerifyPluginOptions & { target: 'next' }): Promise<VerifyResultWithNext>
 export function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyRunResultV1>
 export async function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyRunResultV1> {
+  const runtimePluginName = pluginName(opts.plugin)
+  assertRuntimePluginIdentity(runtimePluginName)
   const deps = defaults(opts.dependencies)
   const runId = deps.createRunId()
   const startedAt = deps.now().toISOString()
@@ -138,7 +141,7 @@ export async function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyRun
         try {
           await deps.verifyTarget({
             root: opts.root,
-            pluginName: pluginName(opts.plugin),
+            pluginName: runtimePluginName,
             target,
             tarball: packageResult.tarball,
             compat: compatibility,

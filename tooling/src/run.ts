@@ -13,6 +13,7 @@ import { verifyUpstreamCommit } from './upstream.js'
 import { pnpm, pnpmCommand } from './proc.js'
 import { resolvePluginRef, type PluginRef } from './plugin-ref.js'
 import { verifyPlugin } from './verify.js'
+import { assertRuntimePluginIdentity } from './runtime-identity.js'
 
 export interface ProfileSpec {
   name: string
@@ -44,6 +45,7 @@ export function profileName(
   kind: 'dev' | 'verify',
   runId?: string,
 ): string {
+  assertRuntimePluginIdentity(name)
   if (kind === 'dev') return `${name}-${target}-dev`
   if (!runId) throw new Error('verify profiles require a run id')
   return `${name}-${target}-verify-${runId}`
@@ -295,6 +297,7 @@ function devPluginName(plugin: PluginRef): string {
 export async function devPlugin(opts: DevPluginOptions): Promise<void> {
   const { root, plugin, target } = opts
   const name = devPluginName(plugin)
+  assertRuntimePluginIdentity(name)
   const declaredTargets = plugin.metadata?.targets
   if (declaredTargets !== undefined && !declaredTargets.includes(target)) {
     throw new Error(`plugin '${name}' does not declare target '${target}'`)
@@ -324,12 +327,7 @@ export async function devPlugin(opts: DevPluginOptions): Promise<void> {
   const bootProfileName = profileName(name, target, 'dev')
   const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
   const launcher = await resolveDevLauncher(root, compat, target)
-  const directLauncher = launcher.cmd === process.execPath && launcher.args.length === 1
-  const nodeOptions = [
-    process.env.NODE_OPTIONS,
-    `--import=${resolveTsxLoader()}`,
-    ...(directLauncher ? ['--title=tsx/esm'] : []),
-  ].filter(Boolean).join(' ')
+  const nodeOptions = [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' ')
   const env = { ...process.env, NODE_OPTIONS: nodeOptions, DSH_HOME: rootPath(root, ROOT_PATHS.runtime).replace(/\\/g, '/') }
   console.log(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
   console.log(`[dev] generated overlay: ${overlayPath}`)
@@ -387,6 +385,7 @@ export async function verifyPackedTarget(opts: {
   masterBin?: string
   removeProfile?: (profileDir: string) => void
 }): Promise<void> {
+  assertRuntimePluginIdentity(opts.pluginName)
   const { root, pluginName, target, tarball, compat, masterBin } = opts
   const removeProfile = opts.removeProfile ?? ((profileDir: string) => {
     rmSync(profileDir, { recursive: true, force: true })
