@@ -112,6 +112,11 @@ describe('publishUiResult', () => {
       { startedAt: '2026-08-24T12:02:00.000Z', finishedAt: '2026-08-24T12:01:00.000Z' },
       /finishedAt|chronolog|before/i,
     ],
+    [
+      'cross-hour timestamp order',
+      { startedAt: '2026-08-24T13:00:00.000Z', finishedAt: '2026-08-24T12:01:00.000Z' },
+      /finishedAt|chronolog|before/i,
+    ],
   ] as const)('rejects invalid %s', (_label, override, message) => {
     expect(() => publishUiResult({
       uiRunsRoot: uiRunsRoot(),

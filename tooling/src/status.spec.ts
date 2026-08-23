@@ -94,7 +94,7 @@ function publishCurrentUi(opts: {
     lab: { contextDigest: currentContextDigest(opts.root) },
     summary: 'External agent verified the rendered client surface.',
     cleanup: 'pass',
-    startedAt: '2026-08-24T12:00:00.000Z',
+    startedAt: '2026-08-24T09:00:00.000Z',
     finishedAt: opts.finishedAt ?? '2026-08-24T12:01:00.000Z',
   }
   publishUiResult({ uiRunsRoot: opts.uiRunsRoot, result })
