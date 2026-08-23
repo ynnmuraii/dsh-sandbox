@@ -1,4 +1,4 @@
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { pluginEvidenceKey } from './evidence.js'
 
@@ -26,6 +26,7 @@ export interface PublishUiResultOptions {
   /** Synchronous seam for testing the publication boundary. */
   renameFile?: (from: string, to: string) => void
   beforePublishWrite?: (sessionDirectory: string) => void
+  beforeFinalize?: (finalPath: string) => void
 }
 
 const PLUGIN_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-f0-9]{12}$/
@@ -103,7 +104,24 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
       writeTemporaryNoFollow(temporaryPath, `${JSON.stringify(result, null, 2)}\n`)
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
-      ;(opts.renameFile ?? renameSync)(temporaryPath, finalPath)
+      opts.beforeFinalize?.(finalPath)
+      assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
+      assertDirectoryEntry(sessionDirectory, 'session evidence directory')
+      if (opts.renameFile !== undefined) {
+        opts.renameFile(temporaryPath, finalPath)
+      } else {
+        try {
+          // Hard-linking is atomic and never replaces an existing directory
+          // entry. Once the final name wins, remove only our temporary name.
+          linkSync(temporaryPath, finalPath)
+        } catch (error) {
+          if (isFileExistsError(error)) {
+            throw new Error(`UI session ${result.sessionId} is already finalized; immutable evidence cannot be replaced`)
+          }
+          throw error
+        }
+        unlinkSync(temporaryPath)
+      }
       temporaryCreated = false
       publicationSucceeded = true
     } catch (error) {
