@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -16,7 +16,14 @@ import {
   profileName,
   resolveTsxLoader,
   verifyPackedTarget,
+  buildUpstream,
 } from './run.js'
+import { pnpm } from './proc.js'
+
+vi.mock('./proc.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('./proc.js')>()),
+  pnpm: vi.fn(),
+}))
 
 describe('resolveSourceOverlay', () => {
   it('produces an absolute path to the plugin entry', () => {
@@ -100,6 +107,34 @@ describe('verifyAllTargets', () => {
       })).rejects.toThrow(/pinned dsh|requires.*dsh/i)
       const profiles = join(root, '.lab', 'runtime', 'profiles')
       expect(existsSync(profiles) ? readdirSync(profiles) : []).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('master launcher build output', () => {
+  it('captures pnpm output instead of inheriting stdout used by JSON mode', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-master-build-output-'))
+    const upstream = join(root, 'upstream', 'deepseek-harness')
+    try {
+      mkdirSync(upstream, { recursive: true })
+      execFileSync('git', ['init', '-q'], { cwd: upstream })
+      writeFileSync(join(upstream, 'package.json'), '{}')
+      execFileSync('git', ['add', '.'], { cwd: upstream })
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], { cwd: upstream })
+      const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: upstream, encoding: 'utf8' }).trim()
+      vi.mocked(pnpm).mockReset().mockReturnValue('captured output')
+
+      await buildUpstream(root, {
+        targets: {
+          next: { dsh: '0.1.1-rc.2', cordis: '4.0.1', node: '22.20.0', pnpm: '11.7.0' },
+          master: { repository: 'deepseek-ai/deepseek-harness', commit, node: '^22.19.0', pnpm: '11.7.0' },
+        },
+      })
+
+      expect(pnpm).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(pnpm).mock.calls.every(([, opts]) => opts?.stdio !== 'inherit')).toBe(true)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

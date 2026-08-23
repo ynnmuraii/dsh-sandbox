@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -237,6 +237,40 @@ describe('verifyPlugin orchestration', () => {
     expect(deps.inspectPlugin).toHaveBeenNthCalledWith(2, {
       root: 'A:/lab', plugin: standalone, target: 'master',
     })
+  })
+
+  it('returns a generic master-only result for all when metadata declares only master', async () => {
+    const events: string[] = []
+    const deps = dependencies(events)
+    const masterOnly = plugin()
+    masterOnly.metadata!.targets = ['master']
+    const promise = verifyPlugin({
+      root: 'A:/lab',
+      plugin: masterOnly,
+      target: 'all',
+      runsRoot: 'A:/runs',
+      dependencies: deps,
+    })
+    expectTypeOf(promise).toEqualTypeOf<Promise<VerifyRunResultV1>>()
+
+    const result = await promise
+    expect(result.targets).toHaveProperty('master')
+    expect(result.targets).not.toHaveProperty('next')
+  })
+
+  it('rejects unsupported metadata targets instead of silently filtering them', async () => {
+    const events: string[] = []
+    const deps = dependencies(events)
+    const withFuture = plugin()
+    withFuture.metadata!.targets = ['next', 'future']
+
+    await expect(verifyPlugin({
+      root: 'A:/lab',
+      plugin: withFuture,
+      target: 'all',
+      dependencies: deps,
+    })).rejects.toThrow(/unknown.*target.*future|unsupported.*future/i)
+    expect(deps.inspectPlugin).not.toHaveBeenCalled()
   })
 
   it('records cleanup failure as a failed result and still publishes exactly once', async () => {

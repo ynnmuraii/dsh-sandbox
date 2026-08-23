@@ -300,6 +300,18 @@ describe('verify CLI', () => {
     expect(verifyPlugin).toHaveBeenCalledWith(expect.objectContaining({ target: 'next' }))
   })
 
+  it('rejects unsupported metadata targets before invoking verification', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue({
+      ...catalogPlugin,
+      metadata: { ...catalogPlugin.metadata, targets: ['next', 'future'] },
+    })
+
+    expect(await runCli(['verify', 'demo'])).toBe(1)
+    expect(output.errors.join('\n')).toMatch(/unknown.*target.*future|unsupported.*future/i)
+    expect(verifyPlugin).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['--target', 'wat'],
     ['--target'],
