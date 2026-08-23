@@ -1,11 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parsePluginSelector, runCli } from './cli.js'
 import { checkUpstream, updateUpstream } from './upstream-update.js'
+import { resolvePluginRef } from './plugin-ref.js'
+import { inspectPlugin } from './inspect.js'
 
 vi.mock('./upstream-update.js', () => ({
   checkUpstream: vi.fn(),
   updateUpstream: vi.fn(),
 }))
+
+vi.mock('./plugin-ref.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('./plugin-ref.js')>()),
+  resolvePluginRef: vi.fn(),
+}))
+
+vi.mock('./inspect.js', () => ({ inspectPlugin: vi.fn() }))
 
 const PINNED = '1'.repeat(40)
 const REMOTE = '2'.repeat(40)
@@ -14,6 +23,8 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.mocked(checkUpstream).mockReset()
   vi.mocked(updateUpstream).mockReset()
+  vi.mocked(resolvePluginRef).mockReset()
+  vi.mocked(inspectPlugin).mockReset()
 })
 
 function captureConsole() {
@@ -109,5 +120,75 @@ describe('plugin selector parsing', () => {
 
   it('rejects a positional catalog name combined with --path', () => {
     expect(() => parsePluginSelector(['demo', '--path', 'A:/plugin'])).toThrow(/exactly one/i)
+  })
+})
+
+describe('inspect CLI', () => {
+  const plugin = { sourcePath: 'A:/standalone', packageName: '@fixture/standalone' }
+
+  it('prints concise text diagnostics and maps inspection errors to exit 1', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    vi.mocked(inspectPlugin).mockReturnValue({
+      schemaVersion: 1,
+      plugin,
+      faces: { host: true, client: 'unknown' },
+      diagnostics: [
+        {
+          code: 'LOCKFILE_MISSING',
+          severity: 'error',
+          message: 'pnpm-lock.yaml is required',
+          remediation: 'Generate and commit the lockfile.',
+        },
+      ],
+      ok: false,
+    })
+
+    expect(await runCli(['inspect', '--path', 'A:/standalone'])).toBe(1)
+    expect(resolvePluginRef).toHaveBeenCalledWith({
+      root: process.cwd(),
+      selector: { path: 'A:/standalone' },
+    })
+    expect(inspectPlugin).toHaveBeenCalledWith({ root: process.cwd(), plugin })
+    expect(output.logs).toEqual([
+      'plugin @fixture/standalone (A:/standalone)',
+      '[error] LOCKFILE_MISSING: pnpm-lock.yaml is required',
+      '  fix: Generate and commit the lockfile.',
+    ])
+  })
+
+  it('prints exactly one JSON document on stdout and forwards target', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    const result = {
+      schemaVersion: 1 as const,
+      plugin,
+      faces: { host: true, client: false as const },
+      diagnostics: [],
+      ok: true,
+    }
+    vi.mocked(inspectPlugin).mockReturnValue(result)
+
+    expect(
+      await runCli(['inspect', '--path', 'A:/standalone', '--target', 'master', '--json']),
+    ).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    expect(JSON.parse(output.logs[0]!)).toEqual(result)
+    expect(inspectPlugin).toHaveBeenCalledWith({
+      root: process.cwd(),
+      plugin,
+      target: 'master',
+    })
+  })
+
+  it.each([
+    ['--wat'],
+    ['--json', '--json'],
+    ['--target', 'next', '--target', 'master'],
+  ])('rejects unknown or duplicate inspect flags: %j', async (...flags) => {
+    const output = captureConsole()
+    expect(await runCli(['inspect', '--path', 'A:/standalone', ...flags])).toBe(1)
+    expect(output.errors.join('\n')).toMatch(/error:/i)
+    expect(inspectPlugin).not.toHaveBeenCalled()
   })
 })
