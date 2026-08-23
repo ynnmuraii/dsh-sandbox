@@ -12,7 +12,16 @@ import {
   type UiSupervisorRequestV1,
 } from './ui-supervisor.js'
 
-export async function runSupervisorBin(argv: string[] = process.argv.slice(2)): Promise<number> {
+export interface UiSupervisorBinDependencies {
+  runSupervisor(request: UiSupervisorRequestV1): Promise<void>
+  stderr(message: string): void
+  now(): string
+}
+
+export async function runSupervisorBin(
+  argv: string[] = process.argv.slice(2),
+  deps: UiSupervisorBinDependencies = defaultDependencies(),
+): Promise<number> {
   let request: UiSupervisorRequestV1 | undefined
   let safeToReport = false
   try {
@@ -30,14 +39,14 @@ export async function runSupervisorBin(argv: string[] = process.argv.slice(2)): 
     assertNoSymlinkComponents(runtimeRoot, 'forge runtime')
     assertNoSymlinkComponents(sessionDir, 'session directory')
     safeToReport = true
-    await runUiSupervisor(request)
+    await deps.runSupervisor(request)
     return 0
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (request !== undefined && safeToReport) {
-      try { reportFailure(request, message) } catch { /* safe reporting is best effort */ }
+      try { reportFailure(request, message, deps.now()) } catch { /* safe reporting is best effort */ }
     }
-    console.error(`ui supervisor: ${sanitize(message)}`)
+    deps.stderr(`ui supervisor: ${sanitize(message)}`)
     return 1
   }
 }
@@ -48,21 +57,28 @@ function readRegular(path: string): string {
   return readFileSync(path, 'utf8')
 }
 
-function reportFailure(request: UiSupervisorRequestV1, message: string): void {
+function defaultDependencies(): UiSupervisorBinDependencies {
+  return {
+    runSupervisor: request => runUiSupervisor(request),
+    stderr: message => console.error(message),
+    now: () => new Date().toISOString(),
+  }
+}
+
+function reportFailure(request: UiSupervisorRequestV1, message: string, now: string): void {
   const root = resolve(request.root)
   const runtimeRoot = rootPath(root, ROOT_PATHS.runtime)
   const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
   if (state.state !== 'starting' && state.state !== 'ready' && state.state !== 'crashed') return
   if (state.cleanup === 'fail') return
   const { url: _url, cleanup: _cleanup, ...base } = state
-  const updatedAt = new Date().toISOString()
   writeUiSession({
     runtimeRoot,
     state: {
       ...base,
       state: 'crashed',
       error: sanitize(message),
-      updatedAt: Date.parse(updatedAt) < Date.parse(state.updatedAt) ? state.updatedAt : updatedAt,
+      updatedAt: Date.parse(now) < Date.parse(state.updatedAt) ? state.updatedAt : now,
     },
   })
 }

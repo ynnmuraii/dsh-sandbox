@@ -1,11 +1,15 @@
 import { execFile, spawn } from 'node:child_process'
 import {
+  constants,
+  closeSync,
   existsSync,
+  fstatSync,
+  ftruncateSync,
   lstatSync,
-  readFileSync,
+  openSync,
+  readSync,
+  writeSync,
   rmSync,
-  unlinkSync,
-  writeFileSync,
 } from 'node:fs'
 import { join, relative, resolve, sep, isAbsolute, parse } from 'node:path'
 import { ROOT_PATHS, rootPath } from './context.js'
@@ -50,10 +54,20 @@ export interface UiSupervisorDependencies {
   prepareRuntime(opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string }): Promise<UiRuntimePlan>
   spawnChild(plan: UiRuntimePlan): UiChildHandle
   stopChildTree(handle: UiChildHandle): Promise<void>
+  writeLog(sessionDir: string, text: string, maxBytes: number): void
   now(): string
   sleep(ms: number): Promise<void>
   pollIntervalMs: number
   maxLogBytes: number
+}
+
+export interface UiProcessTreeDependencies {
+  platform: 'windows' | 'posix'
+  taskkill(args: string[]): Promise<void>
+  signalGroup(group: number, signal: 'SIGTERM' | 'SIGKILL'): void
+  waitForExit(exited: Promise<UiChildExit>, timeoutMs: number): Promise<boolean>
+  termGraceMs: number
+  killGraceMs: number
 }
 
 const SESSION_ID = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
@@ -100,6 +114,7 @@ export async function runUiSupervisor(
   let stopIssued = false
   let stdoutTail = ''
   let done = false
+  let outputFailure: Promise<never> | undefined
 
   try {
     plan = await deps.prepareRuntime({
@@ -121,17 +136,34 @@ export async function runUiSupervisor(
     }, deps)
 
     const onOutput = (source: 'stdout' | 'stderr', chunk: unknown): void => {
-      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
-      appendLog(sessionDir, text, deps.maxLogBytes)
-      if (source !== 'stdout' || done) return
-      stdoutTail += text
-      let newline = stdoutTail.indexOf('\n')
-      while (newline >= 0) {
-        const line = stdoutTail.slice(0, newline).replace(/\r$/, '')
-        stdoutTail = stdoutTail.slice(newline + 1)
-        const url = parseDshReadyUrl(line)
-        if (url !== undefined) markReady(runtimeRoot, request.sessionId, url, child!.pid, deps)
-        newline = stdoutTail.indexOf('\n')
+      try {
+        const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+        deps.writeLog(sessionDir, text, deps.maxLogBytes)
+        if (source !== 'stdout' || done) return
+        stdoutTail += text
+        let newline = stdoutTail.indexOf('\n')
+        while (newline >= 0) {
+          const line = stdoutTail.slice(0, newline).replace(/\r$/, '')
+          stdoutTail = stdoutTail.slice(newline + 1)
+          const url = parseDshReadyUrl(line)
+          if (url !== undefined) markReady(runtimeRoot, request.sessionId, url, child!.pid, deps)
+          newline = stdoutTail.indexOf('\n')
+        }
+      } catch (error) {
+        if (outputFailure === undefined) {
+          outputFailure = failDiagnosticOutput({
+            runtimeRoot,
+            sessionDir,
+            sessionId: request.sessionId,
+            child: child!,
+            deps,
+            stopIssued: () => stopIssued,
+            issueStop: () => { stopIssued = true },
+            exitSettled: () => exitSettled,
+          }, error)
+          void outputFailure.catch(() => undefined)
+        }
+        done = true
       }
     }
     child.stdout.on('data', (chunk: unknown) => onOutput('stdout', chunk))
@@ -152,6 +184,7 @@ export async function runUiSupervisor(
     })
 
     while (!done) {
+      if (outputFailure !== undefined) await outputFailure
       await deps.sleep(deps.pollIntervalMs)
       const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
       if (state.state === 'finished' || state.state === 'aborted') { done = true; break }
@@ -169,6 +202,7 @@ export async function runUiSupervisor(
         issueStop: () => { stopIssued = true },
       })
     }
+    if (outputFailure !== undefined) await outputFailure
     await exitPromise
   } catch (error) {
     done = true
@@ -194,6 +228,58 @@ interface ControlContext {
   exitSettled: () => boolean
   stopIssued: () => boolean
   issueStop: () => void
+}
+
+interface DiagnosticFailureContext {
+  runtimeRoot: string
+  sessionDir: string
+  sessionId: string
+  child: UiChildHandle
+  deps: UiSupervisorDependencies
+  stopIssued: () => boolean
+  issueStop: () => void
+  exitSettled: () => boolean
+}
+
+async function failDiagnosticOutput(context: DiagnosticFailureContext, error: unknown): Promise<never> {
+  const reason = sanitizeDiagnostic(`diagnostic log failure: ${error instanceof Error ? error.message : String(error)}`)
+  let terminationConfirmed = context.exitSettled()
+  let cleanupError: unknown
+  try {
+    if (!terminationConfirmed && !context.stopIssued()) {
+      context.issueStop()
+      await context.deps.stopChildTree(context.child)
+      await context.child.exited
+      terminationConfirmed = true
+    }
+  } catch (stopError) {
+    cleanupError = stopError
+  }
+  try {
+    const state = readUiSession({ runtimeRoot: context.runtimeRoot, sessionId: context.sessionId })
+    writeState(context.runtimeRoot, {
+      ...compactState(state, terminationConfirmed),
+      state: 'crashed',
+      error: sanitizeDiagnostic(cleanupError === undefined ? reason : `${reason}; cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`),
+      cleanup: 'fail',
+      updatedAt: nextTimestamp(context.deps.now(), state.updatedAt),
+    }, context.deps)
+  } catch (reportError) {
+    cleanupError ??= reportError
+  }
+  const suffix = cleanupError === undefined ? '' : `; cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
+  throw new Error(`${reason}${suffix}`, { cause: cleanupError ?? error })
+}
+
+function compactState(state: UiSessionStateV1, removePids: boolean): UiSessionStateV1 {
+  const compact = { ...state }
+  delete compact.url
+  delete compact.cleanup
+  if (removePids) {
+    delete compact.supervisorPid
+    delete compact.childPid
+  }
+  return compact
 }
 
 async function handleControl(control: UiControlV1, context: ControlContext): Promise<void> {
@@ -275,7 +361,7 @@ function markReady(runtimeRoot: string, sessionId: string, url: string, childPid
 function markCrashed(runtimeRoot: string, sessionId: string, error: string, deps: UiSupervisorDependencies, cleanup?: 'fail'): void {
   const state = readUiSession({ runtimeRoot, sessionId })
   if (state.state !== 'starting' && state.state !== 'ready' && state.state !== 'crashed') return
-  const { url: _url, cleanup: _cleanup, ...crashedBase } = state
+  const crashedBase = compactState(state, cleanup === undefined)
   writeState(runtimeRoot, {
     ...crashedBase,
     state: 'crashed',
@@ -323,16 +409,40 @@ function removeContained(path: string, root: string, recursive: boolean): void {
   rmSync(path, { recursive, force: false })
 }
 
-function appendLog(sessionDir: string, text: string, maxBytes: number): void {
-  if (!Number.isInteger(maxBytes) || maxBytes < 1) return
+export function writeBoundedSupervisorLog(sessionDir: string, text: string, maxBytes: number): void {
+  if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error('maxLogBytes must be a positive integer')
   assertNoSymlinkComponents(sessionDir, 'UI session directory')
   const path = join(sessionDir, 'supervisor.log')
   assertContained(sessionDir, path, 'supervisor log')
-  if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new Error(`supervisor log is a symlink at ${path}`)
-  const old = existsSync(path) ? readFileSync(path) : Buffer.alloc(0)
-  const next = Buffer.concat([old, Buffer.from(text)]).subarray(-maxBytes)
-  writeFileSync(path, next, { mode: 0o600 })
+  const existing = existingEntry(path)
+  if (existing !== undefined && (existing.isSymbolicLink() || !existing.isFile() || existing.nlink !== 1)) {
+    throw new Error(`supervisor log is not a unique regular file at ${path}`)
+  }
+  const flags = constants.O_RDWR | (existing === undefined ? constants.O_CREAT | constants.O_EXCL : 0) | noFollowFlag()
+  let descriptor: number | undefined
+  try {
+    descriptor = openSync(path, flags, 0o600)
+    const pinned = fstatSync(descriptor)
+    if (!pinned.isFile() || pinned.nlink !== 1) throw new Error(`supervisor log is not a unique regular file at ${path}`)
+    const old = Buffer.alloc(pinned.size)
+    let offset = 0
+    while (offset < old.length) offset += readSync(descriptor, old, offset, old.length - offset, offset)
+    const next = Buffer.concat([old, Buffer.from(text)]).subarray(-maxBytes)
+    ftruncateSync(descriptor, 0)
+    let written = 0
+    while (written < next.length) written += writeSync(descriptor, next, written, next.length - written, written)
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor)
+  }
 }
+
+function existingEntry(path: string): ReturnType<typeof lstatSync> | undefined {
+  try { return lstatSync(path) } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+function noFollowFlag(): number { return (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0 }
 
 function validatePlan(plan: UiRuntimePlan, sessionDir: string): void {
   if (!plan || typeof plan !== 'object') throw new Error('runtime preparation returned an invalid plan')
@@ -349,7 +459,8 @@ function defaultDependencies(): UiSupervisorDependencies {
   return {
     prepareRuntime: opts => prepareUiRuntime(opts),
     spawnChild: spawnRuntimeChild,
-    stopChildTree: stopRuntimeChild,
+    stopChildTree: child => stopOwnedChildTree(child),
+    writeLog: writeBoundedSupervisorLog,
     now: () => new Date().toISOString(),
     sleep: ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)),
     pollIntervalMs: 100,
@@ -375,16 +486,50 @@ function spawnRuntimeChild(plan: UiRuntimePlan): UiChildHandle {
   return { pid, stdout: processChild.stdout, stderr: processChild.stderr, exited }
 }
 
-async function stopRuntimeChild(child: UiChildHandle): Promise<void> {
+export async function stopOwnedChildTree(
+  child: UiChildHandle,
+  deps: UiProcessTreeDependencies = defaultProcessTreeDependencies(),
+): Promise<void> {
   assertPid(child.pid)
-  if (process.platform === 'win32') {
-    await new Promise<void>((resolvePromise, reject) => {
-      execFile('taskkill.exe', windowsTreeKillArgs(child.pid), { windowsHide: true }, error => error ? reject(error) : resolvePromise())
-    })
+  if (deps.platform === 'windows') {
+    await deps.taskkill(windowsTreeKillArgs(child.pid))
+    if (!await deps.waitForExit(child.exited, deps.termGraceMs)) throw new Error('owned Windows child tree did not close after taskkill')
     return
   }
-  try { process.kill(posixProcessGroup(child.pid), 'SIGTERM') } catch (error) {
-    if (!(error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ESRCH')) throw error
+  const group = posixProcessGroup(child.pid)
+  deps.signalGroup(group, 'SIGTERM')
+  if (await deps.waitForExit(child.exited, deps.termGraceMs)) return
+  deps.signalGroup(group, 'SIGKILL')
+  if (!await deps.waitForExit(child.exited, deps.killGraceMs)) throw new Error('owned POSIX process group did not close after SIGKILL')
+}
+
+function defaultProcessTreeDependencies(): UiProcessTreeDependencies {
+  return {
+    platform: process.platform === 'win32' ? 'windows' : 'posix',
+    taskkill: args => new Promise<void>((resolvePromise, reject) => {
+      execFile('taskkill.exe', args, { windowsHide: true }, error => error ? reject(error) : resolvePromise())
+    }),
+    signalGroup: (group, signal) => {
+      try { process.kill(group, signal) } catch (error) {
+        if (!(error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ESRCH')) throw error
+      }
+    },
+    waitForExit: waitForExitWithin,
+    termGraceMs: 5_000,
+    killGraceMs: 5_000,
+  }
+}
+
+async function waitForExitWithin(exited: Promise<UiChildExit>, timeoutMs: number): Promise<boolean> {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 0) throw new Error('process-tree timeout must be a non-negative integer')
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<boolean>(resolveTimeout => {
+    timer = setTimeout(() => resolveTimeout(false), timeoutMs)
+  })
+  try {
+    return await Promise.race([exited.then(() => true), timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }
 
