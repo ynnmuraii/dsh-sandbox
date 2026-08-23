@@ -87,6 +87,20 @@ describe('portable agent skill renderer', () => {
     ).toThrow(/top-level heading/i)
   })
 
+  it('does not parse heading-like lines inside a longer fenced code block', () => {
+    const body = [
+      BODY,
+      '',
+      '````markdown',
+      '~~~',
+      '#\tThis is code, not a heading',
+      '```',
+      '````',
+    ].join('\n')
+
+    expect(() => renderAgentSkill({ body, documents: [] })).not.toThrow()
+  })
+
   it('fixes the only portable projection and canonical source paths', () => {
     expect(AGENT_SKILL_PATH).toBe('.agents/skills/dsh-plugin-development/SKILL.md')
     expect(SKILL_SOURCE_PATH).toBe('context/dsh-plugin-development-skill.md')
