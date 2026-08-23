@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { runCli } from './cli.js'
+import { parsePluginSelector, runCli } from './cli.js'
 import { checkUpstream, updateUpstream } from './upstream-update.js'
 
 vi.mock('./upstream-update.js', () => ({
@@ -74,5 +74,36 @@ describe('upstream CLI', () => {
     vi.mocked(checkUpstream).mockImplementation(() => { throw new Error('network unavailable') })
     expect(await runCli(['upstream', 'check'])).toBe(1)
     expect(output.errors.join('\n')).toContain('network unavailable')
+  })
+})
+
+describe('plugin selector parsing', () => {
+  it('parses a catalog name and leaves command flags in rest', () => {
+    expect(parsePluginSelector(['demo', '--target', 'next'])).toEqual({
+      selector: { name: 'demo' },
+      rest: ['--target', 'next'],
+    })
+  })
+
+  it('parses --path and leaves command flags in rest', () => {
+    expect(parsePluginSelector(['--path', 'A:/plugin', '--target', 'master'])).toEqual({
+      selector: { path: 'A:/plugin' },
+      rest: ['--target', 'master'],
+    })
+  })
+
+  it('rejects a missing --path value', () => {
+    expect(() => parsePluginSelector(['--path'])).toThrow(/--path requires a value/i)
+    expect(() => parsePluginSelector(['--path', '--target', 'next'])).toThrow(
+      /--path requires a value/i,
+    )
+  })
+
+  it('rejects conflicting positional names', () => {
+    expect(() => parsePluginSelector(['demo', 'other'])).toThrow(/conflicting positional names/i)
+  })
+
+  it('rejects a positional catalog name combined with --path', () => {
+    expect(() => parsePluginSelector(['demo', '--path', 'A:/plugin'])).toThrow(/exactly one/i)
   })
 })

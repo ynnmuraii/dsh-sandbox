@@ -4,6 +4,9 @@ import { createPlugin } from './create.js'
 import { syncContext } from './sync.js'
 import { devSource, verifyBundle, type VerifyOptions } from './run.js'
 import { checkUpstream, updateUpstream } from './upstream-update.js'
+import { parsePluginSelector } from './plugin-ref.js'
+
+export { parsePluginSelector } from './plugin-ref.js'
 
 const HELP = `
 Usage: lab <command> [args]
@@ -56,14 +59,17 @@ export async function runCli(argv: string[]): Promise<number> {
       return 0
     }
     case 'dev': {
-      const [name] = rest.filter(a => !a.startsWith('--'))
-      if (!name) {
+      if (rest.length === 0) {
         console.error('error: usage: lab dev <name> [--target next|master]')
         return 1
       }
       try {
-        const target = parseTarget(rest, ['next', 'master']) as 'next' | 'master'
-        await devSource({ root: process.cwd(), name, target })
+        const parsed = parsePluginSelector(rest)
+        if (parsed.selector.path !== undefined) {
+          throw new Error('path selectors are not supported by lab dev yet')
+        }
+        const target = parseTarget(parsed.rest, ['next', 'master']) as 'next' | 'master'
+        await devSource({ root: process.cwd(), name: parsed.selector.name!, target })
         return 0
       } catch (e) {
         console.error(`error: ${(e as Error).message}`)
@@ -71,14 +77,17 @@ export async function runCli(argv: string[]): Promise<number> {
       }
     }
     case 'verify': {
-      const [name] = rest.filter(a => !a.startsWith('--'))
-      if (!name) {
+      if (rest.length === 0) {
         console.error('error: usage: lab verify <name> [--target next|master|all]')
         return 1
       }
       try {
-        const target = parseTarget(rest, ['next', 'master', 'all']) as VerifyOptions['target']
-        await verifyBundle({ root: process.cwd(), name, target })
+        const parsed = parsePluginSelector(rest)
+        if (parsed.selector.path !== undefined) {
+          throw new Error('path selectors are not supported by lab verify yet')
+        }
+        const target = parseTarget(parsed.rest, ['next', 'master', 'all']) as VerifyOptions['target']
+        await verifyBundle({ root: process.cwd(), name: parsed.selector.name!, target })
         return 0
       } catch (e) {
         console.error(`error: ${(e as Error).message}`)
