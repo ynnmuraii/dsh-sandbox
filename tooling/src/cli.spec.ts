@@ -4,6 +4,7 @@ import { checkUpstream, updateUpstream } from './upstream-update.js'
 import { resolvePluginRef } from './plugin-ref.js'
 import { inspectPlugin } from './inspect.js'
 import { verifyPlugin } from './verify.js'
+import { derivePluginStatus } from './status.js'
 
 vi.mock('./upstream-update.js', () => ({
   checkUpstream: vi.fn(),
@@ -17,6 +18,7 @@ vi.mock('./plugin-ref.js', async importOriginal => ({
 
 vi.mock('./inspect.js', () => ({ inspectPlugin: vi.fn() }))
 vi.mock('./verify.js', () => ({ verifyPlugin: vi.fn() }))
+vi.mock('./status.js', () => ({ derivePluginStatus: vi.fn() }))
 
 const PINNED = '1'.repeat(40)
 const REMOTE = '2'.repeat(40)
@@ -28,6 +30,7 @@ afterEach(() => {
   vi.mocked(resolvePluginRef).mockReset()
   vi.mocked(inspectPlugin).mockReset()
   vi.mocked(verifyPlugin).mockReset()
+  vi.mocked(derivePluginStatus).mockReset()
 })
 
 function captureConsole() {
@@ -325,5 +328,77 @@ describe('verify CLI', () => {
     expect(await runCli(['verify', '--path', 'A:/standalone', ...flags])).toBe(1)
     expect(output.errors.join('\n')).toMatch(/error:/i)
     expect(verifyPlugin).not.toHaveBeenCalled()
+  })
+})
+
+describe('status CLI', () => {
+  const plugin = { sourcePath: 'A:/standalone', packageName: '@fixture/standalone' }
+
+  function statusResult(state: 'pass' | 'fail' | 'stale' | 'not-run' = 'pass') {
+    const claim = state === 'stale'
+      ? { state, runId: 'verify-1', reasons: ['PLUGIN_CONTENT_CHANGED'] }
+      : state === 'not-run'
+        ? { state }
+        : { state, runId: 'verify-1' }
+    return {
+      schemaVersion: 1 as const,
+      plugin: { ...plugin, digest: `sha256:${'a'.repeat(64)}` as const },
+      structure: claim,
+      bundle: claim,
+      targets: { next: claim, master: { state: 'not-applicable' as const } },
+      ui: { state: 'not-applicable' as const },
+    }
+  }
+
+  it.each([
+    [['status', '--path', 'A:/standalone'], { path: 'A:/standalone' }],
+    [['status', 'demo'], { name: 'demo' }],
+  ] as const)('routes path and catalog selectors through the same status derivation: %j', async (argv, selector) => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    vi.mocked(derivePluginStatus).mockReturnValue(statusResult())
+
+    expect(await runCli([...argv])).toBe(0)
+    expect(resolvePluginRef).toHaveBeenCalledWith({ root: process.cwd(), selector })
+    expect(derivePluginStatus).toHaveBeenCalledWith({ root: process.cwd(), plugin })
+    expect(output.logs.join('\n')).toMatch(/structure.*pass/i)
+  })
+
+  it('prints exactly one JSON document and returns 2 for incomplete current claims', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    const result = statusResult('stale')
+    vi.mocked(derivePluginStatus).mockReturnValue(result)
+
+    expect(await runCli(['status', '--path', 'A:/standalone', '--json'])).toBe(2)
+    expect(output.logs).toHaveLength(1)
+    expect(JSON.parse(output.logs[0]!)).toEqual(result)
+  })
+
+  it.each(['fail', 'stale', 'not-run'] as const)('returns 2 when an applicable claim is %s', async state => {
+    captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    vi.mocked(derivePluginStatus).mockReturnValue(statusResult(state))
+
+    expect(await runCli(['status', '--path', 'A:/standalone'])).toBe(2)
+  })
+
+  it('returns 1 only for resolution or tooling errors', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    vi.mocked(derivePluginStatus).mockImplementation(() => { throw new Error('corrupt evidence path') })
+
+    expect(await runCli(['status', '--path', 'A:/standalone'])).toBe(1)
+    expect(output.errors.join('\n')).toContain('corrupt evidence path')
+  })
+
+  it.each([
+    ['--wat'],
+    ['--json', '--json'],
+  ])('rejects unknown or duplicate status flags: %j', async (...flags) => {
+    const output = captureConsole()
+    expect(await runCli(['status', '--path', 'A:/standalone', ...flags])).toBe(1)
+    expect(output.errors.join('\n')).toMatch(/error:/i)
+    expect(derivePluginStatus).not.toHaveBeenCalled()
   })
 })
