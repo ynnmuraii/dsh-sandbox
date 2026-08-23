@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
 import {
   verifyPackageInWorkspace,
@@ -290,6 +290,26 @@ describe('verifyPackageInWorkspace', () => {
       allowBuilds: { esbuild: true },
       runner: subject.runner,
     })).toThrow(/workspace.*symlink|workspace.*junction|workspace.*real directory/i)
+    expect(subject.calls).toEqual([])
+    expect(readFileSync(policyPath, 'utf8')).toBe(before)
+  })
+
+  it('rejects a workspace reached through a symlinked parent component before any side effect', () => {
+    const source = workspace()
+    const policyPath = join(source, 'pnpm-workspace.yaml')
+    const before = readFileSync(policyPath, 'utf8')
+    const aliasRoot = mkdtempSync(join(tmpdir(), 'dsh-lab-package-parent-alias-'))
+    roots.push(aliasRoot)
+    const linkedParent = join(aliasRoot, 'linked-parent')
+    symlinkSync(dirname(source), linkedParent, process.platform === 'win32' ? 'junction' : 'dir')
+    const workspacePath = join(linkedParent, basename(source))
+    const subject = runner()
+
+    expect(() => verifyPackageInWorkspace({
+      workspacePath,
+      allowBuilds: { esbuild: true },
+      runner: subject.runner,
+    })).toThrow(/workspace.*symlink|workspace.*junction|workspace.*component|workspace.*alias/i)
     expect(subject.calls).toEqual([])
     expect(readFileSync(policyPath, 'utf8')).toBe(before)
   })
