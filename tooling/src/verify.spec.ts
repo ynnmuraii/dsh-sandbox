@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPluginSnapshot, computePluginDigest } from './plugin-snapshot.js'
@@ -10,7 +10,7 @@ import {
   type VerifyPluginOptions,
 } from './verify.js'
 import type { PluginRef } from './plugin-ref.js'
-import type { VerifyRunResultV1 } from './evidence.js'
+import { loadRunResults, pluginEvidenceKey, publishRunResult, type VerifyRunResultV1 } from './evidence.js'
 
 const roots: string[] = []
 
@@ -310,6 +310,45 @@ describe('verifyPlugin orchestration', () => {
 })
 
 describe('verifyPlugin source isolation', () => {
+  it('finalizes failed evidence and removes the real temporary workspace when plugin tests fail', async () => {
+    const root = temporaryRoot('dsh-lab-verify-failure-root-')
+    const sourcePath = temporaryRoot('dsh-lab-verify-failure-source-')
+    const runsRoot = join(root, '.lab', 'runs')
+    mkdirSync(join(sourcePath, 'src'), { recursive: true })
+    writeFileSync(join(sourcePath, 'src', 'index.ts'), 'export const current = true\n')
+    writeFileSync(join(sourcePath, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+    writeFileSync(join(sourcePath, 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
+    writeFileSync(join(sourcePath, 'package.json'), JSON.stringify({
+      name: '@fixture/demo',
+      version: '0.0.0',
+      scripts: { typecheck: 'x', test: 'x', build: 'x', 'pack-smoke': 'x' },
+    }))
+    const pluginRef = plugin(sourcePath)
+    const before = computePluginDigest(sourcePath)
+    const packageRunner: PackageVerifyRunner = {
+      pnpm(args) {
+        if (args[0] === 'test' || args.join(' ') === 'run test') throw new Error('intentional plugin test failure')
+        return ''
+      },
+    }
+    const events: string[] = []
+    const deps = dependencies(events, {
+      createSnapshot: opts => createPluginSnapshot(opts),
+      verifyPackage: opts => verifyPackageInWorkspace({ ...opts, runner: packageRunner }),
+      publishResult: opts => publishRunResult(opts),
+      createRunId: () => 'verify-failed-acceptance',
+    })
+
+    const result = await verifyPlugin({ root, runsRoot, plugin: pluginRef, target: 'next', dependencies: deps })
+
+    expect(result.result).toBe('fail')
+    expect(result.steps).toContainEqual(expect.objectContaining({ id: 'test', status: 'fail' }))
+    expect(loadRunResults({ runsRoot, pluginKey: pluginEvidenceKey(pluginRef) })).toEqual([result])
+    const runtimeRoot = join(root, '.lab', 'runtime')
+    expect(existsSync(runtimeRoot) ? readdirSync(runtimeRoot) : []).toEqual([])
+    expect(computePluginDigest(sourcePath)).toEqual(before)
+  })
+
   it('uses current source content through a real temporary snapshot and leaves source byte-identical', async () => {
     const root = temporaryRoot('dsh-lab-verify-root-')
     const sourcePath = temporaryRoot('dsh-lab-verify-source-')
