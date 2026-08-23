@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { pluginEvidenceKey, publishRunResult, type VerifyRunResultV1 } from './evidence.js'
+import { publishUiResult, type UiResultV1 } from './ui-evidence.js'
 import { computePluginDigest } from './plugin-snapshot.js'
 import type { PluginRef } from './plugin-ref.js'
 import { derivePluginStatus } from './status.js'
@@ -19,12 +20,14 @@ afterEach(() => {
 function fixture(client: boolean | 'unknown' = false): {
   root: string
   runsRoot: string
+  uiRunsRoot: string
   plugin: PluginRef
 } {
   const root = mkdtempSync(join(tmpdir(), 'dsh-lab-status-'))
   roots.push(root)
   const sourcePath = join(root, 'plugin')
   const runsRoot = join(root, '.lab', 'runs')
+  const uiRunsRoot = join(root, '.lab', 'ui-runs')
   mkdirSync(join(sourcePath, 'src'), { recursive: true })
   mkdirSync(join(root, 'workbench'), { recursive: true })
   mkdirSync(join(root, 'context'), { recursive: true })
@@ -66,8 +69,36 @@ function fixture(client: boolean | 'unknown' = false): {
   return {
     root,
     runsRoot,
+    uiRunsRoot,
     plugin: { sourcePath, packageName: '@fixture/status' },
   }
+}
+
+function publishCurrentUi(opts: {
+  root: string
+  uiRunsRoot: string
+  plugin: PluginRef
+  sessionId?: string
+  finishedAt?: string
+  verdict?: 'pass' | 'fail'
+  target?: 'next' | 'master'
+}): UiResultV1 {
+  const target = opts.target ?? 'next'
+  const result: UiResultV1 = {
+    schemaVersion: 1,
+    sessionId: opts.sessionId ?? 'ui-20260824T120000000Z-a1b2c3d4',
+    operation: 'ui',
+    verdict: opts.verdict ?? 'pass',
+    plugin: { ...opts.plugin, digest: computePluginDigest(opts.plugin.sourcePath).digest },
+    target: target === 'next' ? { name: 'next', dsh: NEXT } : { name: 'master', commit: MASTER },
+    lab: { contextDigest: currentContextDigest(opts.root) },
+    summary: 'External agent verified the rendered client surface.',
+    cleanup: 'pass',
+    startedAt: '2026-08-24T12:00:00.000Z',
+    finishedAt: opts.finishedAt ?? '2026-08-24T12:01:00.000Z',
+  }
+  publishUiResult({ uiRunsRoot: opts.uiRunsRoot, result })
+  return result
 }
 
 function writeCompatibility(root: string, next = NEXT, master = MASTER): void {
@@ -157,6 +188,7 @@ describe('derivePluginStatus', () => {
     expect(status.ui).toEqual({ state: 'not-applicable' })
     expect(computePluginDigest(plugin.sourcePath)).toEqual(before)
     expect(() => readdirSync(runsRoot)).toThrow()
+    expect(() => readdirSync(join(root, '.lab', 'ui-runs'))).toThrow()
   })
 
   it('derives current pass and fail claims with their source run ID', () => {
@@ -228,6 +260,95 @@ describe('derivePluginStatus', () => {
     expect(derivePluginStatus(unknownClient).ui).toEqual({ state: 'not-run' })
   })
 
+  it.each(['pass', 'fail'] as const)('derives a current finalized UI %s verdict', verdict => {
+    const current = fixture(true)
+    const evidence = publishCurrentUi({ ...current, verdict })
+
+    expect(derivePluginStatus(current).ui).toEqual({
+      state: verdict,
+      sessionId: evidence.sessionId,
+    })
+  })
+
+  it('selects the newest finalized UI result independently from verify runs', () => {
+    const current = fixture(true)
+    publishCurrentRun({ ...current, runId: 'verify-newest', finishedAt: '2026-08-24T14:00:00.000Z', next: 'pass' })
+    publishCurrentUi({
+      ...current,
+      sessionId: 'ui-20260824T100000000Z-11111111',
+      finishedAt: '2026-08-24T10:01:00.000Z',
+      verdict: 'pass',
+    })
+    const newest = publishCurrentUi({
+      ...current,
+      sessionId: 'ui-20260824T110000000Z-22222222',
+      finishedAt: '2026-08-24T11:01:00.000Z',
+      verdict: 'fail',
+    })
+
+    const status = derivePluginStatus(current)
+    expect(status.ui).toEqual({ state: 'fail', sessionId: newest.sessionId })
+    expect(status.targets.next).toEqual({ state: 'pass', runId: 'verify-newest' })
+  })
+
+  it.each([
+    ['plugin bytes', (root: string, plugin: PluginRef) => writeFileSync(join(plugin.sourcePath, 'src', 'index.ts'), 'changed\n'), 'PLUGIN_CONTENT_CHANGED'],
+    ['next pin', (root: string) => writeCompatibility(root, '0.1.1-rc.3', MASTER), 'TARGET_PIN_CHANGED'],
+    ['master pin', (root: string) => writeCompatibility(root, NEXT, '2'.repeat(40)), 'TARGET_PIN_CHANGED'],
+    ['context', (root: string) => writeFileSync(join(root, 'context', 'rule.md'), 'changed\n'), 'LAB_CONTEXT_CHANGED'],
+  ] as const)('marks finalized UI evidence stale when %s changes', (label, mutate, reason) => {
+    const current = fixture(true)
+    const target = label === 'master pin' ? 'master' : 'next'
+    const evidence = publishCurrentUi({ ...current, target })
+    mutate(current.root, current.plugin)
+
+    expect(derivePluginStatus(current).ui).toEqual({
+      state: 'stale',
+      sessionId: evidence.sessionId,
+      reasons: [reason],
+    })
+  })
+
+  it('sorts and deduplicates all finalized UI stale reasons', () => {
+    const current = fixture(true)
+    const evidence = publishCurrentUi(current)
+    writeFileSync(join(current.plugin.sourcePath, 'src', 'index.ts'), 'changed\n')
+    writeCompatibility(current.root, '0.1.1-rc.3', MASTER)
+    writeFileSync(join(current.root, 'context', 'rule.md'), 'changed\n')
+
+    expect(derivePluginStatus(current).ui).toEqual({
+      state: 'stale',
+      sessionId: evidence.sessionId,
+      reasons: ['LAB_CONTEXT_CHANGED', 'PLUGIN_CONTENT_CHANGED', 'TARGET_PIN_CHANGED'],
+    })
+  })
+
+  it('keeps status fully read-only while loading UI evidence', () => {
+    const current = fixture(true)
+    publishCurrentUi(current)
+    const before = directorySnapshot(current.root)
+
+    derivePluginStatus(current)
+
+    expect(directorySnapshot(current.root)).toEqual(before)
+  })
+
+  it('reports corrupt finalized UI evidence as an explicit error containing its path', () => {
+    const current = fixture(true)
+    const resultPath = join(
+      current.uiRunsRoot,
+      pluginEvidenceKey(current.plugin),
+      'ui-20260824T120000000Z-deadbeef',
+      'result.json',
+    )
+    mkdirSync(join(resultPath, '..'), { recursive: true })
+    writeFileSync(resultPath, '{broken')
+
+    expect(() => derivePluginStatus(current)).toThrow(
+      new RegExp(`Corrupt finalized UI evidence.*${escapeRegex(resultPath)}`, 'i'),
+    )
+  })
+
   it('reports corrupt finalized evidence as an explicit error containing its path', () => {
     const current = fixture()
     const key = pluginEvidenceKey(current.plugin)
@@ -238,3 +359,17 @@ describe('derivePluginStatus', () => {
     expect(() => derivePluginStatus(current)).toThrow(new RegExp(`Corrupt finalized evidence.*result\\.json`, 'i'))
   })
 })
+
+function directorySnapshot(root: string): Array<[string, string]> {
+  return readdirSync(root, { recursive: true, withFileTypes: true })
+    .map(entry => {
+      const path = join(entry.parentPath, entry.name)
+      const relativePath = path.slice(root.length + 1).replaceAll('\\', '/')
+      return [relativePath, entry.isFile() ? readFileSync(path, 'utf8') : '<directory>'] as [string, string]
+    })
+    .sort(([left], [right]) => left.localeCompare(right))
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
