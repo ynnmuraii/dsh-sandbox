@@ -399,6 +399,8 @@ export interface UiSupervisorDependencies {
 }
 
 export function parseDshReadyUrl(line: string): string | undefined
+export function windowsTreeKillArgs(pid: number): string[]
+export function posixProcessGroup(pid: number): number
 export async function runUiSupervisor(request: UiSupervisorRequestV1, deps?: UiSupervisorDependencies): Promise<void>
 ```
 
