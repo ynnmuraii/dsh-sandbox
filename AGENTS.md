@@ -15,7 +15,7 @@ pnpm lab status <name>|--path P [--json]
 `dev` is live/in-place read-only for the plugin and keeps profiles/overlays in
 `.lab/runtime`. `verify` includes current uncommitted and untracked files in a
 temporary workspace and always removes that workspace; only minimal evidence is
-kept as forge memory. Catalog lookup and init/initialization are optional. Only explicit authoring commands mutate plugin repositories. The portable agent entrypoint is `.agents/skills/dsh-plugin-development/SKILL.md`; regenerate it with `pnpm lab sync-context`. UI sessions are not provided here.
+kept as forge memory. Catalog lookup and init/initialization are optional. Only explicit authoring commands mutate plugin repositories. The portable agent entrypoint is `.agents/skills/dsh-plugin-development/SKILL.md`; it provides advisory methodology and does not enforce workflow state or UI behavior. Regenerate it with `pnpm lab sync-context`. UI sessions are not provided here.
 
 ## Source of truth
 
