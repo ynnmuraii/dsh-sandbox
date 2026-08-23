@@ -238,6 +238,8 @@ describe('inspectPlugin', () => {
   it.each([
     'export const pattern = /require("upstream\\/deepseek-harness\\/src\\/private\\.js")/',
     'export const pattern = /import("upstream\\/deepseek-harness\\/src\\/private\\.js")/',
+    'if (enabled) /require("upstream\\/deepseek-harness\\/src\\/private\\.js")/.test(value)',
+    'while (enabled) /import("upstream\\/deepseek-harness\\/src\\/private\\.js")/.test(value)',
   ])('does not mistake a regex literal for a private module load: %s', (source) => {
     const subject = fixture()
     writeFileSync(join(subject.plugin.sourcePath, 'src', 'index.ts'), `${source}\n`)
