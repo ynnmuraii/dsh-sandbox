@@ -51,17 +51,30 @@ export function renderAgentSkill(input: {
 }
 
 function hasAlternateTopLevelHeading(lines: readonly string[]): boolean {
-  let fenced = false
+  let fence: { marker: '`' | '~'; length: number } | undefined
   let previous: string | undefined
 
   for (const line of lines) {
-    const fence = /^ {0,3}(`{3,}|~{3,})/.exec(line)
+    const run = /^ {0,3}(`+|~+)(.*)$/.exec(line)
+    const marker = run?.[1]
     if (fence) {
-      fenced = !fenced
+      const closing = marker
+      if (
+        closing &&
+        closing[0] === fence.marker &&
+        closing.length >= fence.length &&
+        /^[ \t]*$/.test(run?.[2] ?? '')
+      ) {
+        fence = undefined
+      }
       previous = undefined
       continue
     }
-    if (fenced) continue
+    if (marker && marker.length >= 3) {
+      fence = { marker: marker[0] as '`' | '~', length: marker.length }
+      previous = undefined
+      continue
+    }
 
     // A single-hash ATX heading may use spaces, a tab, or no heading text.
     // `##` and deeper headings are valid body content and are intentionally
