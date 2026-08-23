@@ -97,19 +97,96 @@ describe('syncContext', () => {
     expect(existsSync(join(dir, SKILL_PATH))).toBe(false)
   })
 
-  it('ignores named targets not in the catalog (incl. prototype keys)', async () => {
+  it('rejects a requested name outside the catalog before writing the root skill', async () => {
     writeFileSync(join(dir, 'catalog.yaml'), 'plugins:\n  a:\n    path: plugins/a\n    tracking: local\n')
-    mkdirSync(join(dir, 'plugins', 'a'), { recursive: true })
-    const res = await syncContext({ root: dir, names: ['constructor'], all: false })
-    expect(res.map(result => result.kind)).toEqual(['agent-skill'])
+    await expect(
+      syncContext({ root: dir, names: ['constructor'], all: false }),
+    ).rejects.toThrow(/unknown plugin.*constructor/i)
+    expect(existsSync(join(dir, SKILL_PATH))).toBe(false)
   })
 
-  it('does not crash when catalog is missing and a name collides with a prototype key', async () => {
-    // No catalog.yaml present -> plugins = {}; 'constructor' must resolve to
-    // "not found" rather than the inherited Object constructor.
+  it('rejects an unknown prototype-like name when the catalog is missing', async () => {
     mkdirSync(join(dir, 'plugins', 'constructor'), { recursive: true })
-    const res = await syncContext({ root: dir, names: ['constructor'], all: false })
-    expect(res.map(result => result.kind)).toEqual(['agent-skill'])
+    await expect(
+      syncContext({ root: dir, names: ['constructor'], all: false }),
+    ).rejects.toThrow(/unknown plugin.*constructor/i)
+    expect(existsSync(join(dir, SKILL_PATH))).toBe(false)
+  })
+
+  it('preflights every named target before writing any projection', async () => {
+    writeFileSync(
+      join(dir, 'catalog.yaml'),
+      'plugins:\n  valid:\n    path: plugins/valid\n    tracking: local\n',
+    )
+    const valid = join(dir, 'plugins', 'valid')
+    mkdirSync(valid, { recursive: true })
+    execFileSync('git', ['init', '-q'], { cwd: valid })
+
+    await expect(
+      syncContext({ root: dir, names: ['valid', 'unknown'], all: false }),
+    ).rejects.toThrow(/unknown plugin.*unknown/i)
+
+    expect(existsSync(join(valid, '.dsh-lab', 'shared-context.md'))).toBe(false)
+    expect(existsSync(join(dir, SKILL_PATH))).toBe(false)
+  })
+
+  it('syncs every catalog plugin in catalog order and is fully idempotent', async () => {
+    writeFileSync(
+      join(dir, 'catalog.yaml'),
+      [
+        'plugins:',
+        '  beta:',
+        '    path: plugins/beta',
+        '    tracking: local',
+        '  alpha:',
+        '    path: plugins/alpha',
+        '    tracking: local',
+      ].join('\n') + '\n',
+    )
+    for (const name of ['beta', 'alpha']) {
+      const plugin = join(dir, 'plugins', name)
+      mkdirSync(plugin, { recursive: true })
+      execFileSync('git', ['init', '-q'], { cwd: plugin })
+    }
+
+    const first = await syncContext({ root: dir, names: [], all: true })
+    const second = await syncContext({ root: dir, names: [], all: true })
+
+    expect(first.map(result => [result.kind, result.name, result.changed])).toEqual([
+      ['plugin-context', 'beta', true],
+      ['plugin-context', 'alpha', true],
+      ['agent-skill', 'dsh-plugin-development', true],
+    ])
+    expect(second.map(result => [result.kind, result.name, result.changed])).toEqual([
+      ['plugin-context', 'beta', false],
+      ['plugin-context', 'alpha', false],
+      ['agent-skill', 'dsh-plugin-development', false],
+    ])
+  })
+
+  it('preflights every --all target before writing any projection', async () => {
+    writeFileSync(
+      join(dir, 'catalog.yaml'),
+      [
+        'plugins:',
+        '  present:',
+        '    path: plugins/present',
+        '    tracking: local',
+        '  missing:',
+        '    path: plugins/missing',
+        '    tracking: local',
+      ].join('\n') + '\n',
+    )
+    const present = join(dir, 'plugins', 'present')
+    mkdirSync(present, { recursive: true })
+    execFileSync('git', ['init', '-q'], { cwd: present })
+
+    await expect(syncContext({ root: dir, names: [], all: true })).rejects.toThrow(
+      /missing or not a git repo.*missing/i,
+    )
+
+    expect(existsSync(join(present, '.dsh-lab', 'shared-context.md'))).toBe(false)
+    expect(existsSync(join(dir, SKILL_PATH))).toBe(false)
   })
 
   it('does not create host-specific or plugin-local skill mirrors', async () => {

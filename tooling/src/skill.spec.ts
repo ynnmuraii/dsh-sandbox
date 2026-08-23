@@ -72,6 +72,21 @@ describe('portable agent skill renderer', () => {
     ).toThrow(/top-level heading/i)
   })
 
+  it('rejects alternate CommonMark top-level headings after the canonical H1', () => {
+    expect(() =>
+      renderAgentSkill({
+        body: `${BODY}\n\nSecond heading\n===`,
+        documents: [],
+      }),
+    ).toThrow(/top-level heading/i)
+    expect(() =>
+      renderAgentSkill({
+        body: `${BODY}\n\n#\tSecond heading`,
+        documents: [],
+      }),
+    ).toThrow(/top-level heading/i)
+  })
+
   it('fixes the only portable projection and canonical source paths', () => {
     expect(AGENT_SKILL_PATH).toBe('.agents/skills/dsh-plugin-development/SKILL.md')
     expect(SKILL_SOURCE_PATH).toBe('context/dsh-plugin-development-skill.md')

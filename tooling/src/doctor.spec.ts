@@ -185,6 +185,55 @@ describe('doctor', () => {
     expect(res.some(r => r.level === 'error' && /stale agent skill.*lab sync-context/i.test(r.message))).toBe(true)
   })
 
+  it('reports a missing canonical skill source instead of skipping the skill gate', async () => {
+    const dir = tmpRoot()
+
+    const res = await doctor({ root: dir })
+
+    expect(
+      res.some(r => r.level === 'error' && /agent skill.*source.*missing/i.test(r.message)),
+    ).toBe(true)
+  })
+
+  it('reports an invalid canonical skill source without rejecting doctor', async () => {
+    const dir = tmpRoot()
+    writeSkillContext(dir)
+    writeFileSync(join(dir, SKILL_SOURCE_PATH), '# Wrong heading\n')
+
+    const res = await doctor({ root: dir })
+
+    expect(
+      res.some(r => r.level === 'error' && /agent skill.*source.*invalid/i.test(r.message)),
+    ).toBe(true)
+  })
+
+  it('reports an unreadable generated skill path without mutating it', async () => {
+    const dir = tmpRoot()
+    writeSkillContext(dir)
+    const path = join(dir, AGENT_SKILL_PATH)
+    mkdirSync(path, { recursive: true })
+
+    const res = await doctor({ root: dir })
+
+    expect(
+      res.some(r => r.level === 'error' && /agent skill.*projection.*unreadable/i.test(r.message)),
+    ).toBe(true)
+    expect(existsSync(path)).toBe(true)
+  })
+
+  it('still diagnoses stale skill evidence when compatibility is invalid', async () => {
+    const dir = tmpRoot()
+    const path = writeCurrentSkill(dir)
+    writeFileSync(path, 'tampered\n')
+    writeFileSync(join(dir, 'workbench', 'compatibility.yaml'), 'targets: [\n')
+
+    const res = await doctor({ root: dir })
+
+    expect(res.some(r => r.level === 'error' && /invalid compatibility manifest/i.test(r.message))).toBe(true)
+    expect(res.some(r => r.level === 'error' && /stale agent skill.*lab sync-context/i.test(r.message))).toBe(true)
+    expect(readFileSync(path, 'utf8')).toBe('tampered\n')
+  })
+
   it('reports a cataloged plugin whose Cordis deps mismatch its declared target pin', async () => {
     const dir = tmpRoot()
     const plugin = join(dir, 'plugins', 'mismatch')
