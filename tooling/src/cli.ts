@@ -2,7 +2,7 @@
 import { doctor } from './doctor.js'
 import { createPlugin } from './create.js'
 import { syncContext } from './sync.js'
-import { devSource } from './run.js'
+import { devPlugin } from './run.js'
 import { checkUpstream, updateUpstream } from './upstream-update.js'
 import { parsePluginSelector, resolvePluginRef } from './plugin-ref.js'
 import { inspectPlugin } from './inspect.js'
@@ -16,10 +16,10 @@ Usage: lab <command> [args]
 
 Commands:
   new <name>               create a standalone plugin repo from the template
-  dev <name> --target T    run source overlay + HMR against target (next|master)
-  verify <name> [--target T] [--json] run plugin checks + target compatibility
-  inspect <name> [--target T] inspect standalone plugin contracts
-  status <name> [--json] derive current verification status
+  dev <name>|--path P --target T       run live source overlay + HMR (next|master)
+  verify <name>|--path P --target T [--json] run plugin checks + compatibility
+  inspect <name>|--path P [--target T] [--json] inspect plugin contracts
+  status <name>|--path P [--json]      derive current verification status
     exit 0 all applicable claims current/pass; exit 2 any applicable stale/not-run/failed;
     exit 1 selector/tooling error
   sync-context [name|--all] regenerate shared-context snapshots
@@ -72,11 +72,9 @@ export async function runCli(argv: string[]): Promise<number> {
       }
       try {
         const parsed = parsePluginSelector(rest)
-        if (parsed.selector.path !== undefined) {
-          throw new Error('path selectors are not supported by lab dev yet')
-        }
         const target = parseTarget(parsed.rest, ['next', 'master']) as 'next' | 'master'
-        await devSource({ root: process.cwd(), name: parsed.selector.name!, target })
+        const plugin = resolvePluginRef({ root: process.cwd(), selector: parsed.selector })
+        await devPlugin({ root: process.cwd(), plugin, target })
         return 0
       } catch (e) {
         console.error(`error: ${(e as Error).message}`)

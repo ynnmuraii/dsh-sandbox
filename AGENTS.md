@@ -2,6 +2,21 @@
 
 `dsh-lab` is a meta-repo and local library for creating, studying, and verifying independent DeepSeek Harness plugins. Each `plugins/<name>` is its own Git repo; this root is not a plugin monorepo.
 
+This is an agent-first forge. The first-slice commands accept either a catalog
+name or an external path:
+
+```text
+pnpm lab inspect <name>|--path P [--json]
+pnpm lab dev <name>|--path P --target T
+pnpm lab verify <name>|--path P --target T [--json]
+pnpm lab status <name>|--path P [--json]
+```
+
+`dev` is live/in-place read-only for the plugin and keeps profiles/overlays in
+`.lab/runtime`. `verify` includes current uncommitted and untracked files in a
+temporary workspace and always removes that workspace; only minimal evidence is
+kept as forge memory. Catalog lookup and init/initialization are optional. Only explicit authoring commands mutate plugin repositories. UI sessions and skill generation are future work, not commands provided here.
+
 ## Source of truth
 
 `context/*` is the single source of truth for shared rules — edit there, never in plugin snapshots:
@@ -18,8 +33,10 @@ Per-plugin `AGENTS.md` files hold only local rules and must read `.dsh-lab/share
 
 ```text
 pnpm lab new <name>
-pnpm lab dev <name> --target next|master
-pnpm lab verify <name> [--target next|master|all]
+pnpm lab dev <name>|--path P --target next|master
+pnpm lab verify <name>|--path P [--target next|master|all] [--json]
+pnpm lab inspect <name>|--path P [--target next|master] [--json]
+pnpm lab status <name>|--path P [--json]
 pnpm lab sync-context [name|--all]
 pnpm lab doctor
 ```

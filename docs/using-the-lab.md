@@ -4,6 +4,27 @@ The plugin laboratory (`dsh-lab`) is a meta-repo that teaches and verifies how t
 author **external** DeepSeek Harness plugins that ship as installable bundles.
 This guide is for plugin authors working inside the lab.
 
+## First-slice agent contract
+
+The lab is a forge used by an agent and its harness. The supported entry points
+are:
+
+```text
+lab inspect <name>|--path P [--json]
+lab dev <name>|--path P --target T
+lab verify <name>|--path P --target T [--json]
+lab status <name>|--path P [--json]
+```
+
+`dev` is live/in-place read-only: it reads the plugin's current source and puts
+profiles and overlays under the lab root's `.lab/runtime`, never in the plugin.
+Current uncommitted and untracked files are included in verification. `verify`
+uses a temporary workspace and always removes it, while finalized evidence is
+minimal forge memory rather than a second working tree. Catalog lookup is
+optional; `init`/initialization is optional as well. Only explicit authoring
+commands mutate plugin repositories. UI sessions and skill generation are
+future work, not implemented commands.
+
 > Scope note. Everything here is against the **pinned** revision of upstream
 > DeepSeek Harness recorded in `workbench/compatibility.yaml`. DeepSeek Harness
 > is a developer preview whose API can change; never assume `master` is stable.
@@ -31,8 +52,8 @@ the only mode today); only `catalog.yaml` is committed in the parent.
 | Command | What it does |
 |---|---|
 | `pnpm lab new <name>` | Scaffold a standalone plugin repo from `templates/plugin`, write `.dsh-lab/plugin.yaml`, append a `catalog.yaml` entry. |
-| `pnpm lab dev <name> --target next\|master` | Emit a **source overlay** (`cordis.patch.yml`) that points at the plugin's `src/index.ts`, materialize a pinned profile, and boot `dsh web` against it watching source for HMR. |
-| `pnpm lab verify <name> --target next\|master\|all` | Build + pack the bundle, install the tarball into an ephemeral profile via the real `dsh plugin add`, and assert the composed `--dump-config` contains the plugin. |
+| `pnpm lab dev <name>\|--path P --target next\|master` | Read live source, emit a **source overlay** (`cordis.patch.yml`), materialize a pinned profile, and boot `dsh` against it watching source for HMR. |
+| `pnpm lab verify <name>\|--path P --target next\|master\|all` | Copy the current source, build + pack the bundle in a temporary workspace, install the tarball via the real `dsh plugin add`, and assert the composed `--dump-config` contains the plugin. |
 | `pnpm lab sync-context [name\|--all]` | Regenerate `.dsh-lab/shared-context.md` snapshots inside each plugin repo from `context/`, embedding a content hash. |
 | `pnpm lab doctor` | Validate toolchain, catalog, target pins, context-snapshot freshness, and the upstream submodule (present + pinned to `master.commit` + clean). Exit 0 only when green. |
 | `pnpm lab upstream check\|update [--verify]` | Read-only compare the pinned `master` SHA, or explicitly adopt it with clean-tree gates, detached checkout, doctor, and optional full plugin verification. |
@@ -87,7 +108,7 @@ pnpm lab verify my-plugin --target all      # both
 `verify` proves the plugin (1) builds, (2) packs to a tarball, (3) installs as an
 **active profile bundle** through the real `dsh plugin add` + `dsh.bundle.patch`
 reconciliation, and (4) its patch layer is observable in the composed profile
-config. This is the publish-tutorial path. Master composes against the **built**
+config. This is the packaged-bundle path. Master composes against the **built**
 pinned upstream (`apps/cli/lib/bin.js`), never a profile-local install.
 Each target run uses a unique `<plugin>-<target>-verify-<run-id>` profile and
 cleans it up in a `finally` block. Target-specific `allowBuilds` policy is

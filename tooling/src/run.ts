@@ -3,18 +3,15 @@ import { mkdirSync, writeFileSync, existsSync, rmSync, renameSync } from 'node:f
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
-import { loadPluginConfig } from './create.js'
 import {
-  loadCatalogFromFile,
   loadCompatibilityFromFile,
   CompatibilityError,
-  type CatalogEntry,
   type Compatibility,
 } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
 import { verifyUpstreamCommit } from './upstream.js'
 import { pnpm, pnpmCommand } from './proc.js'
-import { resolvePluginRef } from './plugin-ref.js'
+import { resolvePluginRef, type PluginRef } from './plugin-ref.js'
 import { verifyPlugin } from './verify.js'
 
 export interface ProfileSpec {
@@ -25,6 +22,12 @@ export interface ProfileSpec {
 export interface DevOptions {
   root: string
   name: string
+  target: 'next' | 'master'
+}
+
+export interface DevPluginOptions {
+  root: string
+  plugin: PluginRef
   target: 'next' | 'master'
 }
 
@@ -147,16 +150,6 @@ export function buildDevOverlay(name: string, entryPath: string, sourceRoot: str
   ].join('\n')
 }
 
-// Read the catalog entry for a plugin; throw if the name is absent.
-function catalogEntry(root: string, name: string): CatalogEntry {
-  const catalog = loadCatalogFromFile(rootPath(root, ROOT_PATHS.catalog))
-  const entry = catalog.plugins[name]
-  if (!entry) {
-    throw new CompatibilityError(`plugin '${name}' not found in catalog`)
-  }
-  return entry
-}
-
 // Materialize a pinned profile package.json (and workspace marker) into the
 // runtime dir, reading the target's pin from the compatibility manifest. The
 // materialized location is `.lab/runtime/profiles/<name>-<target>-<kind>`, so the
@@ -250,6 +243,19 @@ async function resolveLauncher(root: string, compat: Compatibility, target: Targ
   return { cmd: pc.cmd, args: [...pc.args, 'exec', 'dsh'] }
 }
 
+// `pnpmCommand` is also the test seam for a directly executable launcher. In
+// production the resolved pnpm entry needs `exec dsh`; an injected node script
+// already represents dsh and must receive only dsh's own flags.
+async function resolveDevLauncher(root: string, compat: Compatibility, target: Target): Promise<Command> {
+  const launcher = await resolveLauncher(root, compat, target)
+  if (target !== 'next' || launcher.cmd !== process.execPath) return launcher
+  const entry = launcher.args[0]
+  if (entry !== undefined && !/pnpm\.(?:cjs|mjs)$/i.test(entry)) {
+    return { cmd: launcher.cmd, args: launcher.args.slice(0, -2) }
+  }
+  return launcher
+}
+
 // Run a launcher command against the materialized profile, isolating it to the
 // lab runtime home (`DSH_HOME`) so it never touches the user's real ~/.dsh.
 // The launcher's OWN flags come first: `--profile <name>` must precede any
@@ -270,17 +276,34 @@ function bootProfile(
 }
 
 export async function devSource(opts: DevOptions): Promise<void> {
-  const { root, name, target } = opts
-  const entry = catalogEntry(root, name)
-  const cfg = loadPluginConfig(join(root, entry.path, '.dsh-lab', 'plugin.yaml'))
-  if (!cfg.targets.includes(target)) {
+  const plugin = resolvePluginRef({ root: opts.root, selector: { name: opts.name } })
+  return devPlugin({ root: opts.root, plugin, target: opts.target })
+}
+
+function devPluginName(plugin: PluginRef): string {
+  if (plugin.metadata?.name) return plugin.metadata.name
+  if (plugin.catalogName) return plugin.catalogName
+  const parts = plugin.packageName.split('/')
+  return parts.at(-1) ?? plugin.packageName
+}
+
+/**
+ * Run live source development for either a catalog plugin or an arbitrary
+ * standalone plugin directory. All generated profiles, overlays, and runtime
+ * state belong to the forge root; the plugin directory is only read.
+ */
+export async function devPlugin(opts: DevPluginOptions): Promise<void> {
+  const { root, plugin, target } = opts
+  const name = devPluginName(plugin)
+  const declaredTargets = plugin.metadata?.targets
+  if (declaredTargets !== undefined && !declaredTargets.includes(target)) {
     throw new Error(`plugin '${name}' does not declare target '${target}'`)
   }
   if (target === 'master' && !existsSync(rootPath(root, ROOT_PATHS.upstream + '/.git'))) {
     throw new Error('master target requires the pinned upstream checkout (see Task 8)')
   }
-  const entryPath = resolveSourceOverlay(root, entry.path, 'src/index.ts', name)
-  const sourceRoot = resolve(root, entry.path, 'src')
+  const entryPath = pathToFileURL(resolve(plugin.sourcePath, 'src', 'index.ts')).href
+  const sourceRoot = resolve(plugin.sourcePath, 'src')
 
   // Emit an absolute overlay into the runtime dir. The overlay both inserts the
   // plugin source entry AND re-enables Cordis module HMR with a module `root`
@@ -299,14 +322,19 @@ export async function devSource(opts: DevOptions): Promise<void> {
   // CLI directly (no `dsh` bin exists on dsh-root).
   const profileDir = materializeProfile({ root, name, target, profileKind: 'dev', bundles: DEV_WEB_BUNDLES })
   const bootProfileName = profileName(name, target, 'dev')
-  const nodeOptions = [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' ')
+  const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
+  const launcher = await resolveDevLauncher(root, compat, target)
+  const directLauncher = launcher.cmd === process.execPath && launcher.args.length === 1
+  const nodeOptions = [
+    process.env.NODE_OPTIONS,
+    `--import=${resolveTsxLoader()}`,
+    ...(directLauncher ? ['--title=tsx/esm'] : []),
+  ].filter(Boolean).join(' ')
   const env = { ...process.env, NODE_OPTIONS: nodeOptions, DSH_HOME: rootPath(root, ROOT_PATHS.runtime).replace(/\\/g, '/') }
   console.log(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
   console.log(`[dev] generated overlay: ${overlayPath}`)
   console.log(`[dev] booting materialized web profile '${bootProfileName}' with DSH_HOME=${env.DSH_HOME}`)
 
-  const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
-  const launcher = await resolveLauncher(root, compat, target)
   try {
     if (target !== 'master') {
       pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
