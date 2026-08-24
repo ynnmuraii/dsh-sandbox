@@ -18,12 +18,21 @@ export interface ClaimOwnedUiDirectoryOptions {
   identity?: (path: string) => UiDirectoryIdentity | undefined
   hooks?: OwnedUiDirectoryHooks
 }
+
 export interface OwnedUiMutationRetry {
   /** total mutation attempts, including the first (must be >= 1) */
   attempts: number
   /** backoff delay before retry attempt N (0-based) */
   delayMs: (attempt: number) => number
   sleep: (ms: number) => void | Promise<void>
+}
+
+export interface OwnedUiDirectory {
+  assertCurrent(): void
+  removeDirectoryLeaf(name: string): void
+  removeFileLeaf(name: string): void
+  removeDirectoryLeafRetrying(name: string, retry: OwnedUiMutationRetry): Promise<void>
+  removeFileLeafRetrying(name: string, retry: OwnedUiMutationRetry): Promise<void>
 }
 
 const TRANSIENT_CODES: Record<string, true> = {
@@ -43,14 +52,6 @@ function validateRetryPolicy(retry: OwnedUiMutationRetry): void {
   if (!Number.isInteger(retry.attempts) || retry.attempts < 1) throw new Error('retry attempts must be an integer >= 1')
   if (typeof retry.delayMs !== 'function') throw new Error('retry delayMs must be a function')
   if (typeof retry.sleep !== 'function') throw new Error('retry sleep must be a function')
-}
-
-export interface OwnedUiDirectory {
-  assertCurrent(): void
-  removeDirectoryLeaf(name: string): void
-  removeFileLeaf(name: string): void
-  removeDirectoryLeafRetrying(name: string, retry: OwnedUiMutationRetry): Promise<void>
-  removeFileLeafRetrying(name: string, retry: OwnedUiMutationRetry): Promise<void>
 }
 
 export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): OwnedUiDirectory {
@@ -76,46 +77,53 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
     assertIdentity(directory, directoryAnchor, 'owned UI directory', identify)
   }
 
-  function attemptRemoveDirectoryLeaf(name: string): { quarantine: string, leafAnchor: UiDirectoryIdentity } | undefined {
-    if (!isSingleComponent(name)) throw new Error(`unsafe owned UI directory leaf ${JSON.stringify(name)}`)
-    assertAnchors()
+  function quarantineDirectoryLeaf(name: string, retained: UiDirectoryIdentity | undefined): { quarantine: string, leafAnchor: UiDirectoryIdentity } | undefined {
     const leaf = join(directory, name)
+    assertAnchors()
     assertContained(directory, leaf)
     if (!exists(leaf)) return undefined
     assertNoSymlinkComponents(leaf, 'owned UI directory leaf')
-    const leafAnchor = identify(leaf)
-    if (leafAnchor === undefined) throw new Error(`stable identity unavailable for owned UI directory leaf ${leaf}`)
-    const leafStat = lstatSync(leaf)
-    if (leafStat.isSymbolicLink() || !leafStat.isDirectory()) throw new Error(`owned UI directory leaf is not a regular directory at ${leaf}`)
+    const current = identify(leaf)
+    if (current === undefined) throw new Error(`stable identity unavailable for owned UI directory leaf ${leaf}`)
+    if (retained !== undefined && (current.dev !== retained.dev || current.ino !== retained.ino)) throw new Error(`owned UI directory leaf ${leaf} identity changed or cannot be proven safe`)
+    const leafAnchor = retained ?? current
+    const stat = lstatSync(leaf)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`owned UI directory leaf is not a regular directory at ${leaf}`)
     opts.hooks?.beforeMutation?.('quarantine', leaf)
     assertAnchors()
     assertIdentity(leaf, leafAnchor, `owned UI directory leaf ${leaf} changed before quarantine`, identify)
     const quarantine = `${leaf}.cleanup-${process.pid}-${Math.random().toString(16).slice(2)}`
     if (exists(quarantine)) throw new Error(`quarantine path already exists at ${quarantine}`)
     renameSync(leaf, quarantine)
-    try {
-      opts.hooks?.afterQuarantine?.(quarantine)
-      assertAnchors()
-      assertIdentity(quarantine, leafAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
-      opts.hooks?.beforeMutation?.('remove', quarantine)
-      assertAnchors()
-      assertIdentity(quarantine, leafAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
-      rmSync(quarantine, { recursive: true, force: false })
-    } catch (error) {
-      throw error
-    }
     return { quarantine, leafAnchor }
   }
 
-  function attemptRemoveFileLeaf(name: string): { leaf: string, leafAnchor: UiDirectoryIdentity } | undefined {
-    if (!isSingleComponent(name)) throw new Error(`unsafe owned UI directory leaf ${JSON.stringify(name)}`)
+  function removeQuarantine(quarantine: string, leafAnchor: UiDirectoryIdentity): void {
+    opts.hooks?.afterQuarantine?.(quarantine)
     assertAnchors()
+    assertIdentity(quarantine, leafAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
+    opts.hooks?.beforeMutation?.('remove', quarantine)
+    assertAnchors()
+    assertIdentity(quarantine, leafAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
+    rmSync(quarantine, { recursive: true, force: false })
+  }
+
+  function attemptRemoveDirectoryLeaf(name: string): void {
+    const captured = quarantineDirectoryLeaf(name, undefined)
+    if (captured === undefined) return
+    removeQuarantine(captured.quarantine, captured.leafAnchor)
+  }
+
+  function removeFileOnce(name: string, retained: UiDirectoryIdentity | undefined): { leaf: string, leafAnchor: UiDirectoryIdentity } | undefined {
     const leaf = join(directory, name)
+    assertAnchors()
     assertContained(directory, leaf)
     if (!exists(leaf)) return undefined
     assertNoSymlinkComponents(leaf, 'owned UI file leaf')
-    const leafAnchor = identify(leaf)
-    if (leafAnchor === undefined) throw new Error(`stable identity unavailable for owned UI file leaf ${leaf}`)
+    const current = identify(leaf)
+    if (current === undefined) throw new Error(`stable identity unavailable for owned UI file leaf ${leaf}`)
+    if (retained !== undefined && (current.dev !== retained.dev || current.ino !== retained.ino)) throw new Error(`owned UI file leaf ${leaf} identity changed or cannot be proven safe`)
+    const leafAnchor = retained ?? current
     assertRegularFileLeaf(leaf, 'owned UI file leaf')
     opts.hooks?.beforeMutation?.('remove-file', leaf)
     assertAnchors()
@@ -123,6 +131,10 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
     assertRegularFileLeaf(leaf, 'owned UI file leaf')
     unlinkSync(leaf)
     return { leaf, leafAnchor }
+  }
+
+  function attemptRemoveFileLeaf(name: string): void {
+    removeFileOnce(name, undefined)
   }
 
   return {
@@ -138,136 +150,76 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
     async removeDirectoryLeafRetrying(name: string, retry: OwnedUiMutationRetry): Promise<void> {
       validateRetryPolicy(retry)
       if (!isSingleComponent(name)) throw new Error(`unsafe owned UI directory leaf ${JSON.stringify(name)}`)
-      let leafAnchor: UiDirectoryIdentity | undefined
+      let retained: UiDirectoryIdentity | undefined
       let quarantine: string | undefined
       let quarantineAnchor: UiDirectoryIdentity | undefined
-      let quarantineAttempted = false
       for (let attempt = 0; attempt < retry.attempts; attempt++) {
         try {
-          if (!quarantineAttempted) {
-            // Need to attempt quarantine phase; if leafAnchor already captured, revalidate against it before attempt
-            if (leafAnchor !== undefined) {
-              // Full revalidation for quarantine retry is handled in catch block before sleep, but also ensure next attempt validates
-              // Here we revalidate again at attempt start to ensure leaf still matches original anchor
-              // The catch block already validated before sleep, but swap happened during sleep, so we need to validate again now
-              assertAnchors()
-              const leaf = join(directory, name)
-              // If leaf no longer exists, maybe it was already quarantined? But quarantineAttempted is false, so leaf should exist
-              assertNoSymlinkComponents(leaf, 'owned UI directory leaf')
-              assertIdentity(leaf, leafAnchor, `owned UI directory leaf ${leaf} changed before quarantine`, identify)
-              const leafStat = lstatSync(leaf)
-              if (leafStat.isSymbolicLink() || !leafStat.isDirectory()) throw new Error(`owned UI directory leaf is not a regular directory at ${leaf}`)
-            }
-            // Perform quarantine attempt; this will capture leafAnchor if not already, or reuse if already
-            // To avoid duplicate capture logic, we inline the steps with retention
-            assertAnchors()
-            const leaf = join(directory, name)
-            assertContained(directory, leaf)
-            if (!exists(leaf)) return
-            assertNoSymlinkComponents(leaf, 'owned UI directory leaf')
-            const currentAnchor = identify(leaf)
-            if (currentAnchor === undefined) throw new Error(`stable identity unavailable for owned UI directory leaf ${leaf}`)
-            if (leafAnchor !== undefined) {
-              if (currentAnchor.dev !== leafAnchor.dev || currentAnchor.ino !== leafAnchor.ino) {
-                throw new Error(`owned UI directory leaf ${leaf} changed before quarantine identity changed or cannot be proven safe`)
+          if (quarantine === undefined) {
+            if (retained === undefined) {
+              const probe = join(directory, name)
+              if (exists(probe)) {
+                const cur = identify(probe)
+                if (cur !== undefined) retained = cur
               }
-            } else {
-              leafAnchor = currentAnchor
             }
-            const leafStat = lstatSync(leaf)
-            if (leafStat.isSymbolicLink() || !leafStat.isDirectory()) throw new Error(`owned UI directory leaf is not a regular directory at ${leaf}`)
-            opts.hooks?.beforeMutation?.('quarantine', leaf)
-            assertAnchors()
-            assertIdentity(leaf, leafAnchor, `owned UI directory leaf ${leaf} changed before quarantine`, identify)
-            const nextQuarantine = `${leaf}.cleanup-${process.pid}-${Math.random().toString(16).slice(2)}`
-            if (exists(nextQuarantine)) throw new Error(`quarantine path already exists at ${nextQuarantine}`)
-            renameSync(leaf, nextQuarantine)
-            quarantine = nextQuarantine
-            quarantineAnchor = leafAnchor
-            quarantineAttempted = true
-            // Now attempt rm on the same quarantine
-            opts.hooks?.afterQuarantine?.(quarantine)
-            assertAnchors()
-            assertIdentity(quarantine, quarantineAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
-            opts.hooks?.beforeMutation?.('remove', quarantine)
-            assertAnchors()
-            assertIdentity(quarantine, quarantineAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
-            rmSync(quarantine, { recursive: true, force: false })
+            const captured = quarantineDirectoryLeaf(name, retained)
+            if (captured === undefined) return
+            retained = captured.leafAnchor
+            quarantine = captured.quarantine
+            quarantineAnchor = captured.leafAnchor
+            removeQuarantine(quarantine, quarantineAnchor)
             return
           } else {
-            // Retry rm on same quarantine
-            // Revalidate before rm (also done before sleep, but double-check)
-            assertAnchors()
-            assertNoSymlinkComponents(quarantine!, 'owned UI quarantine')
-            assertIdentity(quarantine!, quarantineAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
-            opts.hooks?.beforeMutation?.('remove', quarantine!)
-            assertAnchors()
-            assertIdentity(quarantine!, quarantineAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
-            rmSync(quarantine!, { recursive: true, force: false })
+            removeQuarantine(quarantine, quarantineAnchor!)
             return
           }
         } catch (error) {
           const transient = isTransientError(error)
           if (!transient || attempt + 1 >= retry.attempts) throw error
-          // Revalidate before sleep
-          if (!quarantineAttempted) {
-            // Quarantine phase failed transiently (rename)
-            // leafAnchor was captured before rename, so validate leaf still matches
+          if (quarantine === undefined) {
+            if (retained === undefined) throw error
             assertAnchors()
             const leaf = join(directory, name)
             assertNoSymlinkComponents(leaf, 'owned UI directory leaf')
-            assertIdentity(leaf, leafAnchor, `owned UI directory leaf ${leaf} changed before quarantine`, identify)
-            const leafStat = lstatSync(leaf)
-            if (leafStat.isSymbolicLink() || !leafStat.isDirectory()) throw new Error(`owned UI directory leaf is not a regular directory at ${leaf}`)
+            assertIdentity(leaf, retained, `owned UI directory leaf ${leaf} changed before quarantine`, identify)
+            const stat = lstatSync(leaf)
+            if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`owned UI directory leaf is not a regular directory at ${leaf}`)
           } else {
-            // Rm phase failed transiently
             assertAnchors()
-            assertNoSymlinkComponents(quarantine!, 'owned UI quarantine')
-            assertIdentity(quarantine!, quarantineAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
+            assertNoSymlinkComponents(quarantine, 'owned UI quarantine')
+            assertIdentity(quarantine, quarantineAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
           }
           await retry.sleep(retry.delayMs(attempt))
-          // For quarantine retry, loop will re-attempt quarantine with same leafAnchor retained
-          // For rm retry, loop will re-attempt rm on same quarantine
         }
       }
     },
     async removeFileLeafRetrying(name: string, retry: OwnedUiMutationRetry): Promise<void> {
       validateRetryPolicy(retry)
       if (!isSingleComponent(name)) throw new Error(`unsafe owned UI directory leaf ${JSON.stringify(name)}`)
-      let leafAnchor: UiDirectoryIdentity | undefined
+      let retained: UiDirectoryIdentity | undefined
       let leafPath: string | undefined
       for (let attempt = 0; attempt < retry.attempts; attempt++) {
+        const leaf = join(directory, name)
+        leafPath = leaf
+        if (retained === undefined && exists(leaf)) {
+          const cur = identify(leaf)
+          if (cur !== undefined) retained = cur
+        }
         try {
-          assertAnchors()
-          const leaf = join(directory, name)
-          leafPath = leaf
-          assertContained(directory, leaf)
-          if (!exists(leaf)) return
-          assertNoSymlinkComponents(leaf, 'owned UI file leaf')
-          const currentAnchor = identify(leaf)
-          if (currentAnchor === undefined) throw new Error(`stable identity unavailable for owned UI file leaf ${leaf}`)
-          if (leafAnchor !== undefined) {
-            if (currentAnchor.dev !== leafAnchor.dev || currentAnchor.ino !== leafAnchor.ino) {
-              throw new Error(`owned UI file leaf ${leaf} changed before removal identity changed or cannot be proven safe`)
-            }
-          } else {
-            leafAnchor = currentAnchor
-          }
-          assertRegularFileLeaf(leaf, 'owned UI file leaf')
-          opts.hooks?.beforeMutation?.('remove-file', leaf)
-          assertAnchors()
-          assertIdentity(leaf, leafAnchor, `owned UI file leaf ${leaf} changed before removal`, identify)
-          assertRegularFileLeaf(leaf, 'owned UI file leaf')
-          unlinkSync(leaf)
+          const captured = removeFileOnce(name, retained)
+          if (captured === undefined) return
+          retained = captured.leafAnchor
+          leafPath = captured.leaf
           return
         } catch (error) {
           const transient = isTransientError(error)
           if (!transient || attempt + 1 >= retry.attempts) throw error
-          // Revalidate before sleep
+          if (retained === undefined || leafPath === undefined) throw error
           assertAnchors()
-          assertNoSymlinkComponents(leafPath!, 'owned UI file leaf')
-          assertIdentity(leafPath!, leafAnchor, `owned UI file leaf ${leafPath} changed before removal`, identify)
-          assertRegularFileLeaf(leafPath!, 'owned UI file leaf')
+          assertNoSymlinkComponents(leafPath, 'owned UI file leaf')
+          assertIdentity(leafPath, retained, `owned UI file leaf ${leafPath} changed before removal`, identify)
+          assertRegularFileLeaf(leafPath, 'owned UI file leaf')
           await retry.sleep(retry.delayMs(attempt))
         }
       }
