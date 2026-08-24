@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -244,6 +245,35 @@ describe('UI supervisor spawn plan', () => {
 })
 
 describe('startUiSession', () => {
+  it('retains the new session identity before publishing request.json', async () => {
+    const current = fixture()
+    let replacementState = ''
+    let replacementDirectory = ''
+    let parked = ''
+    const beforeRequestWrite = vi.fn((sessionDirectory: string) => {
+      replacementDirectory = sessionDirectory
+      parked = `${sessionDirectory}.parked`
+      replacementState = readFileSync(join(sessionDirectory, 'state.json'), 'utf8')
+      renameSync(sessionDirectory, parked)
+      mkdirSync(sessionDirectory)
+      writeFileSync(join(sessionDirectory, 'state.json'), replacementState)
+      writeFileSync(join(sessionDirectory, 'replacement-canary.txt'), 'replacement')
+    })
+    const bundle = readyStartDependencies(current)
+    bundle.deps.beforeRequestWrite = beforeRequestWrite
+
+    await expect(startUiSession({ root: current.root, plugin: current.plugin, target: 'next' }, bundle.deps)).rejects.toThrow(
+      /identity|changed|swap|ownership|refus/i,
+    )
+
+    expect(beforeRequestWrite).toHaveBeenCalledTimes(1)
+    expect(bundle.deps.spawnSupervisor).not.toHaveBeenCalled()
+    expect(readFileSync(join(replacementDirectory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(readFileSync(join(replacementDirectory, 'state.json'), 'utf8')).toBe(replacementState)
+    expect(existsSync(join(replacementDirectory, 'request.json'))).toBe(false)
+    expect(existsSync(join(parked, 'request.json'))).toBe(false)
+  })
+
   it('captures exact current identities in an environment-free request and waits for ready', async () => {
     const current = fixture()
     const before = computePluginDigest(current.sourcePath)
@@ -314,6 +344,46 @@ describe('startUiSession', () => {
     }, bundle.deps)).rejects.toThrow(/timeout|timed out|session/i)
     expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId }).state).toBe('aborted')
     expect(bundle.deps.publishResult).not.toHaveBeenCalled()
+  })
+
+  it('rejects a forged replacement session that appears ready during an async startup wait', async () => {
+    const current = fixture()
+    let sessionId = ''
+    let replacementState = ''
+    let parked = ''
+    const bundle = serviceDependencies({
+      spawnSupervisor: vi.fn(requestPath => {
+        sessionId = (JSON.parse(readFileSync(requestPath, 'utf8')) as { sessionId: string }).sessionId
+        return { pid: 7001, unref: vi.fn() }
+      }),
+      sleep: vi.fn(async () => {
+        const directory = join(runtimeRoot(current.root), 'ui-sessions', sessionId)
+        parked = `${directory}.parked`
+        const owned = readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId })
+        const ready: UiSessionStateV1 = {
+          ...owned,
+          state: 'ready',
+          supervisorPid: 9001,
+          childPid: 9002,
+          url: 'http://127.0.0.1:59999',
+          updatedAt: '2026-08-24T12:00:05.000Z',
+        }
+        replacementState = JSON.stringify(ready, null, 2) + '\n'
+        renameSync(directory, parked)
+        mkdirSync(directory)
+        writeFileSync(join(directory, 'state.json'), replacementState)
+        writeFileSync(join(directory, 'replacement-canary.txt'), 'replacement')
+      }),
+    })
+
+    await expect(startUiSession({ root: current.root, plugin: current.plugin, target: 'next' }, bundle.deps)).rejects.toThrow(
+      /identity|changed|swap|ownership|refus/i,
+    )
+
+    const replacement = join(runtimeRoot(current.root), 'ui-sessions', sessionId)
+    expect(readFileSync(join(replacement, 'state.json'), 'utf8')).toBe(replacementState)
+    expect(readFileSync(join(replacement, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(join(parked, 'request.json'))).toBe(true)
   })
 
   it('returns a state that becomes ready exactly at the timeout boundary', async () => {
@@ -454,6 +524,47 @@ describe('getUiSessionStatus', () => {
     expect(readFileSync(statePath)).toEqual(before)
   })
 
+  it('reports a pidless starting lease as orphaned instead of live', () => {
+    const current = fixture()
+    createState(current, SESSION, 'starting')
+    const statePath = join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json')
+    const before = readFileSync(statePath)
+    const processAlive = vi.fn(() => true)
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, {
+      now: () => '2026-08-24T12:00:04.000Z',
+      processAlive,
+    })
+
+    expect(view).toMatchObject({ state: 'crashed' })
+    expect(view.error).toMatch(/missing|owner|supervisor|orphan/i)
+    expect(view.error).toContain(join(runtimeRoot(current.root), 'ui-sessions', SESSION))
+    expect(processAlive).not.toHaveBeenCalled()
+    expect(readFileSync(statePath)).toEqual(before)
+  })
+
+  it('checks a crashed recovery supervisor and derives an exact orphan path without rewriting', () => {
+    const current = fixture()
+    createUiSession({
+      runtimeRoot: runtimeRoot(current.root),
+      state: { ...currentState(current, SESSION, 'crashed'), supervisorPid: 7001 },
+    })
+    const statePath = join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json')
+    const before = readFileSync(statePath)
+    const processAlive = vi.fn(() => false)
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, {
+      now: () => '2026-08-24T12:00:04.000Z',
+      processAlive,
+    })
+
+    expect(view).toMatchObject({ state: 'crashed' })
+    expect(view.error).toMatch(/recovery|supervisor|orphan|not running/i)
+    expect(view.error).toContain(join(runtimeRoot(current.root), 'ui-sessions', SESSION))
+    expect(processAlive).toHaveBeenCalledWith(7001)
+    expect(readFileSync(statePath)).toEqual(before)
+  })
+
   it('derives current drift for immutable terminal status without rewriting history', () => {
     const current = fixture()
     createState(current, SESSION, 'finished')
@@ -509,6 +620,37 @@ describe('getUiSessionStatus', () => {
 })
 
 describe('finishUiSession', () => {
+  it('rejects a replacement session that forges cleaned stopping state during finish wait', async () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    const directory = join(runtimeRoot(current.root), 'ui-sessions', SESSION)
+    const parked = `${directory}.parked`
+    let replacementState = ''
+    const bundle = serviceDependencies({
+      sleep: vi.fn(async () => {
+        const owned = readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })
+        const replacement = compactForCleanup(owned, 'stopping')
+        replacementState = JSON.stringify(replacement, null, 2) + '\n'
+        renameSync(directory, parked)
+        mkdirSync(directory)
+        writeFileSync(join(directory, 'state.json'), replacementState)
+        writeFileSync(join(directory, 'replacement-canary.txt'), 'replacement')
+      }),
+    })
+
+    await expect(finishUiSession({
+      root: current.root,
+      sessionId: SESSION,
+      verdict: 'pass',
+      summary: 'replacement must not publish',
+    }, bundle.deps)).rejects.toThrow(/identity|changed|swap|ownership|refus/i)
+
+    expect(bundle.deps.publishResult).not.toHaveBeenCalled()
+    expect(readFileSync(join(directory, 'state.json'), 'utf8')).toBe(replacementState)
+    expect(readFileSync(join(directory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(join(parked, 'control.json'))).toBe(true)
+  })
+
   it.each(['pass', 'fail'] as const)('publishes %s only after supervisor cleanup and compacts the finished lease', async verdict => {
     const current = fixture()
     createState(current, SESSION, 'ready')
@@ -709,6 +851,34 @@ describe('finishUiSession', () => {
 })
 
 describe('abortUiSession', () => {
+  it('rejects a replacement session that forges aborted state during cleanup wait', async () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    const directory = join(runtimeRoot(current.root), 'ui-sessions', SESSION)
+    const parked = `${directory}.parked`
+    let replacementState = ''
+    const bundle = serviceDependencies({
+      sleep: vi.fn(async () => {
+        const owned = readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })
+        const replacement = compactForCleanup(owned, 'aborted')
+        replacementState = JSON.stringify(replacement, null, 2) + '\n'
+        renameSync(directory, parked)
+        mkdirSync(directory)
+        writeFileSync(join(directory, 'state.json'), replacementState)
+        writeFileSync(join(directory, 'replacement-canary.txt'), 'replacement')
+      }),
+    })
+
+    await expect(abortUiSession({ root: current.root, sessionId: SESSION }, bundle.deps)).rejects.toThrow(
+      /identity|changed|swap|ownership|refus/i,
+    )
+
+    expect(readFileSync(join(directory, 'state.json'), 'utf8')).toBe(replacementState)
+    expect(readFileSync(join(directory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(join(parked, 'control.json'))).toBe(true)
+    expect(bundle.deps.publishResult).not.toHaveBeenCalled()
+  })
+
   it.each(['starting', 'ready', 'crashed'] as const)('aborts %s without evidence and is idempotent', async phase => {
     const current = fixture()
     createState(current, SESSION, phase)

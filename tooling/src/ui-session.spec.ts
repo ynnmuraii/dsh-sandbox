@@ -255,6 +255,33 @@ describe('UI session store', () => {
     expect(JSON.parse(readFileSync(join(parked, 'state.json'), 'utf8'))).toEqual(state())
   })
 
+  it('does not overwrite a competing state writer that wins at the finalization seam', () => {
+    const root = runtimeRoot()
+    createUiSession({ runtimeRoot: root, state: state() })
+    const competing = state({
+      staleReasons: ['plugin-changed'],
+      updatedAt: '2026-08-24T12:00:01.000Z',
+    })
+    const stalePath = join(root, 'ui-sessions', SESSION, 'state.json')
+
+    expect(() => writeUiSession({
+      runtimeRoot: root,
+      state: state({
+        state: 'ready',
+        supervisorPid: 10,
+        childPid: 11,
+        url: 'http://127.0.0.1:49152',
+        updatedAt: '2026-08-24T12:00:02.000Z',
+      }),
+      beforeStateReplace() {
+        writeUiSession({ runtimeRoot: root, state: competing })
+      },
+    })).toThrow(/concurrent|changed|stale|lock|compare|state/i)
+
+    expect(readUiSession({ runtimeRoot: root, sessionId: SESSION })).toEqual(competing)
+    expect(readFileSync(stalePath, 'utf8')).toContain('plugin-changed')
+  })
+
   it('latches, deduplicates, and sorts stale reasons irreversibly', () => {
     const current = state()
     const stale = latchUiStaleReasons(

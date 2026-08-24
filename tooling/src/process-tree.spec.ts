@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  defaultProcessTreeDependencies,
   stopOwnedProcessTree,
   type OwnedProcessTreeHandle,
   type ProcessTreeDependencies,
@@ -42,6 +43,22 @@ function dependencies(platform: 'windows' | 'posix'): ProcessTreeDependencies {
 }
 
 describe('stopOwnedProcessTree', () => {
+  it('treats only ESRCH as proof that an owned process identity is absent', () => {
+    const deps = defaultProcessTreeDependencies()
+    const probe = vi.spyOn(process, 'kill')
+    const denied = Object.assign(new Error('access denied'), { code: 'EPERM' })
+    probe.mockImplementationOnce(() => { throw denied })
+
+    expect(() => deps.treeAlive(-4242)).toThrow(/access denied|EPERM/i)
+
+    const absent = Object.assign(new Error('missing process'), { code: 'ESRCH' })
+    probe.mockImplementationOnce(() => { throw absent })
+    expect(deps.treeAlive(-4242)).toBe(false)
+
+    probe.mockImplementationOnce(() => true)
+    expect(deps.treeAlive(-4242)).toBe(true)
+  })
+
   it('fails closed on Windows when the leader exited before tree termination began', async () => {
     const tree = ownedTree(4242, true)
     const deps = dependencies('windows')

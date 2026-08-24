@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { computePluginDigest } from './plugin-snapshot.js'
 import type { Compatibility } from './schemas.js'
 import { resolveUiLauncher } from './run.js'
 import { pnpmAsync } from './proc.js'
+import { claimOwnedUiDirectory } from './ui-owned-directory.js'
 import {
   buildUiRuntimeEnvironment,
   prepareUiRuntime,
@@ -101,6 +102,39 @@ function dependencies(compatibility: Compatibility) {
 }
 
 describe('prepareUiRuntime', () => {
+  it.each([
+    ['overlay-write', (sessionDir: string) => join(sessionDir, 'overlay', 'cordis.patch.yml')],
+    ['manifest-write', (sessionDir: string) => join(sessionDir, 'home', 'profiles', `example-next-ui-${SESSION}`, 'package.json')],
+  ] as const)('retains the supervisor-owned session identity before %s', async (targetOperation, targetPath) => {
+    const current = fixture()
+    const bundle = dependencies(current.compatibility)
+    const runtimeRoot = join(current.root, '.lab', 'runtime')
+    const sessionDir = join(runtimeRoot, 'ui-sessions', SESSION)
+    const parked = `${sessionDir}.parked`
+    mkdirSync(sessionDir, { recursive: true })
+    const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
+    bundle.deps.beforeRuntimeMutation = vi.fn((operation, path) => {
+      if (operation !== targetOperation) return
+      expect(path).toBe(targetPath(sessionDir))
+      renameSync(sessionDir, parked)
+      mkdirSync(sessionDir)
+      writeFileSync(join(sessionDir, 'replacement-canary.txt'), 'replacement')
+    })
+
+    await expect(prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+      ownedSession,
+    }, bundle.deps)).rejects.toThrow(/identity|changed|swap|ownership|refus/i)
+
+    expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(targetPath(sessionDir))).toBe(false)
+    expect(existsSync(targetPath(parked))).toBe(false)
+    expect(bundle.installNextProfile).not.toHaveBeenCalled()
+  })
+
   it('materializes a unique next profile and source overlay entirely inside the session', async () => {
     const current = fixture()
     const { deps, installNextProfile } = dependencies(current.compatibility)

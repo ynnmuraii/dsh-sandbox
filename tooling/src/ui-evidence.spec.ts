@@ -70,6 +70,51 @@ describe('normalizeUiSummary', () => {
 })
 
 describe('publishUiResult', () => {
+  it('retains the evidence session identity before publication-lock creation', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const directory = join(root, pluginEvidenceKey(value.plugin), value.sessionId)
+    const parked = `${directory}.parked`
+
+    expect(() => publishUiResult({
+      uiRunsRoot: root,
+      result: value,
+      beforeLockCreate(lockPath: string) {
+        expect(lockPath).toBe(join(directory, '.publication.lock'))
+        renameSync(directory, parked)
+        mkdirSync(directory)
+        writeFileSync(join(directory, 'replacement-canary.txt'), 'replacement')
+      },
+    })).toThrow(/identity|changed|swap|ownership|refus/i)
+
+    expect(readFileSync(join(directory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(join(directory, '.publication.lock'))).toBe(false)
+    expect(existsSync(join(parked, '.publication.lock'))).toBe(false)
+  })
+
+  it('retains the evidence session identity before temporary evidence creation', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const directory = join(root, pluginEvidenceKey(value.plugin), value.sessionId)
+    const parked = `${directory}.parked`
+    const temporary = `${value.sessionId}.tmp`
+
+    expect(() => publishUiResult({
+      uiRunsRoot: root,
+      result: value,
+      beforeTemporaryWrite(path: string) {
+        expect(path).toBe(join(directory, temporary))
+        renameSync(directory, parked)
+        mkdirSync(directory)
+        writeFileSync(join(directory, 'replacement-canary.txt'), 'replacement')
+      },
+    })).toThrow(/identity|changed|swap|ownership|refus/i)
+
+    expect(readFileSync(join(directory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(join(directory, temporary))).toBe(false)
+    expect(existsSync(join(parked, '.publication.lock'))).toBe(true)
+  })
+
   it('round-trips the exact minimal schema with a final newline at the stable path', () => {
     const root = uiRunsRoot()
     const value = result()
@@ -235,6 +280,46 @@ describe('publishUiResult', () => {
       expect(JSON.parse(readFileSync(expectedPath, 'utf8'))).toEqual(value)
     },
   )
+
+  it('fails visibly when pre-commit publication and lock cleanup both fail', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const lock = join(root, pluginEvidenceKey(value.plugin), value.sessionId, '.publication.lock')
+
+    expect(() => publishUiResult({
+      uiRunsRoot: root,
+      result: value,
+      renameFile() { throw new Error('injected pre-commit publication failure') },
+      removePublicationLock() { throw new Error('injected pre-commit lock cleanup failure') },
+    })).toThrow(/publication.*failure.*lock|lock.*cleanup.*publication|aggregate/i)
+
+    expect(existsSync(lock)).toBe(true)
+  })
+
+  it('does not report success or delete replacement bookkeeping after committed-directory drift', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const directory = join(root, pluginEvidenceKey(value.plugin), value.sessionId)
+    const parked = `${directory}.parked`
+    const replacementLockCanary = join(directory, '.publication.lock', 'replacement-canary.txt')
+
+    expect(() => publishUiResult({
+      uiRunsRoot: root,
+      result: value,
+      afterFinalize(path: string) {
+        expect(path).toBe(join(directory, 'result.json'))
+        renameSync(directory, parked)
+        mkdirSync(join(directory, '.publication.lock'), { recursive: true })
+        writeFileSync(replacementLockCanary, 'replacement lock')
+        writeFileSync(join(directory, 'result.json'), '{"owner":"replacement"}\n')
+      },
+    })).toThrow(/identity|changed|swap|ownership|refus/i)
+
+    expect(readFileSync(replacementLockCanary, 'utf8')).toBe('replacement lock')
+    expect(readFileSync(join(directory, 'result.json'), 'utf8')).toBe('{"owner":"replacement"}\n')
+    expect(JSON.parse(readFileSync(join(parked, 'result.json'), 'utf8'))).toEqual(value)
+    expect(existsSync(join(parked, `${value.sessionId}.tmp`))).toBe(true)
+  })
 
   it('rejects a symlinked plugin evidence directory instead of escaping uiRunsRoot', () => {
     const root = uiRunsRoot()
