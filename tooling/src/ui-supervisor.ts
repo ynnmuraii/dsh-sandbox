@@ -26,7 +26,7 @@ import {
   type UiRuntimePlugin,
 } from './ui-runtime.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
-import { claimOwnedUiDirectory } from './ui-owned-directory.js'
+import { claimOwnedUiDirectory, type OwnedUiDirectory } from './ui-owned-directory.js'
 import {
   defaultProcessTreeDependencies,
   stopOwnedProcessTree,
@@ -102,7 +102,9 @@ export async function runUiSupervisor(
   assertContained(runtimeRoot, sessionDir, 'UI session directory')
   assertNoSymlinkComponents(runtimeRoot, 'forge runtime')
   assertNoSymlinkComponents(sessionDir, 'UI session directory')
-  const current = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+  const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
+  ownedSession.assertCurrent()
+  const current = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
   if (current.state === 'finished' || current.state === 'aborted') return
 
   let plan: UiRuntimePlan | undefined
@@ -119,7 +121,7 @@ export async function runUiSupervisor(
       ...current,
       supervisorPid: process.pid,
       updatedAt: nextTimestamp(deps.now(), current.updatedAt),
-    }, deps)
+    }, deps, ownedSession)
 
     const preparationController = new AbortController()
     let preparationSettled = false
@@ -141,13 +143,13 @@ export async function runUiSupervisor(
     await Promise.resolve()
     while (!preparationSettled) {
       await deps.sleep(deps.pollIntervalMs)
-      const control = readUiControl({ runtimeRoot, sessionId: request.sessionId })
+      const control = readOwnedControl(runtimeRoot, request.sessionId, ownedSession)
       if (control === undefined) continue
       preparationController.abort()
       await preparation
       if (preparationError !== undefined && !isAbortError(preparationError)) {
         const message = `UI preparation cancellation failed: ${preparationError instanceof Error ? preparationError.message : String(preparationError)}`
-        markCrashed(runtimeRoot, request.sessionId, message, deps, 'fail')
+        markCrashed(runtimeRoot, request.sessionId, message, deps, ownedSession, 'fail')
         throw new Error(message, { cause: preparationError })
       }
       await handleControl(control, {
@@ -155,6 +157,7 @@ export async function runUiSupervisor(
         runtimeRoot,
         sessionDir,
         request,
+        ownedSession,
         exitSettled: () => true,
         stopIssued: () => false,
         issueStop: () => undefined,
@@ -166,17 +169,19 @@ export async function runUiSupervisor(
     if (prepared === undefined) throw new Error('runtime preparation did not return a plan')
     plan = prepared
     validatePlan(plan, sessionDir)
+    ownedSession.assertCurrent()
     diagnosticLog = deps.openLog(sessionDir, deps.maxLogBytes)
+    ownedSession.assertCurrent()
     child = deps.spawnChild(plan)
     assertPid(child.pid)
 
-    const started = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+    const started = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
     writeState(runtimeRoot, {
       ...started,
       supervisorPid: process.pid,
       childPid: child.pid,
       updatedAt: nextTimestamp(deps.now(), started.updatedAt),
-    }, deps)
+    }, deps, ownedSession)
 
     const onOutput = (source: 'stdout' | 'stderr', chunk: unknown): void => {
       try {
@@ -190,7 +195,7 @@ export async function runUiSupervisor(
           const line = stdoutTail.slice(0, newline).replace(/\r$/, '')
           stdoutTail = stdoutTail.slice(newline + 1)
           const url = parseDshReadyUrl(line)
-          if (url !== undefined) markReady(runtimeRoot, request.sessionId, url, child!.pid, deps)
+          if (url !== undefined) markReady(runtimeRoot, request.sessionId, url, child!.pid, deps, ownedSession)
           newline = stdoutTail.indexOf('\n')
         }
       } catch (error) {
@@ -201,6 +206,7 @@ export async function runUiSupervisor(
             sessionId: request.sessionId,
             child: child!,
             diagnosticLog: diagnosticLog!,
+            ownedSession,
             deps,
             stopIssued: () => stopIssued,
             issueStop: () => { stopIssued = true },
@@ -217,15 +223,15 @@ export async function runUiSupervisor(
     const exitPromise = Promise.resolve(child.exited).then(exit => {
       exitSettled = true
       if (done) return
-      const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+      const state = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
       if (state.state === 'starting' || state.state === 'ready') {
-        markCrashed(runtimeRoot, request.sessionId, `DSH child exited before supervisor cleanup (code ${exit.code ?? 'null'}, signal ${exit.signal ?? 'none'})`, deps)
+        markCrashed(runtimeRoot, request.sessionId, `DSH child exited before supervisor cleanup (code ${exit.code ?? 'null'}, signal ${exit.signal ?? 'none'})`, deps, ownedSession)
       }
     }).catch(error => {
       exitSettled = true
       if (done) return
-      const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
-      if (state.state === 'starting' || state.state === 'ready') markCrashed(runtimeRoot, request.sessionId, `DSH child exit could not be observed: ${error instanceof Error ? error.message : String(error)}`, deps)
+      const state = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
+      if (state.state === 'starting' || state.state === 'ready') markCrashed(runtimeRoot, request.sessionId, `DSH child exit could not be observed: ${error instanceof Error ? error.message : String(error)}`, deps, ownedSession)
     })
 
     while (!done) {
@@ -233,9 +239,9 @@ export async function runUiSupervisor(
       await deps.sleep(deps.pollIntervalMs)
       if (outputFailure !== undefined) await outputFailure
       if (done) break
-      const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+      const state = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
       if (state.state === 'finished' || state.state === 'aborted') { done = true; break }
-      const control = readUiControl({ runtimeRoot, sessionId: request.sessionId })
+      const control = readOwnedControl(runtimeRoot, request.sessionId, ownedSession)
       if (control === undefined) continue
       done = true
       await handleControl(control, {
@@ -243,6 +249,7 @@ export async function runUiSupervisor(
         runtimeRoot,
         sessionDir,
         request,
+        ownedSession,
         child,
         diagnosticLog: diagnosticLog!,
         exitSettled: () => exitSettled,
@@ -267,7 +274,7 @@ export async function runUiSupervisor(
       }
     }
     try {
-      const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+      const state = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
       if (child === undefined && state.state === 'starting') {
         writeState(runtimeRoot, {
           ...state,
@@ -275,12 +282,12 @@ export async function runUiSupervisor(
           supervisorPid: process.pid,
           error: message,
           updatedAt: nextTimestamp(deps.now(), state.updatedAt),
-        }, deps)
-        await waitForRecoveryControl({ runtimeRoot, sessionDir, request, deps })
+        }, deps, ownedSession)
+        await waitForRecoveryControl({ runtimeRoot, sessionDir, request, deps, ownedSession })
         return
       }
       if (state.cleanup !== 'fail' && (state.state === 'starting' || state.state === 'ready' || state.state === 'crashed')) {
-        markCrashed(runtimeRoot, request.sessionId, message, deps)
+        markCrashed(runtimeRoot, request.sessionId, message, deps, ownedSession)
       }
     } catch {
       // The bin reports the failure when the lease cannot be safely updated.
@@ -294,6 +301,7 @@ interface ControlContext {
   runtimeRoot: string
   sessionDir: string
   request: UiSupervisorRequestV1
+  ownedSession: OwnedUiDirectory
   child?: UiChildHandle
   diagnosticLog?: UiDiagnosticLog
   exitSettled: () => boolean
@@ -307,6 +315,7 @@ interface DiagnosticFailureContext {
   sessionId: string
   child: UiChildHandle
   diagnosticLog: UiDiagnosticLog
+  ownedSession: OwnedUiDirectory
   deps: UiSupervisorDependencies
   stopIssued: () => boolean
   issueStop: () => void
@@ -317,6 +326,7 @@ async function failDiagnosticOutput(context: DiagnosticFailureContext, error: un
   const reason = sanitizeDiagnostic(`diagnostic log failure: ${error instanceof Error ? error.message : String(error)}`)
   let terminationConfirmed = context.exitSettled()
   let cleanupError: unknown
+  try { context.diagnosticLog.close() } catch (closeError) { cleanupError = closeError }
   try {
     if (!terminationConfirmed && !context.stopIssued()) {
       context.issueStop()
@@ -325,18 +335,17 @@ async function failDiagnosticOutput(context: DiagnosticFailureContext, error: un
       terminationConfirmed = true
     }
   } catch (stopError) {
-    cleanupError = stopError
+    cleanupError ??= stopError
   }
-  try { context.diagnosticLog.close() } catch (closeError) { cleanupError ??= closeError }
   try {
-    const state = readUiSession({ runtimeRoot: context.runtimeRoot, sessionId: context.sessionId })
+    const state = readOwnedSession(context.runtimeRoot, context.sessionId, context.ownedSession)
     writeState(context.runtimeRoot, {
       ...compactState(state, terminationConfirmed),
       state: 'crashed',
       error: sanitizeDiagnostic(cleanupError === undefined ? reason : `${reason}; cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`),
       cleanup: 'fail',
       updatedAt: nextTimestamp(context.deps.now(), state.updatedAt),
-    }, context.deps)
+    }, context.deps, context.ownedSession)
   } catch (reportError) {
     cleanupError ??= reportError
   }
@@ -356,44 +365,44 @@ function compactState(state: UiSessionStateV1, removePids: boolean): UiSessionSt
 }
 
 async function handleControl(control: UiControlV1, context: ControlContext): Promise<void> {
-  const { deps, runtimeRoot, sessionDir, request, child, diagnosticLog } = context
+  const { deps, runtimeRoot, sessionDir, request, ownedSession, child, diagnosticLog } = context
   try {
-    const current = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+    const current = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
     const stoppingBase = compactForStopping(current, child?.pid ?? current.childPid, process.pid)
     writeState(runtimeRoot, {
       ...stoppingBase,
       state: 'stopping',
       updatedAt: nextTimestamp(deps.now(), current.updatedAt),
-    }, deps)
+    }, deps, ownedSession)
+    diagnosticLog?.close()
     if (child !== undefined && !context.stopIssued()) {
       context.issueStop()
       await deps.stopChildTree(child)
       await child.exited
     }
-    diagnosticLog?.close()
-    cleanupSessionDescendants(sessionDir)
-    const cleaned = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+    cleanupSessionDescendants(sessionDir, ownedSession)
+    const cleaned = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
     const compact = compactState(cleaned, true)
     writeState(runtimeRoot, {
       ...compact,
       state: 'stopping',
       cleanup: 'pass',
       updatedAt: nextTimestamp(deps.now(), cleaned.updatedAt),
-    }, deps)
+    }, deps, ownedSession)
     if (control.action === 'abort') {
-      const stopping = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+      const stopping = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
       writeState(runtimeRoot, {
         ...stopping,
         state: 'aborted',
         cleanup: 'pass',
         updatedAt: nextTimestamp(deps.now(), stopping.updatedAt),
-      }, deps)
+      }, deps, ownedSession)
     }
-    clearUiControl({ runtimeRoot, sessionId: request.sessionId })
+    clearOwnedControl(runtimeRoot, request.sessionId, ownedSession)
   } catch (error) {
     const message = `cleanup failed: ${error instanceof Error ? error.message : String(error)}`
     try {
-      const failed = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+      const failed = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
       if (failed.state !== 'crashed') {
         const { url: _url, cleanup: _cleanup, ...crashedBase } = failed
         writeState(runtimeRoot, {
@@ -402,14 +411,14 @@ async function handleControl(control: UiControlV1, context: ControlContext): Pro
           error: sanitizeDiagnostic(message),
           cleanup: 'fail',
           updatedAt: nextTimestamp(deps.now(), failed.updatedAt),
-        }, deps)
+        }, deps, ownedSession)
       } else {
         writeState(runtimeRoot, {
           ...failed,
           error: sanitizeDiagnostic(message),
           cleanup: 'fail',
           updatedAt: nextTimestamp(deps.now(), failed.updatedAt),
-        }, deps)
+        }, deps, ownedSession)
       }
     } catch {
       // Preserve the original cleanup error for the detached bin.
@@ -433,15 +442,17 @@ async function waitForRecoveryControl(opts: {
   sessionDir: string
   request: UiSupervisorRequestV1
   deps: UiSupervisorDependencies
+  ownedSession: OwnedUiDirectory
 }): Promise<void> {
   while (true) {
-    const control = readUiControl({ runtimeRoot: opts.runtimeRoot, sessionId: opts.request.sessionId })
+    const control = readOwnedControl(opts.runtimeRoot, opts.request.sessionId, opts.ownedSession)
     if (control !== undefined) {
       await handleControl(control, {
         deps: opts.deps,
         runtimeRoot: opts.runtimeRoot,
         sessionDir: opts.sessionDir,
         request: opts.request,
+        ownedSession: opts.ownedSession,
         exitSettled: () => true,
         stopIssued: () => false,
         issueStop: () => undefined,
@@ -452,8 +463,8 @@ async function waitForRecoveryControl(opts: {
   }
 }
 
-function markReady(runtimeRoot: string, sessionId: string, url: string, childPid: number, deps: UiSupervisorDependencies): void {
-  const state = readUiSession({ runtimeRoot, sessionId })
+function markReady(runtimeRoot: string, sessionId: string, url: string, childPid: number, deps: UiSupervisorDependencies, ownedSession: OwnedUiDirectory): void {
+  const state = readOwnedSession(runtimeRoot, sessionId, ownedSession)
   if (state.state !== 'starting') return
   writeState(runtimeRoot, {
     ...state,
@@ -462,11 +473,11 @@ function markReady(runtimeRoot: string, sessionId: string, url: string, childPid
     childPid,
     url,
     updatedAt: nextTimestamp(deps.now(), state.updatedAt),
-  }, deps)
+  }, deps, ownedSession)
 }
 
-function markCrashed(runtimeRoot: string, sessionId: string, error: string, deps: UiSupervisorDependencies, cleanup?: 'fail'): void {
-  const state = readUiSession({ runtimeRoot, sessionId })
+function markCrashed(runtimeRoot: string, sessionId: string, error: string, deps: UiSupervisorDependencies, ownedSession: OwnedUiDirectory, cleanup?: 'fail'): void {
+  const state = readOwnedSession(runtimeRoot, sessionId, ownedSession)
   if (state.state !== 'starting' && state.state !== 'ready' && state.state !== 'crashed') return
   const crashedBase = compactState(state, cleanup === undefined)
   writeState(runtimeRoot, {
@@ -475,20 +486,52 @@ function markCrashed(runtimeRoot: string, sessionId: string, error: string, deps
     error: sanitizeDiagnostic(error),
     ...(cleanup === undefined ? {} : { cleanup }),
     updatedAt: nextTimestamp(deps.now(), state.updatedAt),
-  }, deps)
+  }, deps, ownedSession)
 }
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError'
 }
 
-function writeState(runtimeRoot: string, state: UiSessionStateV1, deps: UiSupervisorDependencies): void {
+function writeState(runtimeRoot: string, state: UiSessionStateV1, deps: UiSupervisorDependencies, ownedSession: OwnedUiDirectory): void {
   const updatedAt = nextTimestamp(state.updatedAt, state.updatedAt)
-  if (state.error === undefined) {
-    const { error: _error, ...withoutError } = state
-    writeUiSession({ runtimeRoot, state: { ...withoutError, updatedAt } })
-  } else {
-    writeUiSession({ runtimeRoot, state: { ...state, error: sanitizeDiagnostic(state.error), updatedAt } })
+  ownedSession.assertCurrent()
+  try {
+    if (state.error === undefined) {
+      const { error: _error, ...withoutError } = state
+      writeUiSession({ runtimeRoot, state: { ...withoutError, updatedAt } })
+    } else {
+      writeUiSession({ runtimeRoot, state: { ...state, error: sanitizeDiagnostic(state.error), updatedAt } })
+    }
+  } finally {
+    ownedSession.assertCurrent()
+  }
+}
+
+function readOwnedSession(runtimeRoot: string, sessionId: string, ownedSession: OwnedUiDirectory): UiSessionStateV1 {
+  ownedSession.assertCurrent()
+  try {
+    return readUiSession({ runtimeRoot, sessionId })
+  } finally {
+    ownedSession.assertCurrent()
+  }
+}
+
+function readOwnedControl(runtimeRoot: string, sessionId: string, ownedSession: OwnedUiDirectory): UiControlV1 | undefined {
+  ownedSession.assertCurrent()
+  try {
+    return readUiControl({ runtimeRoot, sessionId })
+  } finally {
+    ownedSession.assertCurrent()
+  }
+}
+
+function clearOwnedControl(runtimeRoot: string, sessionId: string, ownedSession: OwnedUiDirectory): void {
+  ownedSession.assertCurrent()
+  try {
+    clearUiControl({ runtimeRoot, sessionId })
+  } finally {
+    ownedSession.assertCurrent()
   }
 }
 
@@ -497,13 +540,16 @@ function nextTimestamp(candidate: string, previous: string): string {
   return Date.parse(candidate) < Date.parse(previous) ? previous : candidate
 }
 
-function cleanupSessionDescendants(sessionDir: string): void {
+function cleanupSessionDescendants(sessionDir: string, owned: OwnedUiDirectory): void {
   const home = join(sessionDir, 'home')
   const overlay = join(sessionDir, 'overlay')
-  const owned = claimOwnedUiDirectory({ root: resolve(sessionDir, '..', '..'), directory: sessionDir })
+  owned.assertCurrent()
   if (existsSync(home)) owned.removeDirectoryLeaf('home')
+  owned.assertCurrent()
   if (existsSync(overlay)) owned.removeDirectoryLeaf('overlay')
+  owned.assertCurrent()
   owned.removeFileLeaf('supervisor.log')
+  owned.assertCurrent()
 }
 
 export function openBoundedSupervisorLog(sessionDir: string, maxBytes: number): UiDiagnosticLog {

@@ -19,6 +19,7 @@ export interface ClaimOwnedUiDirectoryOptions {
 }
 
 export interface OwnedUiDirectory {
+  assertCurrent(): void
   removeDirectoryLeaf(name: string): void
   removeFileLeaf(name: string): void
 }
@@ -43,6 +44,9 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
   }
 
   return {
+    assertCurrent(): void {
+      assertAnchors()
+    },
     removeDirectoryLeaf(name: string): void {
       if (!isSingleComponent(name)) throw new Error(`unsafe owned UI directory leaf ${JSON.stringify(name)}`)
       assertAnchors()
