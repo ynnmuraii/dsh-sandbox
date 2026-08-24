@@ -492,6 +492,34 @@ describe('loadUiResults', () => {
     expect(JSON.parse(readFileSync(join(parked, 'result.json'), 'utf8'))).toEqual(value)
     expect(readFileSync(join(sessionDirectory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
   })
+
+  it('revalidates the captured evidence parent after descriptor-backed reading', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const path = publishUiResult({ uiRunsRoot: root, result: value })
+    const sessionDirectory = dirname(path)
+    const parked = `${sessionDirectory}.after-read-parked`
+    let seamCalled = false
+
+    expect(() => loadUiResults({
+      uiRunsRoot: root,
+      pluginKey: pluginEvidenceKey(value.plugin),
+      afterResultRead(resultPath: string) {
+        seamCalled = true
+        expect(resultPath).toBe(path)
+        renameSync(sessionDirectory, parked)
+        mkdirSync(sessionDirectory)
+        writeFileSync(resultPath, `${JSON.stringify(value, null, 2)}\n`)
+        writeFileSync(join(sessionDirectory, 'replacement-canary.txt'), 'replacement')
+      },
+    } as Parameters<typeof loadUiResults>[0] & { afterResultRead(resultPath: string): void })).toThrow(
+      /identity|changed|swap|ownership|corrupt|refus/i,
+    )
+
+    expect(seamCalled).toBe(true)
+    expect(readFileSync(join(sessionDirectory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(JSON.parse(readFileSync(join(parked, 'result.json'), 'utf8'))).toEqual(value)
+  })
 })
 
 function symlinkDirectory(target: string, path: string): void {

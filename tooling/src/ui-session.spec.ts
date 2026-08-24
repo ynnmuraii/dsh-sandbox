@@ -12,6 +12,8 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import * as sessionStore from './ui-session.js'
+import type { OwnedUiDirectory } from './ui-owned-directory.js'
 import {
   clearUiControl,
   createUiSession,
@@ -86,6 +88,26 @@ describe('UI session identity', () => {
 })
 
 describe('UI session store', () => {
+  it('can return the exact owner captured by exclusive session creation', () => {
+    const root = runtimeRoot()
+    const createOwnedUiSession = (sessionStore as unknown as {
+      createOwnedUiSession(opts: { runtimeRoot: string; state: UiSessionStateV1 }): { sessionDir: string; ownedSession: OwnedUiDirectory }
+    }).createOwnedUiSession
+
+    expect(createOwnedUiSession).toBeTypeOf('function')
+    const created = createOwnedUiSession({ runtimeRoot: root, state: state() })
+    expect(created.sessionDir).toBe(join(root, 'ui-sessions', SESSION))
+    expect(() => created.ownedSession.assertCurrent()).not.toThrow()
+
+    const parked = `${created.sessionDir}.parked`
+    const replacementState = readFileSync(join(created.sessionDir, 'state.json'))
+    renameSync(created.sessionDir, parked)
+    mkdirSync(created.sessionDir)
+    writeFileSync(join(created.sessionDir, 'state.json'), replacementState)
+
+    expect(() => created.ownedSession.assertCurrent()).toThrow(/identity|changed|ownership|replacement/i)
+  })
+
   it('exclusively creates and round-trips an exact starting lease', () => {
     const root = runtimeRoot()
     const value = state()

@@ -560,6 +560,7 @@ describe('getUiSessionStatus', () => {
 
   it.each([
     ['plugin-changed', (current: ReturnType<typeof fixture>) => rmSync(current.sourcePath, { recursive: true, force: true })],
+    ['context-changed', (current: ReturnType<typeof fixture>) => rmSync(join(current.root, 'context', 'testing-policy.md'))],
     ['target-changed', (current: ReturnType<typeof fixture>) => writeFileSync(
       join(current.root, 'workbench', 'compatibility.yaml'),
       `targets:\n  master:\n    repository: deepseek-ai/deepseek-harness\n    commit: ${MASTER}\n    pnpm: 11.7.0\n    node: ^22.19.0\n`,
@@ -584,6 +585,19 @@ describe('getUiSessionStatus', () => {
 
     expect(() => getUiSessionStatus({ root: current.root, sessionId: SESSION })).toThrow(/EPERM|permitted|inspect|process/i)
     expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION }).state).toBe('ready')
+  })
+
+  it('keeps a corrupt compatibility manifest as a tooling error instead of target drift', () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    const statePath = join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json')
+    const before = readFileSync(statePath)
+    writeFileSync(join(current.root, 'workbench', 'compatibility.yaml'), 'targets: [broken\n')
+
+    expect(() => getUiSessionStatus({ root: current.root, sessionId: SESSION }, serviceDependencies().deps)).toThrow(
+      /compatibility|manifest|yaml|parse|mapping|sequence/i,
+    )
+    expect(readFileSync(statePath)).toEqual(before)
   })
 
   it('derives an orphaned crash without killing or rewriting a recorded PID', () => {
@@ -957,6 +971,7 @@ describe('finishUiSession', () => {
 
   it.each([
     ['plugin-changed', (current: ReturnType<typeof fixture>) => rmSync(current.sourcePath, { recursive: true, force: true })],
+    ['context-changed', (current: ReturnType<typeof fixture>) => rmSync(join(current.root, 'context', 'testing-policy.md'))],
     ['target-changed', (current: ReturnType<typeof fixture>) => writeFileSync(
       join(current.root, 'workbench', 'compatibility.yaml'),
       `targets:\n  master:\n    repository: deepseek-ai/deepseek-harness\n    commit: ${MASTER}\n    pnpm: 11.7.0\n    node: ^22.19.0\n`,
