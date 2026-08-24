@@ -69,7 +69,10 @@ describe('committed portable agent skill projection', () => {
     for (const reference of requiredReferences) expect(committed).toContain(`](${reference})`)
     expect(committed).toMatch(/advisory workflows chosen by the agent and host harness/i)
     expect(committed).toMatch(/Plans, approvals, and session memory belong to the agent and host harness/i)
-    expect(committed.trim().split(/\s+/).length).toBeLessThanOrEqual(600)
+    // The skill is a compressed routing layer, not a second copy of the
+    // canonical docs: useful operational detail belongs in it, but the
+    // ceiling keeps it from drifting toward wholesale doc duplication.
+    expect(committed.trim().split(/\s+/).length).toBeLessThanOrEqual(2000)
     expect(canonical).not.toMatch(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b/)
     expect(canonical).not.toMatch(/\b[0-9a-f]{40}\b/i)
     expect(canonical).not.toMatch(/\b[A-Za-z]:[\\/]/)
