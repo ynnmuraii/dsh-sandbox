@@ -112,6 +112,21 @@ export async function runUiSupervisor(
   let exitSettled = false
   let stopIssued = false
   let treeCleanupConfirmed = false
+  let treeCleanupPromise: Promise<void> | undefined
+  const cleanupOwnedChildTree = (): Promise<void> => {
+    if (child === undefined || treeCleanupConfirmed) return Promise.resolve()
+    if (treeCleanupPromise === undefined) {
+      stopIssued = true
+      const cleanupPromise = (async () => {
+        await deps.stopChildTree(child!)
+        await child!.exited
+        treeCleanupConfirmed = true
+      })()
+      void cleanupPromise.catch(() => undefined)
+      treeCleanupPromise = cleanupPromise
+    }
+    return treeCleanupPromise
+  }
   let stdoutTail = ''
   let done = false
   let outputFailure: Promise<never> | undefined
@@ -162,6 +177,7 @@ export async function runUiSupervisor(
         ownedSession,
         treeCleanupConfirmed: () => treeCleanupConfirmed,
         markTreeCleanupConfirmed: () => { treeCleanupConfirmed = true },
+        cleanupChildTree: cleanupOwnedChildTree,
         exitSettled: () => true,
         stopIssued: () => false,
         issueStop: () => undefined,
@@ -183,6 +199,7 @@ export async function runUiSupervisor(
         ownedSession,
         treeCleanupConfirmed: () => treeCleanupConfirmed,
         markTreeCleanupConfirmed: () => { treeCleanupConfirmed = true },
+        cleanupChildTree: cleanupOwnedChildTree,
         exitSettled: () => true,
         stopIssued: () => false,
         issueStop: () => undefined,
@@ -229,6 +246,7 @@ export async function runUiSupervisor(
             ownedSession,
             treeCleanupConfirmed: () => treeCleanupConfirmed,
             markTreeCleanupConfirmed: () => { treeCleanupConfirmed = true },
+            cleanupChildTree: cleanupOwnedChildTree,
             deps,
             stopIssued: () => stopIssued,
             issueStop: () => { stopIssued = true },
@@ -244,17 +262,7 @@ export async function runUiSupervisor(
 
     const exitPromise = Promise.resolve(child.exited).then(async exit => {
       exitSettled = true
-      if (!treeCleanupConfirmed && !stopIssued) {
-        stopIssued = true
-        try {
-          await deps.stopChildTree(child!)
-          await child!.exited
-          treeCleanupConfirmed = true
-        } catch (cleanupError) {
-          markCrashed(runtimeRoot, request.sessionId, `DSH child tree cleanup failed after leader exit: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`, deps, ownedSession, 'fail', true)
-          throw cleanupError
-        }
-      }
+      await cleanupOwnedChildTree()
       if (done) return
       const state = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
       if (state.state === 'starting' || state.state === 'ready') {
@@ -262,11 +270,10 @@ export async function runUiSupervisor(
       }
     }).catch(error => {
       exitSettled = true
-      if (done) return
-      const state = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
-      if (state.cleanup === 'fail') return
-      if (state.state === 'starting' || state.state === 'ready') markCrashed(runtimeRoot, request.sessionId, `DSH child exit could not be observed: ${error instanceof Error ? error.message : String(error)}`, deps, ownedSession)
+      done = true
+      throw error
     })
+    void exitPromise.catch(() => undefined)
 
     while (!done) {
       if (outputFailure !== undefined) await outputFailure
@@ -286,6 +293,7 @@ export async function runUiSupervisor(
         ownedSession,
         treeCleanupConfirmed: () => treeCleanupConfirmed,
         markTreeCleanupConfirmed: () => { treeCleanupConfirmed = true },
+        cleanupChildTree: cleanupOwnedChildTree,
         child,
         diagnosticLog: diagnosticLog!,
         exitSettled: () => exitSettled,
@@ -301,12 +309,9 @@ export async function runUiSupervisor(
     let recoveryMessage = message
     let cleanupError: unknown
     try { diagnosticLog?.close() } catch { /* preserve the primary lifecycle error */ }
-    if (child !== undefined && !treeCleanupConfirmed && !stopIssued) {
-      stopIssued = true
+    if (child !== undefined && !treeCleanupConfirmed) {
       try {
-        await deps.stopChildTree(child)
-        await child.exited
-        treeCleanupConfirmed = true
+        await cleanupOwnedChildTree()
         exitSettled = true
       } catch (failure) {
         cleanupError = failure
@@ -346,6 +351,7 @@ interface ControlContext {
   ownedSession: OwnedUiDirectory
   treeCleanupConfirmed: () => boolean
   markTreeCleanupConfirmed: () => void
+  cleanupChildTree: () => Promise<void>
   child?: UiChildHandle
   diagnosticLog?: UiDiagnosticLog
   exitSettled: () => boolean
@@ -362,6 +368,7 @@ interface DiagnosticFailureContext {
   ownedSession: OwnedUiDirectory
   treeCleanupConfirmed: () => boolean
   markTreeCleanupConfirmed: () => void
+  cleanupChildTree: () => Promise<void>
   deps: UiSupervisorDependencies
   stopIssued: () => boolean
   issueStop: () => void
@@ -374,10 +381,8 @@ async function failDiagnosticOutput(context: DiagnosticFailureContext, error: un
   let cleanupError: unknown
   try { context.diagnosticLog.close() } catch (closeError) { cleanupError = closeError }
   try {
-    if (!terminationConfirmed && !context.stopIssued()) {
-      context.issueStop()
-      await context.deps.stopChildTree(context.child)
-      await context.child.exited
+    if (!terminationConfirmed) {
+      await context.cleanupChildTree()
       terminationConfirmed = true
       context.markTreeCleanupConfirmed()
     }
@@ -422,10 +427,8 @@ async function handleControl(control: UiControlV1, context: ControlContext): Pro
       updatedAt: nextTimestamp(deps.now(), current.updatedAt),
     }, deps, ownedSession)
     diagnosticLog?.close()
-    if (child !== undefined && !context.stopIssued()) {
-      context.issueStop()
-      await deps.stopChildTree(child)
-      await child.exited
+    if (child !== undefined && !context.treeCleanupConfirmed()) {
+      await context.cleanupChildTree()
       context.markTreeCleanupConfirmed()
     }
     if (child !== undefined && !context.treeCleanupConfirmed()) throw new Error('owned child tree cleanup was not confirmed')
@@ -504,6 +507,7 @@ async function waitForRecoveryControl(opts: {
         ownedSession: opts.ownedSession,
         treeCleanupConfirmed: () => true,
         markTreeCleanupConfirmed: () => undefined,
+        cleanupChildTree: async () => undefined,
         exitSettled: () => true,
         stopIssued: () => false,
         issueStop: () => undefined,

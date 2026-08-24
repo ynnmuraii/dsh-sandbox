@@ -206,14 +206,16 @@ export function getUiSessionStatus(
 ): UiSessionViewV1 {
   validateSessionId(opts.sessionId)
   const runtimeRoot = rootPath(opts.root, ROOT_PATHS.runtime)
-  let state = readUiSession({ runtimeRoot, sessionId: opts.sessionId })
+  const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: join(runtimeRoot, 'ui-sessions', opts.sessionId) })
+  ownedSession.assertCurrent()
+  let state = readOwnedSession(runtimeRoot, opts.sessionId, ownedSession)
   const current = captureCurrentIdentity(opts.root, state)
   const observed = staleReasons(state, current)
   if (observed.length > 0 && !isTerminal(state.state)) {
     const newlyObserved = observed.filter(reason => !(state.staleReasons ?? []).includes(reason))
     if (newlyObserved.length > 0) {
       state = latchUiStaleReasons(state, newlyObserved, safeNow(deps.now(), state.updatedAt))
-      writeUiSession({ runtimeRoot, state })
+      writeOwnedSession(ownedSession, { runtimeRoot, state })
     }
   }
   const orphanPath = join(runtimeRoot, 'ui-sessions', opts.sessionId)
