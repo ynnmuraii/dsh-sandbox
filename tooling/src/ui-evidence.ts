@@ -127,6 +127,7 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
       opts.beforeFinalize?.(finalPath)
+      assertFileIdentity(temporaryPath, temporaryIdentity)
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
       assertDirectoryIdentity(sessionDirectory, sessionIdentity)
