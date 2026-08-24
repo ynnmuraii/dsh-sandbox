@@ -44,7 +44,7 @@ export function derivePluginStatus(opts: {
 }): PluginStatus {
   const digest = computePluginDigest(opts.plugin.sourcePath).digest
   const compatibility = loadCompatibilityFromFile(rootPath(opts.root, ROOT_PATHS.compatibility))
-  const contextDigest = currentContextDigest(opts.root)
+  const contextDigest = computeContextDigest(opts.root)
   const runs = loadRunResults({
     runsRoot: opts.runsRoot ?? rootPath(opts.root, '.lab/runs'),
     pluginKey: pluginEvidenceKey(opts.plugin),
@@ -180,7 +180,7 @@ function matchesTargetPin(run: VerifyRunResultV1, target: Target, pin: TargetPin
   return evidence.commit === pin.commit
 }
 
-function currentContextDigest(root: string): `sha256:${string}` {
+export function computeContextDigest(root: string): `sha256:${string}` {
   const contextRoot = rootPath(root, ROOT_PATHS.contextDir)
   const hash = createHash('sha256')
   const files: string[] = []

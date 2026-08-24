@@ -284,7 +284,9 @@ function validateTimestamp(value: unknown, field: string): void {
 function canTransition(from: UiSessionPhase, to: UiSessionPhase): boolean {
   if (from === to) return true
   const allowed: Record<UiSessionPhase, readonly UiSessionPhase[]> = {
-    starting: ['ready', 'crashed', 'stopping'], ready: ['crashed', 'stopping'], crashed: ['stopping'],
+    // A startup abort can be acknowledged directly by the public service when
+    // the detached supervisor has not materialized a child yet.
+    starting: ['ready', 'crashed', 'stopping', 'aborted'], ready: ['crashed', 'stopping', 'aborted'], crashed: ['stopping', 'aborted'],
     stopping: ['finished', 'aborted'], finished: [], aborted: [],
   }
   return allowed[from].includes(to)
