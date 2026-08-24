@@ -27,6 +27,7 @@ import {
   type UiRuntimePlugin,
 } from './ui-runtime.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
+import { claimOwnedUiDirectory } from './ui-owned-directory.js'
 
 export interface UiSupervisorRequestV1 {
   schemaVersion: 1
@@ -50,7 +51,7 @@ export interface UiChildHandle {
 }
 
 export interface UiSupervisorDependencies {
-  prepareRuntime(opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string }): Promise<UiRuntimePlan>
+  prepareRuntime(opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string; signal?: AbortSignal }): Promise<UiRuntimePlan>
   spawnChild(plan: UiRuntimePlan): UiChildHandle
   stopChildTree(handle: UiChildHandle): Promise<void>
   openLog(sessionDir: string, maxBytes: number): UiDiagnosticLog
@@ -72,6 +73,7 @@ export interface UiProcessTreeDependencies {
   waitForExit(exited: Promise<UiChildExit>, timeoutMs: number): Promise<boolean>
   termGraceMs: number
   killGraceMs: number
+  treeAlive?: (pid: number) => boolean
 }
 
 const SESSION_ID = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
@@ -122,12 +124,51 @@ export async function runUiSupervisor(
   let diagnosticLog: UiDiagnosticLog | undefined
 
   try {
-    plan = await deps.prepareRuntime({
+    writeState(runtimeRoot, {
+      ...current,
+      supervisorPid: process.pid,
+      updatedAt: nextTimestamp(deps.now(), current.updatedAt),
+    }, deps)
+
+    const preparationController = new AbortController()
+    let preparationSettled = false
+    let preparationError: unknown
+    const preparation = deps.prepareRuntime({
       root,
       plugin: request.plugin,
       target: request.target,
       sessionId: request.sessionId,
+      signal: preparationController.signal,
+    }).then(value => {
+      preparationSettled = true
+      return value
+    }, error => {
+      preparationSettled = true
+      preparationError = error
+      return undefined
     })
+    await Promise.resolve()
+    while (!preparationSettled) {
+      await deps.sleep(deps.pollIntervalMs)
+      const control = readUiControl({ runtimeRoot, sessionId: request.sessionId })
+      if (control === undefined) continue
+      preparationController.abort()
+      await preparation
+      await handleControl(control, {
+        deps,
+        runtimeRoot,
+        sessionDir,
+        request,
+        exitSettled: () => true,
+        stopIssued: () => false,
+        issueStop: () => undefined,
+      })
+      return
+    }
+    if (preparationError !== undefined) throw preparationError
+    const prepared = await preparation
+    if (prepared === undefined) throw new Error('runtime preparation did not return a plan')
+    plan = prepared
     validatePlan(plan, sessionDir)
     diagnosticLog = deps.openLog(sessionDir, deps.maxLogBytes)
     child = deps.spawnChild(plan)
@@ -231,6 +272,17 @@ export async function runUiSupervisor(
     }
     try {
       const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+      if (child === undefined && state.state === 'starting') {
+        writeState(runtimeRoot, {
+          ...state,
+          state: 'crashed',
+          supervisorPid: process.pid,
+          error: message,
+          updatedAt: nextTimestamp(deps.now(), state.updatedAt),
+        }, deps)
+        await waitForRecoveryControl({ runtimeRoot, sessionDir, request, deps })
+        return
+      }
       if (state.cleanup !== 'fail' && (state.state === 'starting' || state.state === 'ready' || state.state === 'crashed')) {
         markCrashed(runtimeRoot, request.sessionId, message, deps)
       }
@@ -246,8 +298,8 @@ interface ControlContext {
   runtimeRoot: string
   sessionDir: string
   request: UiSupervisorRequestV1
-  child: UiChildHandle
-  diagnosticLog: UiDiagnosticLog
+  child?: UiChildHandle
+  diagnosticLog?: UiDiagnosticLog
   exitSettled: () => boolean
   stopIssued: () => boolean
   issueStop: () => void
@@ -309,31 +361,29 @@ function compactState(state: UiSessionStateV1, removePids: boolean): UiSessionSt
 
 async function handleControl(control: UiControlV1, context: ControlContext): Promise<void> {
   const { deps, runtimeRoot, sessionDir, request, child, diagnosticLog } = context
-  clearUiControl({ runtimeRoot, sessionId: request.sessionId })
   try {
-    if (!context.exitSettled() && !context.stopIssued()) {
+    const current = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+    const stoppingBase = compactForStopping(current, child?.pid ?? current.childPid, process.pid)
+    writeState(runtimeRoot, {
+      ...stoppingBase,
+      state: 'stopping',
+      updatedAt: nextTimestamp(deps.now(), current.updatedAt),
+    }, deps)
+    if (child !== undefined && !context.stopIssued()) {
       context.issueStop()
       await deps.stopChildTree(child)
       await child.exited
     }
-    diagnosticLog.close()
+    diagnosticLog?.close()
     cleanupSessionDescendants(sessionDir)
     const cleaned = readUiSession({ runtimeRoot, sessionId: request.sessionId })
-    if (cleaned.state !== 'stopping') {
-      const { supervisorPid: _supervisorPid, childPid: _childPid, url: _url, error: _error, ...compact } = cleaned
-      writeState(runtimeRoot, {
-        ...compact,
-        state: 'stopping',
-        cleanup: 'pass',
-        updatedAt: nextTimestamp(deps.now(), cleaned.updatedAt),
-      }, deps)
-    } else if (cleaned.cleanup !== 'pass') {
-      writeState(runtimeRoot, {
-        ...cleaned,
-        cleanup: 'pass',
-        updatedAt: nextTimestamp(deps.now(), cleaned.updatedAt),
-      }, deps)
-    }
+    const compact = compactState(cleaned, true)
+    writeState(runtimeRoot, {
+      ...compact,
+      state: 'stopping',
+      cleanup: 'pass',
+      updatedAt: nextTimestamp(deps.now(), cleaned.updatedAt),
+    }, deps)
     if (control.action === 'abort') {
       const stopping = readUiSession({ runtimeRoot, sessionId: request.sessionId })
       writeState(runtimeRoot, {
@@ -343,6 +393,7 @@ async function handleControl(control: UiControlV1, context: ControlContext): Pro
         updatedAt: nextTimestamp(deps.now(), stopping.updatedAt),
       }, deps)
     }
+    clearUiControl({ runtimeRoot, sessionId: request.sessionId })
   } catch (error) {
     const message = `cleanup failed: ${error instanceof Error ? error.message : String(error)}`
     try {
@@ -368,6 +419,40 @@ async function handleControl(control: UiControlV1, context: ControlContext): Pro
       // Preserve the original cleanup error for the detached bin.
     }
     throw new Error(message, { cause: error })
+  }
+}
+
+function compactForStopping(state: UiSessionStateV1, childPid: number | undefined, supervisorPid: number): UiSessionStateV1 {
+  const compact = { ...state }
+  delete compact.url
+  delete compact.error
+  delete compact.cleanup
+  compact.supervisorPid = supervisorPid
+  if (childPid !== undefined) compact.childPid = childPid
+  return compact
+}
+
+async function waitForRecoveryControl(opts: {
+  runtimeRoot: string
+  sessionDir: string
+  request: UiSupervisorRequestV1
+  deps: UiSupervisorDependencies
+}): Promise<void> {
+  while (true) {
+    const control = readUiControl({ runtimeRoot: opts.runtimeRoot, sessionId: opts.request.sessionId })
+    if (control !== undefined) {
+      await handleControl(control, {
+        deps: opts.deps,
+        runtimeRoot: opts.runtimeRoot,
+        sessionDir: opts.sessionDir,
+        request: opts.request,
+        exitSettled: () => true,
+        stopIssued: () => false,
+        issueStop: () => undefined,
+      })
+      return
+    }
+    await opts.deps.sleep(opts.deps.pollIntervalMs)
   }
 }
 
@@ -415,11 +500,10 @@ function nextTimestamp(candidate: string, previous: string): string {
 function cleanupSessionDescendants(sessionDir: string): void {
   const home = join(sessionDir, 'home')
   const overlay = join(sessionDir, 'overlay')
-  const control = join(sessionDir, 'control.json')
   const log = join(sessionDir, 'supervisor.log')
-  removeContained(home, sessionDir, true)
-  removeContained(overlay, sessionDir, true)
-  removeContained(control, sessionDir, false)
+  const owned = claimOwnedUiDirectory({ root: resolve(sessionDir, '..', '..'), directory: sessionDir })
+  if (existsSync(home)) owned.removeDirectoryLeaf('home')
+  if (existsSync(overlay)) owned.removeDirectoryLeaf('overlay')
   removeContained(log, sessionDir, false)
 }
 
@@ -522,16 +606,17 @@ export async function stopOwnedChildTree(
   deps: UiProcessTreeDependencies = defaultProcessTreeDependencies(),
 ): Promise<void> {
   assertPid(child.pid)
+  const treeAlive = deps.treeAlive
   if (deps.platform === 'windows') {
     await deps.taskkill(windowsTreeKillArgs(child.pid))
-    if (!await deps.waitForExit(child.exited, deps.termGraceMs)) throw new Error('owned Windows child tree did not close after taskkill')
+    if (!await deps.waitForExit(child.exited, deps.termGraceMs) || treeAlive?.(child.pid)) throw new Error('owned Windows child tree did not close after taskkill')
     return
   }
   const group = posixProcessGroup(child.pid)
   deps.signalGroup(group, 'SIGTERM')
-  if (await deps.waitForExit(child.exited, deps.termGraceMs)) return
+  if (await deps.waitForExit(child.exited, deps.termGraceMs) && (treeAlive === undefined || !treeAlive(child.pid))) return
   deps.signalGroup(group, 'SIGKILL')
-  if (!await deps.waitForExit(child.exited, deps.killGraceMs)) throw new Error('owned POSIX process group did not close after SIGKILL')
+  if (!await deps.waitForExit(child.exited, deps.killGraceMs) || treeAlive?.(child.pid)) throw new Error('owned POSIX process group did not close after SIGKILL')
 }
 
 function defaultProcessTreeDependencies(): UiProcessTreeDependencies {
@@ -546,6 +631,9 @@ function defaultProcessTreeDependencies(): UiProcessTreeDependencies {
       }
     },
     waitForExit: waitForExitWithin,
+    treeAlive: pid => {
+      try { process.kill(pid, 0); return true } catch { return false }
+    },
     termGraceMs: 5_000,
     killGraceMs: 5_000,
   }

@@ -334,8 +334,13 @@ async function runUi(rest: string[]): Promise<number> {
     throw new Error('usage: lab ui start|status|finish|abort')
   } catch (error) {
     console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    if (isUiProtocolOutcomeError(error)) return 2
     return 1
   }
+}
+
+function isUiProtocolOutcomeError(error: unknown): error is { name: 'UiProtocolOutcomeError'; outcome: 'stale' | 'cleanup-incomplete'; exitCode: 2 } {
+  return error !== null && typeof error === 'object' && (error as { name?: unknown }).name === 'UiProtocolOutcomeError' && ((error as { outcome?: unknown }).outcome === 'stale' || (error as { outcome?: unknown }).outcome === 'cleanup-incomplete') && (error as { exitCode?: unknown }).exitCode === 2
 }
 
 interface UiSelectorParse {

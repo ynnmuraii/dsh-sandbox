@@ -32,17 +32,19 @@ export interface UiRuntimePlugin {
 
 export interface UiRuntimeDependencies {
   loadCompatibility(path: string): Compatibility
-  resolveLauncher(root: string, target: 'next' | 'master', compatibility: Compatibility): Promise<{ cmd: string; args: string[] }>
-  installNextProfile(profileDir: string, env: NodeJS.ProcessEnv): void
+  resolveLauncher(root: string, target: 'next' | 'master', compatibility: Compatibility, signal?: AbortSignal): Promise<{ cmd: string; args: string[] }>
+  installNextProfile(profileDir: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): void | Promise<void>
 }
 
 const SESSION_ID_PATTERN = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
 
 export async function prepareUiRuntime(
-  opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string },
+  opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string; signal?: AbortSignal },
   deps: UiRuntimeDependencies = defaultDependencies(),
 ): Promise<UiRuntimePlan> {
   validateOptions(opts)
+  const signal = opts.signal ?? new AbortController().signal
+  signal.throwIfAborted()
   const root = resolve(opts.root)
   const sourcePath = resolve(opts.plugin.sourcePath)
   const sourceEntry = resolve(sourcePath, 'src', 'index.ts')
@@ -81,7 +83,8 @@ export async function prepareUiRuntime(
   )
   writeFileSync(overlayPath, overlay, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
 
-  const launcher = await deps.resolveLauncher(root, opts.target, compatibility)
+  signal.throwIfAborted()
+  const launcher = await deps.resolveLauncher(root, opts.target, compatibility, signal)
   if (!launcher || typeof launcher.cmd !== 'string' || !Array.isArray(launcher.args)) throw new Error('launcher resolver returned an invalid command')
   const upstream = rootPath(root, ROOT_PATHS.upstream)
   const dsh = opts.target === 'next'
@@ -111,7 +114,7 @@ export async function prepareUiRuntime(
     ],
     cwd: profileDir,
   }
-  if (opts.target === 'next') deps.installNextProfile(profileDir, buildUiRuntimeEnvironment(plan))
+  if (opts.target === 'next') await deps.installNextProfile(profileDir, buildUiRuntimeEnvironment(plan), signal)
   return plan
 }
 

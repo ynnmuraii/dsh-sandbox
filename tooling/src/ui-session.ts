@@ -108,27 +108,37 @@ export function readUiSession(opts: { runtimeRoot: string; sessionId: string }):
   return parsed
 }
 
-export function writeUiSession(opts: { runtimeRoot: string; state: UiSessionStateV1 }): void {
-  validateState(opts.state)
+export function writeUiSession(opts: {
+  runtimeRoot: string
+  state: UiSessionStateV1
+  beforeStateReplace?: (statePath: string) => void
+}): void {
   assertSessionId(opts.state.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.state.sessionId)
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.state.sessionId}`)
+  const sessionIdentity = directoryIdentity(paths.sessionDir)
   const current = readUiSession({ runtimeRoot: opts.runtimeRoot, sessionId: opts.state.sessionId })
-  assertStaleReasonsRetained(current, opts.state)
+  const state = opts.state.state === 'crashed' && Number.isFinite(Date.parse(opts.state.updatedAt)) && Date.parse(opts.state.updatedAt) < Date.parse(current.updatedAt)
+    ? { ...opts.state, updatedAt: current.updatedAt }
+    : opts.state
+  validateState(state)
+  assertStaleReasonsRetained(current, state)
   if (isTerminal(current.state)) {
-    if (JSON.stringify(current) !== JSON.stringify(opts.state)) {
+    if (JSON.stringify(current) !== JSON.stringify(state)) {
       throw new Error(`terminal UI session ${opts.state.sessionId} is immutable`)
     }
     return
   }
-  if (!canTransition(current.state, opts.state.state)) {
-    throw new Error(`invalid UI session transition ${current.state} -> ${opts.state.state}`)
+  if (!canTransition(current.state, state.state)) {
+    throw new Error(`invalid UI session transition ${current.state} -> ${state.state}`)
   }
-  if (Date.parse(opts.state.updatedAt) < Date.parse(current.updatedAt)) {
+  if (Date.parse(state.updatedAt) < Date.parse(current.updatedAt)) {
     throw new Error('updatedAt must not move backward')
   }
-  writeAtomic(paths.statePath, JSON.stringify(opts.state, null, 2) + '\n', true)
+  opts.beforeStateReplace?.(paths.statePath)
+  assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
+  writeAtomic(paths.statePath, JSON.stringify(state, null, 2) + '\n', true)
 }
 
 export function writeUiControl(opts: { runtimeRoot: string; sessionId: string; control: UiControlV1 }): void {
@@ -241,7 +251,8 @@ function validateState(value: unknown): asserts value is UiSessionStateV1 {
   } else if (phase === 'starting') {
     if (state.url !== undefined || state.error !== undefined || state.cleanup !== undefined) throw new Error('starting state cannot contain url, error, or cleanup')
   } else if (phase === 'stopping') {
-    if (state.url !== undefined || state.supervisorPid !== undefined || state.childPid !== undefined || state.error !== undefined) throw new Error('stopping state must not contain live process fields')
+    if (state.cleanup === undefined && state.supervisorPid === undefined && state.childPid === undefined) throw new Error('owned stopping state requires a supervisor or child PID')
+    if (state.cleanup === 'pass' && (state.supervisorPid !== undefined || state.childPid !== undefined || state.url !== undefined || state.error !== undefined)) throw new Error('compact stopping state must not contain live process fields')
   } else {
     if (state.cleanup !== 'pass') throw new Error(`${phase} state requires cleanup: pass`)
     if (state.url !== undefined || state.supervisorPid !== undefined || state.childPid !== undefined || state.error !== undefined) throw new Error(`${phase} state must be compact`)
@@ -297,7 +308,7 @@ function canTransition(from: UiSessionPhase, to: UiSessionPhase): boolean {
   if (from === to) return true
   const allowed: Record<UiSessionPhase, readonly UiSessionPhase[]> = {
     starting: ['ready', 'crashed', 'stopping'], ready: ['crashed', 'stopping'], crashed: ['stopping'],
-    stopping: ['finished', 'aborted'], finished: [], aborted: [],
+    stopping: ['crashed', 'finished', 'aborted'], finished: [], aborted: [],
   }
   return allowed[from].includes(to)
 }
@@ -372,6 +383,18 @@ function assertDirectoryEntry(path: string, label: string): void {
   let stat
   try { stat = lstatSync(path) } catch (error) { throw new Error(`${label} not found at ${path}`, { cause: error }) }
   if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`${label} is not a regular directory at ${path}`)
+}
+type DirectoryIdentity = { dev: number; ino: number }
+function directoryIdentity(path: string): DirectoryIdentity {
+  const stat = lstatSync(path)
+  if (stat.isSymbolicLink() || !stat.isDirectory() || !Number.isInteger(stat.dev) || !Number.isInteger(stat.ino) || stat.dev <= 0 || stat.ino <= 0) {
+    throw new Error(`stable identity unavailable for UI session directory ${path}`)
+  }
+  return { dev: stat.dev, ino: stat.ino }
+}
+function assertDirectoryIdentity(path: string, expected: DirectoryIdentity): void {
+  const current = directoryIdentity(path)
+  if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error(`UI session directory identity changed at ${path}`)
 }
 function existingEntry(path: string): ReturnType<typeof lstatSync> | undefined {
   try { return lstatSync(path) } catch (error) { if (isNotFoundError(error)) return undefined; throw error }

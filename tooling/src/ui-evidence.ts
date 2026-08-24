@@ -27,6 +27,8 @@ export interface PublishUiResultOptions {
   renameFile?: (from: string, to: string) => void
   beforePublishWrite?: (sessionDirectory: string) => void
   beforeFinalize?: (finalPath: string) => void
+  removeTemporaryName?: (path: string) => void
+  removePublicationLock?: (path: string) => void
 }
 
 const PLUGIN_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-f0-9]{12}$/
@@ -65,6 +67,7 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
   mkdirSync(sessionDirectory, { recursive: true })
   assertSafeUiPath(opts.uiRunsRoot, pluginDirectory, 'plugin evidence directory')
   assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
+  const sessionIdentity = captureDirectoryIdentity(sessionDirectory)
 
   try {
     mkdirSync(lockPath)
@@ -79,7 +82,6 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
   }
 
   let temporaryCreated = false
-  let publicationSucceeded = false
   try {
     if (existsSync(finalPath)) {
       throw new Error(`UI session ${result.sessionId} is already finalized; immutable evidence cannot be replaced`)
@@ -107,6 +109,7 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
       opts.beforeFinalize?.(finalPath)
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
+      assertDirectoryIdentity(sessionDirectory, sessionIdentity)
       if (opts.renameFile !== undefined) {
         opts.renameFile(temporaryPath, finalPath)
       } else {
@@ -120,18 +123,22 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
           }
           throw error
         }
-        unlinkSync(temporaryPath)
+        try {
+          if (opts.removeTemporaryName) opts.removeTemporaryName(temporaryPath)
+          else unlinkSync(temporaryPath)
+        } catch {
+          // The immutable final link is already committed. Leave recoverable
+          // temporary bookkeeping for a later cleanup pass.
+        }
       }
       temporaryCreated = false
-      publicationSucceeded = true
     } catch (error) {
-      if (temporaryCreated) removeTemporary(opts.uiRunsRoot, sessionDirectory, temporaryPath)
+      if (temporaryCreated && sameDirectoryIdentity(sessionDirectory, sessionIdentity)) removeTemporary(opts.uiRunsRoot, sessionDirectory, temporaryPath)
       throw error
     }
     return finalPath
   } finally {
-    const lockError = removeLock(opts.uiRunsRoot, sessionDirectory, lockPath)
-    if (lockError && publicationSucceeded) throw lockError
+    removeLock(opts.uiRunsRoot, sessionDirectory, lockPath, opts.removePublicationLock)
   }
 }
 
@@ -423,15 +430,33 @@ function removeTemporary(uiRunsRoot: string, sessionDirectory: string, path: str
   } catch { /* preserve the publication error */ }
 }
 
-function removeLock(uiRunsRoot: string, sessionDirectory: string, path: string): Error | undefined {
+function removeLock(uiRunsRoot: string, sessionDirectory: string, path: string, hook?: (path: string) => void): Error | undefined {
   try {
     assertSafeUiPath(uiRunsRoot, sessionDirectory, 'session evidence directory')
     assertDirectoryEntry(sessionDirectory, 'session evidence directory')
-    rmSync(path, { recursive: true, force: true })
+    if (hook) hook(path)
+    else rmSync(path, { recursive: true, force: true })
     return undefined
   } catch {
     return new Error(`Publication lock ${path} could not be removed; it may be orphaned. Confirm no publisher is active, then remove the lock and retry.`)
   }
+}
+
+type DirectoryIdentity = { dev: number; ino: number }
+function captureDirectoryIdentity(path: string): DirectoryIdentity {
+  const stat = lstatSync(path)
+  if (stat.isSymbolicLink() || !stat.isDirectory() || !Number.isInteger(stat.dev) || !Number.isInteger(stat.ino) || stat.dev <= 0 || stat.ino <= 0) throw new Error(`stable identity unavailable for evidence directory ${path}`)
+  return { dev: stat.dev, ino: stat.ino }
+}
+function assertDirectoryIdentity(path: string, expected: DirectoryIdentity): void {
+  const current = captureDirectoryIdentity(path)
+  if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error(`evidence directory identity changed at ${path}`)
+}
+function sameDirectoryIdentity(path: string, expected: DirectoryIdentity): boolean {
+  try {
+    const current = captureDirectoryIdentity(path)
+    return current.dev === expected.dev && current.ino === expected.ino
+  } catch { return false }
 }
 
 function existingFileEntry(path: string): ReturnType<typeof lstatSync> | undefined {
