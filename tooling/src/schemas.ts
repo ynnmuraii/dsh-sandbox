@@ -53,9 +53,11 @@ const PIN_RANGE = /^(~|\^|>=|<=)?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \|\| .+
 
 function requireField(kind: 'next' | 'master', pin: TargetPin, field: keyof TargetPin): void {
   if (pin[field] === undefined || pin[field] === '') {
-    throw new CompatibilityError(
-      `target '${kind}' requires a mandatory pin field '${field}'`,
-    )
+    const message = `target '${kind}' requires a mandatory pin field '${field}'`
+    if ((kind === 'next' && field === 'dsh') || (kind === 'master' && field === 'commit')) {
+      throw new CompatibilityError(message, { code: 'missing-selected-identity', target: kind })
+    }
+    throw new CompatibilityError(message)
   }
 }
 

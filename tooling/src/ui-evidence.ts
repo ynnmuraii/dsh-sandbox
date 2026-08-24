@@ -149,6 +149,7 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
       assertDirectoryIdentity(sessionDirectory, sessionIdentity)
       if (opts.renameFile === undefined) {
         try {
+          assertFileIdentity(temporaryPath, temporaryIdentity)
           if (opts.removeTemporaryName) opts.removeTemporaryName(temporaryPath)
           else unlinkSync(temporaryPath)
         } catch {
