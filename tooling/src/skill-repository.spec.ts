@@ -9,6 +9,7 @@ import {
   renderAgentSkill,
 } from './skill.js'
 import { contextDocuments } from './sync.js'
+import { loadCatalogFromFile, loadCompatibilityFromFile } from './schemas.js'
 
 function nestedSkillFiles(root: string): string[] {
   const pluginsRoot = join(root, 'plugins')
@@ -72,6 +73,28 @@ describe('committed portable agent skill projection', () => {
     expect(canonical).not.toMatch(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b/)
     expect(canonical).not.toMatch(/\b[0-9a-f]{40}\b/i)
     expect(canonical).not.toMatch(/\b[A-Za-z]:[\\/]/)
+  })
+
+  it('keeps live catalog data, absolute host paths, and mandatory harness workflows out of guidance', () => {
+    const root = process.cwd()
+    const canonical = readFileSync(join(root, SKILL_SOURCE_PATH), 'utf8')
+    const committed = readFileSync(join(root, AGENT_SKILL_PATH), 'utf8')
+    const catalog = loadCatalogFromFile(join(root, 'catalog.yaml'))
+    const compatibility = loadCompatibilityFromFile(join(root, 'workbench', 'compatibility.yaml'))
+
+    for (const guidance of [canonical, committed]) {
+      for (const [name, entry] of Object.entries(catalog.plugins)) {
+        expect(guidance).not.toMatch(new RegExp(`\\b${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\b`, 'i'))
+        expect(guidance).not.toContain(entry.path)
+        if (entry.repository !== undefined) expect(guidance).not.toContain(entry.repository)
+      }
+      expect(guidance).not.toContain(compatibility.targets.next.dsh)
+      expect(guidance).not.toContain(compatibility.targets.master.commit)
+      expect(guidance).not.toContain(compatibility.targets.master.repository)
+      expect(guidance).not.toMatch(/(?:^|[\s("'`=])\/(?!\/)[^\s)"'`]+/m)
+      expect(guidance).not.toMatch(/\b(?:must|required to|always)\s+(?:use|run|launch|delegate(?:\s+to)?)\s+(?:SDD|Codex|Claude|Pi|agent-browser|subagents?)\b/i)
+      expect(guidance).not.toMatch(/\b(?:Codex|Claude|Pi|agent-browser|subagents?)\s+(?:must|required to|always)\b/i)
+    }
   })
 
   it('tracks exactly the approved root projection and finds no skill in a plugin repo', () => {

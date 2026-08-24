@@ -102,6 +102,30 @@ describe('portable agent skill renderer', () => {
     expect(() => renderAgentSkill({ body, documents: [] })).not.toThrow()
   })
 
+  it('does not treat a backtick info string containing a backtick as a valid fence', () => {
+    const body = [
+      BODY,
+      '',
+      '```bad`info',
+      '# Second heading',
+      '```',
+    ].join('\n')
+
+    expect(() => renderAgentSkill({ body, documents: [] })).toThrow(/top-level heading/i)
+  })
+
+  it('ignores headings inside a fenced block nested in a list container', () => {
+    const body = [
+      BODY,
+      '',
+      '- ```markdown',
+      '  # This is fenced code, not a heading',
+      '  ```',
+    ].join('\n')
+
+    expect(() => renderAgentSkill({ body, documents: [] })).not.toThrow()
+  })
+
   it('fixes the only portable projection and canonical source paths', () => {
     expect(AGENT_SKILL_PATH).toBe('.agents/skills/dsh-plugin-development/SKILL.md')
     expect(SKILL_SOURCE_PATH).toBe('context/dsh-plugin-development-skill.md')
