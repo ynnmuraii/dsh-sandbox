@@ -460,7 +460,7 @@ function printUiStatus(view: UiSessionViewV1): void {
   console.log(`UI session ${view.sessionId}: ${view.state}`)
   if (view.url !== undefined) console.log(`url: ${view.url}`)
   if (view.stale) console.log(`stale: ${view.staleReasons.join(', ')}; abort this session and start a new one`)
-  if (view.error !== undefined) console.log(`error: ${view.error}; inspect the runtime or abort the session`)
+  if (view.error !== undefined) console.log(`error: ${view.error}; ${view.orphan === true ? 'remove the orphaned runtime directory manually' : 'inspect the runtime or abort the session'}`)
 }
 
 function printUiFinish(result: UiResultV1): void {

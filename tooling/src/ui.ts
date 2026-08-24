@@ -60,6 +60,7 @@ export interface UiSessionViewV1 {
   url?: string
   error?: string
   cleanup?: 'pass' | 'fail'
+  orphan?: true
   startedAt: string
   updatedAt: string
 }
@@ -222,28 +223,42 @@ export function getUiSessionStatus(
   const orphanPath = join(runtimeRoot, 'ui-sessions', opts.sessionId)
   if (state.state === 'starting' && state.supervisorPid === undefined) {
     const { url: _url, childPid: _childPid, ...orphaned } = state
-    return viewFromState({
+    const view = viewFromState({
       ...orphaned,
       state: 'crashed',
       error: `UI supervisor owner is missing; session is orphaned at ${orphanPath}`,
     })
+    view.orphan = true
+    return view
   }
   if ((state.state === 'starting' || state.state === 'ready') && state.supervisorPid !== undefined) {
     const supervisorAlive = deps.processAlive(state.supervisorPid)
     const childAlive = state.childPid === undefined ? true : supervisorAlive && deps.processAlive(state.childPid)
     if (supervisorAlive && childAlive) return viewFromState(state)
     const { url: _url, supervisorPid: _supervisorPid, childPid: _childPid, ...orphaned } = state
-    return viewFromState({
+    const view = viewFromState({
       ...orphaned,
       state: 'crashed',
       error: `${supervisorAlive ? 'UI child is not running' : 'UI supervisor is not running'}; session is orphaned at ${orphanPath}`,
     })
+    view.orphan = true
+    return view
   }
   if (state.state === 'crashed' && state.supervisorPid !== undefined && !deps.processAlive(state.supervisorPid)) {
-    return viewFromState({
+    const view = viewFromState({
       ...state,
       error: `${state.error ?? 'UI session crashed'}; recovery supervisor is not running; session is orphaned at ${orphanPath}`,
     })
+    view.orphan = true
+    return view
+  }
+  if (state.state === 'crashed' && state.supervisorPid === undefined) {
+    const view = viewFromState({
+      ...state,
+      error: `${state.error ?? 'UI session crashed'}; recovery owner is missing; session is orphaned at ${orphanPath}`,
+    })
+    view.orphan = true
+    return view
   }
   if (isTerminal(state.state)) {
     const derived = staleReasons(state, current)
