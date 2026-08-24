@@ -426,7 +426,7 @@ function parseUiFinish(args: string[]): UiFinishParse {
     } else if (arg === '--summary') {
       if (summary !== undefined) throw new Error('--summary may be specified only once')
       const value = args[++i]
-      if (value === undefined) throw new Error('--summary requires a value')
+      if (value === undefined || value.startsWith('--')) throw new Error('--summary requires a non-flag value')
       summary = value
     } else if (arg === '--json') {
       if (json) throw new Error('--json may be specified only once')
