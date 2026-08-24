@@ -265,6 +265,7 @@ describe('agent-first command and documentation contract', () => {
     expect(docs).toMatch(/external[\s\S]{0,120}(?:browser|vision)[\s\S]{0,200}(?:agent|harness)/i)
     expect(docs).toMatch(/screenshots?[\s\S]{0,100}(?:transient|not retained|not stored)/i)
     expect(docs).toMatch(/portable agent (?:entrypoint|skill)[\s\S]{0,200}advisory/i)
+    expect(docs).not.toMatch(/UI(?: review)? sessions?[\s\S]{0,60}(?:not provided|not implemented|future work)/i)
     expect(docs).not.toMatch(/\b(?:pnpm\s+)?lab\s+skill\b/i)
   })
 })
