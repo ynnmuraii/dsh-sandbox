@@ -614,14 +614,15 @@ export async function stopOwnedChildTree(
   }
   const group = posixProcessGroup(child.pid)
   deps.signalGroup(group, 'SIGTERM')
-  if (await deps.waitForExit(child.exited, deps.termGraceMs) && (treeAlive === undefined || !treeAlive(child.pid))) return
+  if (await deps.waitForExit(child.exited, deps.termGraceMs) && (treeAlive === undefined || !treeAlive(group))) return
   deps.signalGroup(group, 'SIGKILL')
-  if (!await deps.waitForExit(child.exited, deps.killGraceMs) || treeAlive?.(child.pid)) throw new Error('owned POSIX process group did not close after SIGKILL')
+  if (!await deps.waitForExit(child.exited, deps.killGraceMs) || treeAlive?.(group)) throw new Error('owned POSIX process group did not close after SIGKILL')
 }
 
 function defaultProcessTreeDependencies(): UiProcessTreeDependencies {
+  const platform = process.platform === 'win32' ? 'windows' : 'posix'
   return {
-    platform: process.platform === 'win32' ? 'windows' : 'posix',
+    platform,
     taskkill: args => new Promise<void>((resolvePromise, reject) => {
       execFile('taskkill.exe', args, { windowsHide: true }, error => error ? reject(error) : resolvePromise())
     }),
@@ -631,8 +632,8 @@ function defaultProcessTreeDependencies(): UiProcessTreeDependencies {
       }
     },
     waitForExit: waitForExitWithin,
-    treeAlive: pid => {
-      try { process.kill(pid, 0); return true } catch { return false }
+    treeAlive: pidOrGroup => {
+      try { process.kill(pidOrGroup, 0); return true } catch { return false }
     },
     termGraceMs: 5_000,
     killGraceMs: 5_000,
