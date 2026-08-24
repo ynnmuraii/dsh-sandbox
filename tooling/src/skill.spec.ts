@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import {
   AGENT_SKILL_PATH,
   SKILL_SOURCE_PATH,
@@ -104,5 +105,20 @@ describe('portable agent skill renderer', () => {
   it('fixes the only portable projection and canonical source paths', () => {
     expect(AGENT_SKILL_PATH).toBe('.agents/skills/dsh-plugin-development/SKILL.md')
     expect(SKILL_SOURCE_PATH).toBe('context/dsh-plugin-development-skill.md')
+  })
+
+  it('routes agents through the separate minimal UI verification protocol without owning their browser workflow', () => {
+    const source = readFileSync(new URL('../../context/dsh-plugin-development-skill.md', import.meta.url), 'utf8')
+    const generated = readFileSync(new URL('../../.agents/skills/dsh-plugin-development/SKILL.md', import.meta.url), 'utf8')
+
+    for (const guidance of [source, generated]) {
+      expect(guidance).toMatch(/lab ui start[\s\S]*lab ui status[\s\S]*lab ui finish[\s\S]*lab ui abort/i)
+      expect(guidance).toMatch(/external[\s\S]{0,120}(?:browser|vision)[\s\S]{0,200}(?:agent|harness)/i)
+      expect(guidance).toMatch(/temporary[\s\S]{0,160}(?:isolated|session)[\s\S]{0,160}runtime/i)
+      expect(guidance).toMatch(/minimal[\s\S]{0,120}(?:verdict|evidence|result)/i)
+      expect(guidance).toMatch(/screenshots?[\s\S]{0,120}(?:transient|not retained|not stored)/i)
+      expect(guidance).toMatch(/SDD[\s\S]{0,80}(?:advisory|recommend|chosen)/i)
+      expect(guidance).not.toMatch(/(?:must|required to)\s+(?:use|run)\s+(?:SDD|agent-browser|Codex|Pi|DSH)/i)
+    }
   })
 })

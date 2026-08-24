@@ -8,6 +8,14 @@ import { verifyPlugin } from './verify.js'
 import { derivePluginStatus } from './status.js'
 import { devPlugin } from './run.js'
 import { syncContext } from './sync.js'
+import {
+  abortUiSession,
+  finishUiSession,
+  getUiSessionStatus,
+  startUiSession,
+  type UiSessionViewV1,
+} from './ui.js'
+import type { UiResultV1 } from './ui-evidence.js'
 
 vi.mock('./upstream-update.js', () => ({
   checkUpstream: vi.fn(),
@@ -30,6 +38,12 @@ vi.mock('./sync.js', async importOriginal => ({
   ...(await importOriginal<typeof import('./sync.js')>()),
   syncContext: vi.fn(),
 }))
+vi.mock('./ui.js', () => ({
+  abortUiSession: vi.fn(),
+  finishUiSession: vi.fn(),
+  getUiSessionStatus: vi.fn(),
+  startUiSession: vi.fn(),
+}))
 
 const PINNED = '1'.repeat(40)
 const REMOTE = '2'.repeat(40)
@@ -44,6 +58,10 @@ afterEach(() => {
   vi.mocked(derivePluginStatus).mockReset()
   vi.mocked(devPlugin).mockReset()
   vi.mocked(syncContext).mockReset()
+  vi.mocked(abortUiSession).mockReset()
+  vi.mocked(finishUiSession).mockReset()
+  vi.mocked(getUiSessionStatus).mockReset()
+  vi.mocked(startUiSession).mockReset()
 })
 
 function captureConsole() {
@@ -214,7 +232,7 @@ describe('path-first dev CLI', () => {
 })
 
 describe('agent-first command and documentation contract', () => {
-  it('advertises every first-slice command with catalog and path selectors only', async () => {
+  it('advertises every agent-facing command with catalog and path selectors only', async () => {
     const output = captureConsole()
 
     expect(await runCli(['--help'])).toBe(0)
@@ -223,10 +241,14 @@ describe('agent-first command and documentation contract', () => {
     expect(help).toMatch(/dev\s+<name>\|--path\s+P[\s\S]*--target\s+T/i)
     expect(help).toMatch(/verify\s+<name>\|--path\s+P[\s\S]*--target\s+T[\s\S]*\[--json]/i)
     expect(help).toMatch(/status\s+<name>\|--path\s+P[\s\S]*\[--json]/i)
-    expect(help).not.toMatch(/^\s*(?:ui|publish|init|generate-skills?)\b/im)
+    expect(help).toMatch(/ui start\s+<name>\|--path\s+P[\s\S]*--target\s+T[\s\S]*\[--json]/i)
+    expect(help).toMatch(/ui status\s+<session-id>[\s\S]*\[--json]/i)
+    expect(help).toMatch(/ui finish\s+<session-id>[\s\S]*--verdict\s+pass\|fail[\s\S]*--summary/i)
+    expect(help).toMatch(/ui abort\s+<session-id>[\s\S]*\[--json]/i)
+    expect(help).not.toMatch(/^\s*(?:publish|init|generate-skills?)\b/im)
   })
 
-  it('documents mutation/isolation and the portable skill without claiming UI or skill commands exist', () => {
+  it('documents mutation/isolation, the portable skill, and the separate UI protocol', () => {
     const docs = [
       readFileSync(new URL('../../README.md', import.meta.url), 'utf8'),
       readFileSync(new URL('../../docs/using-the-lab.md', import.meta.url), 'utf8'),
@@ -239,9 +261,11 @@ describe('agent-first command and documentation contract', () => {
     expect(docs).toMatch(/evidence[\s\S]{0,160}minimal[\s\S]{0,160}(?:memory|record)/i)
     expect(docs).toMatch(/catalog[\s\S]{0,80}(?:init|initialization)[\s\S]{0,80}optional/i)
     expect(docs).toMatch(/only explicit authoring commands[\s\S]{0,120}mutate/i)
-    expect(docs).toMatch(/UI[\s\S]{0,120}(?:not provided|not implemented|future work)/i)
+    expect(docs).toMatch(/lab ui start[\s\S]{0,240}temporary[\s\S]{0,200}(?:runtime|session)/i)
+    expect(docs).toMatch(/external[\s\S]{0,120}(?:browser|vision)[\s\S]{0,200}(?:agent|harness)/i)
+    expect(docs).toMatch(/screenshots?[\s\S]{0,100}(?:transient|not retained|not stored)/i)
     expect(docs).toMatch(/portable agent (?:entrypoint|skill)[\s\S]{0,200}advisory/i)
-    expect(docs).not.toMatch(/\b(?:pnpm\s+)?lab\s+(?:ui|skill)\b/i)
+    expect(docs).not.toMatch(/\b(?:pnpm\s+)?lab\s+skill\b/i)
   })
 })
 
@@ -526,5 +550,205 @@ describe('status CLI', () => {
     expect(await runCli(['status', '--path', 'A:/standalone', ...flags])).toBe(1)
     expect(output.errors.join('\n')).toMatch(/error:/i)
     expect(derivePluginStatus).not.toHaveBeenCalled()
+  })
+})
+
+describe('UI session CLI', () => {
+  const plugin = { sourcePath: 'A:/standalone', packageName: '@fixture/standalone' }
+  const sessionId = 'ui-20260824T120000000Z-a1b2c3d4'
+
+  function uiView(
+    state: UiSessionViewV1['state'] = 'ready',
+    overrides: Partial<UiSessionViewV1> = {},
+  ): UiSessionViewV1 {
+    return {
+      schemaVersion: 1,
+      sessionId,
+      state,
+      stale: false,
+      staleReasons: [],
+      plugin: {
+        packageName: plugin.packageName,
+        sourcePath: plugin.sourcePath,
+        digest: `sha256:${'a'.repeat(64)}`,
+      },
+      target: { name: 'next', dsh: '0.1.1-rc.2' },
+      contextDigest: `sha256:${'b'.repeat(64)}`,
+      ...(state === 'ready' && overrides.stale !== true ? { url: 'http://127.0.0.1:49152' } : {}),
+      startedAt: '2026-08-24T12:00:00.000Z',
+      updatedAt: '2026-08-24T12:00:01.000Z',
+      ...overrides,
+    }
+  }
+
+  function uiResult(verdict: UiResultV1['verdict'] = 'pass'): UiResultV1 {
+    return {
+      schemaVersion: 1,
+      sessionId,
+      operation: 'ui',
+      verdict,
+      plugin: {
+        packageName: plugin.packageName,
+        sourcePath: plugin.sourcePath,
+        digest: `sha256:${'a'.repeat(64)}`,
+      },
+      target: { name: 'next', dsh: '0.1.1-rc.2' },
+      lab: { contextDigest: `sha256:${'b'.repeat(64)}` },
+      summary: verdict === 'pass' ? 'looks correct' : 'layout is broken',
+      cleanup: 'pass',
+      startedAt: '2026-08-24T12:00:00.000Z',
+      finishedAt: '2026-08-24T12:00:02.000Z',
+    }
+  }
+
+  it.each([
+    [['ui', 'start', '--path', 'A:/standalone', '--target', 'next'], { path: 'A:/standalone' }],
+    [['ui', 'start', 'demo', '--target', 'master'], { name: 'demo' }],
+  ] as const)('routes start selectors and an explicit target exactly: %j', async (argv, selector) => {
+    captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    vi.mocked(startUiSession).mockResolvedValue(uiView())
+
+    expect(await runCli([...argv])).toBe(0)
+    expect(resolvePluginRef).toHaveBeenCalledWith({ root: process.cwd(), selector })
+    expect(startUiSession).toHaveBeenCalledWith({
+      root: process.cwd(),
+      plugin,
+      target: argv.at(-1),
+    })
+  })
+
+  it('routes status, finish, and abort through session-only service options', async () => {
+    captureConsole()
+    vi.mocked(getUiSessionStatus).mockReturnValue(uiView())
+    vi.mocked(finishUiSession).mockResolvedValue(uiResult())
+    vi.mocked(abortUiSession).mockResolvedValue(uiView('aborted', { cleanup: 'pass' }))
+
+    expect(await runCli(['ui', 'status', sessionId])).toBe(0)
+    expect(getUiSessionStatus).toHaveBeenCalledWith({ root: process.cwd(), sessionId })
+
+    expect(await runCli(['ui', 'finish', sessionId, '--verdict', 'pass', '--summary', 'looks --path correct'])).toBe(0)
+    expect(finishUiSession).toHaveBeenCalledWith({
+      root: process.cwd(),
+      sessionId,
+      verdict: 'pass',
+      summary: 'looks --path correct',
+    })
+
+    expect(await runCli(['ui', 'abort', sessionId])).toBe(0)
+    expect(abortUiSession).toHaveBeenCalledWith({ root: process.cwd(), sessionId })
+  })
+
+  it.each([
+    ['start', ['ui', 'start', '--path', 'A:/standalone', '--target', 'next', '--json'], 'start'],
+    ['status', ['ui', 'status', sessionId, '--json'], 'status'],
+    ['finish', ['ui', 'finish', sessionId, '--verdict', 'pass', '--summary', 'looks correct', '--json'], 'finish'],
+    ['abort', ['ui', 'abort', sessionId, '--json'], 'abort'],
+  ] as const)('prints exactly one JSON document and suppresses incidental %s progress', async (_label, argv, operation) => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    const expected = operation === 'finish' ? uiResult() : operation === 'abort' ? uiView('aborted', { cleanup: 'pass' }) : uiView()
+    vi.mocked(startUiSession).mockImplementation(async () => { console.log('start progress'); return uiView() })
+    vi.mocked(getUiSessionStatus).mockImplementation(() => { console.log('status progress'); return uiView() })
+    vi.mocked(finishUiSession).mockImplementation(async () => { console.log('finish progress'); return uiResult() })
+    vi.mocked(abortUiSession).mockImplementation(async () => { console.log('abort progress'); return uiView('aborted', { cleanup: 'pass' }) })
+
+    expect(await runCli([...argv])).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    expect(JSON.parse(output.logs[0]!)).toEqual(expected)
+  })
+
+  it('maps valid non-pass states and a recorded fail verdict to exit 2', async () => {
+    captureConsole()
+    vi.mocked(getUiSessionStatus)
+      .mockReturnValueOnce(uiView('starting'))
+      .mockReturnValueOnce(uiView('crashed', { error: 'child exited' }))
+      .mockReturnValueOnce(uiView('ready', { stale: true, staleReasons: ['plugin-changed'] }))
+    vi.mocked(finishUiSession).mockResolvedValue(uiResult('fail'))
+
+    expect(await runCli(['ui', 'status', sessionId])).toBe(2)
+    expect(await runCli(['ui', 'status', sessionId])).toBe(2)
+    expect(await runCli(['ui', 'status', sessionId])).toBe(2)
+    expect(await runCli(['ui', 'finish', sessionId, '--verdict', 'fail', '--summary', 'layout is broken'])).toBe(2)
+  })
+
+  it('keeps human output concise and includes stale remediation', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    vi.mocked(startUiSession).mockResolvedValue(uiView())
+    vi.mocked(getUiSessionStatus).mockReturnValue(uiView('ready', {
+      stale: true,
+      staleReasons: ['context-changed'],
+    }))
+    vi.mocked(finishUiSession).mockResolvedValue(uiResult())
+    vi.mocked(abortUiSession).mockResolvedValue(uiView('aborted', { cleanup: 'pass' }))
+
+    await runCli(['ui', 'start', 'demo', '--target', 'next'])
+    await runCli(['ui', 'status', sessionId])
+    await runCli(['ui', 'finish', sessionId, '--verdict', 'pass', '--summary', 'looks correct'])
+    await runCli(['ui', 'abort', sessionId])
+
+    const text = output.logs.join('\n')
+    expect(text).toContain(sessionId)
+    expect(text).toContain('http://127.0.0.1:49152')
+    expect(text).toMatch(/ready/i)
+    expect(text).toMatch(/stale[\s\S]*(?:abort|start.*new|restart)/i)
+    expect(text).toMatch(/pass[\s\S]*(?:evidence|result)/i)
+    expect(text).toMatch(/aborted/i)
+  })
+
+  it.each(([
+    ['ui'],
+    ['ui', 'wat'],
+    ['ui', 'start'],
+    ['ui', 'start', 'demo'],
+    ['ui', 'start', 'demo', '--target'],
+    ['ui', 'start', 'demo', '--target', 'all'],
+    ['ui', 'start', 'demo', '--target', 'next', '--target', 'master'],
+    ['ui', 'start', 'demo', '--target', 'next', '--json', '--json'],
+    ['ui', 'start', 'demo', '--path', 'A:/standalone', '--target', 'next'],
+    ['ui', 'start', 'demo', '--target', 'next', '--wat'],
+    ['ui', 'status'],
+    ['ui', 'status', '../escape'],
+    ['ui', 'status', sessionId, '--json', '--json'],
+    ['ui', 'status', sessionId, '--wat'],
+    ['ui', 'finish', sessionId],
+    ['ui', 'finish', sessionId, '--verdict', 'maybe', '--summary', 'x'],
+    ['ui', 'finish', sessionId, '--verdict', 'pass'],
+    ['ui', 'finish', sessionId, '--verdict', 'pass', '--verdict', 'fail', '--summary', 'x'],
+    ['ui', 'finish', sessionId, '--verdict', 'pass', '--summary', 'x', '--summary', 'y'],
+    ['ui', 'finish', sessionId, '--verdict', 'pass', '--summary', 'x', '--wat'],
+    ['ui', 'abort'],
+    ['ui', 'abort', '../escape'],
+    ['ui', 'abort', sessionId, '--json', '--json'],
+    ['ui', 'abort', sessionId, '--wat'],
+  ] as string[][]).map(argv => ({ argv })))('rejects invalid or ambiguous UI grammar without service invocation: $argv', async ({ argv }) => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+
+    expect(await runCli(argv)).toBe(1)
+    expect(output.errors.join('\n')).toMatch(/error|usage/i)
+    expect(startUiSession).not.toHaveBeenCalled()
+    expect(getUiSessionStatus).not.toHaveBeenCalled()
+    expect(finishUiSession).not.toHaveBeenCalled()
+    expect(abortUiSession).not.toHaveBeenCalled()
+  })
+
+  it('maps protocol failures to exit 1 and keeps diagnostics off stdout', async () => {
+    const output = captureConsole()
+    vi.mocked(getUiSessionStatus).mockImplementation(() => { throw new Error('unknown UI session') })
+
+    expect(await runCli(['ui', 'status', sessionId, '--json'])).toBe(1)
+    expect(output.logs).toEqual([])
+    expect(output.errors.join('\n')).toContain('unknown UI session')
+  })
+
+  it('does not overload verify with a --ui flag', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+
+    expect(await runCli(['verify', '--path', 'A:/standalone', '--target', 'next', '--ui'])).toBe(1)
+    expect(output.errors.join('\n')).toMatch(/unknown verify flag.*--ui/i)
+    expect(verifyPlugin).not.toHaveBeenCalled()
   })
 })
