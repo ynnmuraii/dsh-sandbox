@@ -111,12 +111,14 @@ export function writeUiSessionRequest(opts: { runtimeRoot: string; sessionId: st
   return requestPath
 }
 
-export function readUiSession(opts: { runtimeRoot: string; sessionId: string }): UiSessionStateV1 {
+export function readUiSession(opts: { runtimeRoot: string; sessionId: string; beforeStateOpen?: (statePath: string) => void }): UiSessionStateV1 {
   assertSessionId(opts.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
-  const parsed = readJsonRegular(paths.statePath, 'UI session state')
+  const sessionIdentity = directoryIdentity(paths.sessionDir)
+  const parsed = readJsonRegular(paths.statePath, 'UI session state', opts.beforeStateOpen)
+  assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   try {
     validateState(parsed)
   } catch (error) {
@@ -214,13 +216,15 @@ export function writeUiControl(opts: {
   }
 }
 
-export function readUiControl(opts: { runtimeRoot: string; sessionId: string }): UiControlV1 | undefined {
+export function readUiControl(opts: { runtimeRoot: string; sessionId: string; beforeControlOpen?: (controlPath: string) => void }): UiControlV1 | undefined {
   assertSessionId(opts.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
+  const sessionIdentity = directoryIdentity(paths.sessionDir)
   if (existingEntry(paths.controlPath) === undefined) return undefined
-  const parsed = readJsonRegular(paths.controlPath, 'UI control')
+  const parsed = readJsonRegular(paths.controlPath, 'UI control', opts.beforeControlOpen)
+  assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   try { validateControl(parsed) } catch (error) { throw corruption(paths.controlPath, error) }
   return parsed
 }
@@ -562,13 +566,17 @@ function writeExclusiveRegular(path: string, contents: string): void {
   const descriptor = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag(), 0o600)
   try { writeFileSync(descriptor, contents, 'utf8') } finally { closeSync(descriptor) }
 }
-function readJsonRegular(path: string, label: string): any {
+function readJsonRegular(path: string, label: string, beforeOpen?: (path: string) => void): any {
   const entry = existingEntry(path)
   if (entry === undefined) throw new Error(`${label} not found at ${path}`)
   if (entry.isSymbolicLink() || !entry.isFile()) throw new Error(`${label} at ${path} is not a regular file`)
+  const expected = { dev: entry.dev, ino: entry.ino }
+  beforeOpen?.(path)
   const descriptor = openSync(path, constants.O_RDONLY | noFollowFlag())
   try {
-    if (!fstatSync(descriptor).isFile()) throw new Error(`${label} at ${path} is not a regular file`)
+    const stat = fstatSync(descriptor)
+    if (!stat.isFile()) throw new Error(`${label} at ${path} is not a regular file`)
+    if (stat.dev !== expected.dev || stat.ino !== expected.ino) throw new Error(`${label} identity changed or file was replaced at ${path}`)
     try { return JSON.parse(readFileSync(descriptor, 'utf8')) } catch (error) { throw corruption(path, error) }
   } finally { closeSync(descriptor) }
 }

@@ -6,7 +6,7 @@ import { inspectPlugin } from './inspect.js'
 import type { PluginRef } from './plugin-ref.js'
 import { computePluginDigest } from './plugin-snapshot.js'
 import { ROOT_PATHS, rootPath } from './context.js'
-import { CompatibilityError, loadCompatibilityFromFile, type Compatibility } from './schemas.js'
+import { CompatibilityError, loadCompatibilityFromFile, loadTargetPinFromFile, type Compatibility } from './schemas.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
 import {
   createOwnedUiSession,
@@ -370,14 +370,15 @@ function captureCurrentIdentity(root: string, state: UiSessionStateV1): Captured
   let plugin: UiSessionStateV1['plugin'] = { ...state.plugin, sourcePath: resolve(state.plugin.sourcePath) }
   try {
     plugin = { ...plugin, digest: computePluginDigest(plugin.sourcePath).digest }
-  } catch {
-    unavailableReasons.push('plugin-changed')
+  } catch (error) {
+    if (isMissingPathError(error)) unavailableReasons.push('plugin-changed')
+    else throw error
   }
   let target = state.target
   try {
     target = currentTargetIdentity(root, state.target.name)
   } catch (error) {
-    if (error instanceof CompatibilityError && /compatibility manifest requires both next and master targets/i.test(error.message)) unavailableReasons.push('target-changed')
+    if (error instanceof CompatibilityError && /compatibility manifest (?:requires both next and master targets|missing target)/i.test(error.message)) unavailableReasons.push('target-changed')
     else throw error
   }
   return {
@@ -390,7 +391,8 @@ function captureCurrentIdentity(root: string, state: UiSessionStateV1): Captured
 }
 
 function currentTargetIdentity(root: string, target: 'next' | 'master'): UiTargetIdentity {
-  return targetIdentityFromCompatibility(loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility)), target)
+  const pin = loadTargetPinFromFile(rootPath(root, ROOT_PATHS.compatibility), target)
+  return target === 'next' ? { name: 'next', dsh: pin.dsh! } : { name: 'master', commit: pin.commit! }
 }
 
 function targetIdentityFromCompatibility(compatibility: Compatibility, target: 'next' | 'master'): UiTargetIdentity {
@@ -470,6 +472,9 @@ async function waitForTerminal(opts: {
 
 function isRegularFile(path: string): boolean {
   try { const stat = lstatSync(path); return stat.isFile() && !stat.isSymbolicLink() } catch { return false }
+}
+function isMissingPathError(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT'
 }
 function validateRootAndTarget(root: string, target: 'next' | 'master'): void {
   if (typeof root !== 'string' || !root.trim()) throw new Error('root must be a non-empty path')

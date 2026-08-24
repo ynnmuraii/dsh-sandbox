@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 import {
+  constants,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
+  closeSync,
 } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { ROOT_PATHS, rootPath } from './context.js'
@@ -18,6 +22,8 @@ export interface UiSupervisorBinDependencies {
   stderr(message: string): void
   now(): string
   beforeFailureWrite?(): void
+  beforeRequestOpen?(path: string): void
+  afterRequestRead?(path: string): void
 }
 
 export async function runSupervisorBin(
@@ -30,7 +36,7 @@ export async function runSupervisorBin(
   try {
     if (argv.length !== 1 || !argv[0] || argv[0].startsWith('-')) throw new Error('usage: ui-supervisor-bin <request-file>')
     const requestPath = resolve(argv[0])
-    const parsed = JSON.parse(readRegular(requestPath)) as unknown
+    const parsed = JSON.parse(readRegular(requestPath, deps.beforeRequestOpen, deps.afterRequestRead)) as unknown
     validateUiSupervisorRequest(parsed)
     request = parsed
     const root = resolve(request.root)
@@ -56,10 +62,26 @@ export async function runSupervisorBin(
   }
 }
 
-function readRegular(path: string): string {
+function readRegular(path: string, beforeOpen?: (path: string) => void, afterRead?: (path: string) => void): string {
   const entry = lstatSync(path)
   if (entry.isSymbolicLink() || !entry.isFile()) throw new Error(`request file is not a regular file: ${path}`)
-  return readFileSync(path, 'utf8')
+  const parent = lstatSync(resolve(path, '..'))
+  beforeOpen?.(path)
+  const descriptor = openSync(path, constants.O_RDONLY | ((constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0))
+  let contents: string
+  try {
+    const current = fstatSync(descriptor)
+    if (!current.isFile() || current.dev !== entry.dev || current.ino !== entry.ino) throw new Error(`request file identity changed or was replaced: ${path}`)
+    const currentParent = lstatSync(resolve(path, '..'))
+    if (currentParent.dev !== parent.dev || currentParent.ino !== parent.ino) throw new Error(`request parent identity changed: ${path}`)
+    contents = readFileSync(descriptor, 'utf8')
+  } finally { closeSync(descriptor) }
+  afterRead?.(path)
+  const afterParent = lstatSync(resolve(path, '..'))
+  if (afterParent.dev !== parent.dev || afterParent.ino !== parent.ino) throw new Error(`request parent identity changed: ${path}`)
+  const afterEntry = lstatSync(path)
+  if (afterEntry.dev !== entry.dev || afterEntry.ino !== entry.ino) throw new Error(`request file identity changed after read: ${path}`)
+  return contents
 }
 
 function defaultDependencies(): UiSupervisorBinDependencies {

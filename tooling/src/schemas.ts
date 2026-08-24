@@ -120,6 +120,17 @@ export function loadCompatibilityFromFile(path: string): Compatibility {
   return loadCompatibility(readFileSync(path, 'utf8'))
 }
 
+export function loadTargetPinFromFile(path: string, target: 'next' | 'master'): TargetPin {
+  const raw = parseYaml(readFileSync(path, 'utf8'), 'compatibility manifest') as { targets?: Record<string, TargetPin> }
+  const pin = raw?.targets?.[target]
+  if (pin === undefined || pin === null || typeof pin !== 'object') {
+    throw new CompatibilityError(`compatibility manifest missing target '${target}'`)
+  }
+  assertPin(target, pin)
+  normalizeAllowBuilds(pin, target)
+  return pin
+}
+
 export function loadCatalog(text: string): Catalog {
   const raw = parseYaml(text, 'catalog') as Catalog
   if (!raw?.plugins || typeof raw.plugins !== 'object') {

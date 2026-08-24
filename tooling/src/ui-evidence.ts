@@ -1,4 +1,4 @@
-import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { pluginEvidenceKey } from './evidence.js'
 
@@ -93,6 +93,7 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
   }
 
   let temporaryCreated = false
+  let temporaryIdentity: FileIdentity | undefined
   let committed = false
   let primaryError: unknown
   try {
@@ -115,10 +116,11 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
     try {
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
-      temporaryCreated = true
       opts.beforeTemporaryWrite?.(temporaryPath)
       assertDirectoryIdentity(sessionDirectory, sessionIdentity)
       writeTemporaryNoFollow(temporaryPath, `${JSON.stringify(result, null, 2)}\n`)
+      temporaryIdentity = captureFileIdentity(temporaryPath)
+      temporaryCreated = true
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
       opts.beforeFinalize?.(finalPath)
@@ -155,7 +157,7 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
       assertDirectoryIdentity(sessionDirectory, sessionIdentity)
     } catch (error) {
       primaryError = error
-      if (temporaryCreated && sameDirectoryIdentity(sessionDirectory, sessionIdentity)) removeTemporary(opts.uiRunsRoot, sessionDirectory, temporaryPath, sessionIdentity)
+      if (temporaryCreated && temporaryIdentity !== undefined && sameDirectoryIdentity(sessionDirectory, sessionIdentity)) removeTemporary(opts.uiRunsRoot, sessionDirectory, temporaryPath, sessionIdentity, temporaryIdentity)
       throw error
     }
     return finalPath
@@ -173,6 +175,7 @@ export function loadUiResults(opts: {
   pluginKey: string
   beforeResultRead?: (resultPath: string) => void
   afterResultRead?: (resultPath: string) => void
+  afterPluginEnumeration?: (pluginRoot: string) => void
 }): UiResultV1[] {
   if (!isNonEmptyString(opts.uiRunsRoot)) throw new Error('uiRunsRoot must be a non-empty string')
   validatePluginKey(opts.pluginKey)
@@ -187,6 +190,9 @@ export function loadUiResults(opts: {
   } catch (error) {
     throw corruptionError(pluginRoot, error)
   }
+  const pluginIdentity = captureDirectoryIdentity(pluginRoot)
+  opts.afterPluginEnumeration?.(pluginRoot)
+  assertDirectoryIdentity(pluginRoot, pluginIdentity)
 
   const results: UiResultV1[] = []
   for (const entry of entries) {
@@ -455,12 +461,13 @@ function compareCodePointStrings(left: string, right: string): number {
   return leftPoints.length === rightPoints.length ? 0 : leftPoints.length < rightPoints.length ? -1 : 1
 }
 
-function removeTemporary(uiRunsRoot: string, sessionDirectory: string, path: string, sessionIdentity: DirectoryIdentity): void {
+function removeTemporary(uiRunsRoot: string, sessionDirectory: string, path: string, sessionIdentity: DirectoryIdentity, expectedFile: FileIdentity): void {
   try {
     assertDirectoryIdentity(sessionDirectory, sessionIdentity)
     assertSafeUiPath(uiRunsRoot, sessionDirectory, 'session evidence directory')
     assertDirectoryEntry(sessionDirectory, 'session evidence directory')
-    rmSync(path, { force: true })
+    assertFileIdentity(path, expectedFile)
+    unlinkSync(path)
   } catch { /* preserve the publication error */ }
 }
 
