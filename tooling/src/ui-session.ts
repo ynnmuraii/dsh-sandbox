@@ -141,12 +141,18 @@ export function writeUiSession(opts: {
   writeAtomic(paths.statePath, JSON.stringify(state, null, 2) + '\n', true)
 }
 
-export function writeUiControl(opts: { runtimeRoot: string; sessionId: string; control: UiControlV1 }): void {
+export function writeUiControl(opts: {
+  runtimeRoot: string
+  sessionId: string
+  control: UiControlV1
+  beforeControlLink?: (controlPath: string) => void
+}): void {
   validateControl(opts.control)
   assertSessionId(opts.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
+  const sessionIdentity = directoryIdentity(paths.sessionDir)
   const existing = existingEntry(paths.controlPath)
   if (existing !== undefined) {
     // Validate an existing pending file before reporting the replacement
@@ -160,6 +166,8 @@ export function writeUiControl(opts: { runtimeRoot: string; sessionId: string; c
   try {
     assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
     assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
+    opts.beforeControlLink?.(paths.controlPath)
+    assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
     try {
       linkSync(temporaryPath, paths.controlPath)
     } catch (error) {
@@ -182,16 +190,23 @@ export function readUiControl(opts: { runtimeRoot: string; sessionId: string }):
   return parsed
 }
 
-export function clearUiControl(opts: { runtimeRoot: string; sessionId: string }): void {
+export function clearUiControl(opts: {
+  runtimeRoot: string
+  sessionId: string
+  beforeControlUnlink?: (controlPath: string) => void
+}): void {
   assertSessionId(opts.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
+  const sessionIdentity = directoryIdentity(paths.sessionDir)
   const entry = existingEntry(paths.controlPath)
   if (entry === undefined) return
   // Parse and validate before unlinking so corrupt controls remain available
   // for diagnosis instead of being silently discarded.
   readUiControl(opts)
+  opts.beforeControlUnlink?.(paths.controlPath)
+  assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   unlinkSync(paths.controlPath)
 }
 

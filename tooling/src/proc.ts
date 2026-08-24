@@ -1,6 +1,7 @@
-import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { readFileSync, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { defaultProcessTreeDependencies, stopOwnedProcessTree, type OwnedProcessTreeHandle } from './process-tree.js'
 
 export interface RunOpts {
   cwd?: string
@@ -90,6 +91,7 @@ export function pnpmAsync(args: string[], opts: AsyncRunOpts): Promise<Buffer | 
 
   let settled = false
   let aborting = false
+  let leaderExited = false
   let rejectRun!: (error: unknown) => void
   let resolveRun!: (value: Buffer | string) => void
   const result = new Promise<Buffer | string>((resolvePromise, rejectPromise) => {
@@ -107,10 +109,13 @@ export function pnpmAsync(args: string[], opts: AsyncRunOpts): Promise<Buffer | 
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolveClosed => {
     child.once('close', (code, closeSignal) => resolveClosed({ code, signal: closeSignal }))
   })
+  child.once('exit', () => { leaderExited = true })
   child.once('error', error => {
+    leaderExited = true
     if (!aborting) finish(error)
   })
   child.once('close', (code, closeSignal) => {
+    leaderExited = true
     if (aborting) return
     if (code !== 0) {
       const detail = Buffer.concat(stderr).toString('utf8').trim()
@@ -122,7 +127,7 @@ export function pnpmAsync(args: string[], opts: AsyncRunOpts): Promise<Buffer | 
   const onAbort = (): void => {
     if (settled || aborting) return
     aborting = true
-    void stopProcessTree(child, closed).then(
+    void stopProcessTree(child, closed, () => leaderExited).then(
       () => finish(abortError()),
       error => finish(error),
     )
@@ -132,43 +137,11 @@ export function pnpmAsync(args: string[], opts: AsyncRunOpts): Promise<Buffer | 
   return result
 }
 
-async function stopProcessTree(child: ChildProcess, closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>): Promise<void> {
+async function stopProcessTree(child: ChildProcess, closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>, leaderExited: () => boolean): Promise<void> {
   const pid = child.pid
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) throw new Error('pnpm process did not provide a valid PID')
-  const ownedPid = pid
-  if (process.platform === 'win32') {
-    await new Promise<void>((resolvePromise, rejectPromise) => {
-      execFile('taskkill.exe', ['/PID', String(ownedPid), '/T', '/F'], { windowsHide: true }, error => error ? rejectPromise(error) : resolvePromise())
-    })
-    await waitForChildClose(closed, 5_000)
-    if (processAlive(ownedPid)) throw new Error('pnpm Windows process tree remained alive after abort')
-    return
-  }
-  signalProcessGroup(ownedPid, 'SIGTERM')
-  if (await waitForChildClose(closed, 5_000) && !processGroupAlive(ownedPid)) return
-  signalProcessGroup(ownedPid, 'SIGKILL')
-  if (!await waitForChildClose(closed, 5_000) || processGroupAlive(ownedPid)) throw new Error('pnpm POSIX process group remained alive after abort')
-}
-
-function waitForChildClose(closed: Promise<unknown>, timeoutMs: number): Promise<boolean> {
-  return Promise.race([
-    closed.then(() => true),
-    new Promise<boolean>(resolvePromise => setTimeout(() => resolvePromise(false), timeoutMs)),
-  ])
-}
-
-function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
-  try { process.kill(-pid, signal) } catch (error) {
-    if (!(error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ESRCH')) throw error
-  }
-}
-
-function processGroupAlive(pid: number): boolean {
-  try { process.kill(-pid, 0); return true } catch { return false }
-}
-
-function processAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true } catch { return false }
+  const tree: OwnedProcessTreeHandle = { pid, exited: closed, leaderExited }
+  await stopOwnedProcessTree(tree, defaultProcessTreeDependencies())
 }
 
 function abortError(): Error {

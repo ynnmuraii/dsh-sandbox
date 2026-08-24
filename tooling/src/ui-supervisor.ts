@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import {
   constants,
   closeSync,
@@ -8,7 +8,6 @@ import {
   lstatSync,
   openSync,
   writeSync,
-  rmSync,
 } from 'node:fs'
 import { join, relative, resolve, sep, isAbsolute, parse } from 'node:path'
 import { ROOT_PATHS, rootPath } from './context.js'
@@ -28,6 +27,13 @@ import {
 } from './ui-runtime.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
 import { claimOwnedUiDirectory } from './ui-owned-directory.js'
+import {
+  defaultProcessTreeDependencies,
+  stopOwnedProcessTree,
+  type ProcessTreeDependencies,
+} from './process-tree.js'
+
+export { posixProcessGroup, windowsTreeKillArgs } from './process-tree.js'
 
 export interface UiSupervisorRequestV1 {
   schemaVersion: 1
@@ -48,6 +54,7 @@ export interface UiChildHandle {
   stdout: NodeJS.ReadableStream
   stderr: NodeJS.ReadableStream
   exited: Promise<UiChildExit>
+  leaderExited(): boolean
 }
 
 export interface UiSupervisorDependencies {
@@ -66,14 +73,8 @@ export interface UiDiagnosticLog {
   close(): void
 }
 
-export interface UiProcessTreeDependencies {
-  platform: 'windows' | 'posix'
-  taskkill(args: string[]): Promise<void>
-  signalGroup(group: number, signal: 'SIGTERM' | 'SIGKILL'): void
-  waitForExit(exited: Promise<UiChildExit>, timeoutMs: number): Promise<boolean>
-  termGraceMs: number
-  killGraceMs: number
-  treeAlive?: (pid: number) => boolean
+export type UiProcessTreeDependencies = Omit<ProcessTreeDependencies, 'treeAlive'> & {
+  treeAlive?: (pidOrGroup: number) => boolean
 }
 
 const SESSION_ID = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
@@ -88,16 +89,6 @@ export function parseDshReadyUrl(line: string): string | undefined {
   if (!validPort(port)) return undefined
   if (match[3] !== undefined && !validLanUrl(match[3])) return undefined
   return match[1]
-}
-
-export function windowsTreeKillArgs(pid: number): string[] {
-  assertPid(pid)
-  return ['/PID', String(pid), '/T', '/F']
-}
-
-export function posixProcessGroup(pid: number): number {
-  assertPid(pid)
-  return -pid
 }
 
 export async function runUiSupervisor(
@@ -509,23 +500,10 @@ function nextTimestamp(candidate: string, previous: string): string {
 function cleanupSessionDescendants(sessionDir: string): void {
   const home = join(sessionDir, 'home')
   const overlay = join(sessionDir, 'overlay')
-  const log = join(sessionDir, 'supervisor.log')
   const owned = claimOwnedUiDirectory({ root: resolve(sessionDir, '..', '..'), directory: sessionDir })
   if (existsSync(home)) owned.removeDirectoryLeaf('home')
   if (existsSync(overlay)) owned.removeDirectoryLeaf('overlay')
-  removeContained(log, sessionDir, false)
-}
-
-function removeContained(path: string, root: string, recursive: boolean): void {
-  assertContained(root, path, 'runtime descendant')
-  assertNoSymlinkComponents(root, 'runtime root')
-  assertNoSymlinkComponents(path, 'runtime descendant')
-  if (!existsSync(path)) return
-  const stat = lstatSync(path)
-  if (stat.isSymbolicLink()) throw new Error(`refusing to remove symlink at ${path}`)
-  if (recursive && !stat.isDirectory()) throw new Error(`expected directory at ${path}`)
-  if (!recursive && !stat.isFile()) throw new Error(`expected regular file at ${path}`)
-  rmSync(path, { recursive, force: false })
+  owned.removeFileLeaf('supervisor.log')
 }
 
 export function openBoundedSupervisorLog(sessionDir: string, maxBytes: number): UiDiagnosticLog {
@@ -603,63 +581,26 @@ function spawnRuntimeChild(plan: UiRuntimePlan): UiChildHandle {
   })
   const pid = processChild.pid
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 || !processChild.stdout || !processChild.stderr) throw new Error('DSH child did not provide an owned process handle')
+  let leaderExited = false
   const exited = new Promise<UiChildExit>((resolveExit, rejectExit) => {
-    processChild.once('error', rejectExit)
-    processChild.once('close', (code, signal) => resolveExit({ code, signal }))
+    processChild.once('exit', () => { leaderExited = true })
+    processChild.once('error', error => {
+      leaderExited = true
+      rejectExit(error)
+    })
+    processChild.once('close', (code, signal) => {
+      leaderExited = true
+      resolveExit({ code, signal })
+    })
   })
-  return { pid, stdout: processChild.stdout, stderr: processChild.stderr, exited }
+  return { pid, stdout: processChild.stdout, stderr: processChild.stderr, exited, leaderExited: () => leaderExited }
 }
 
 export async function stopOwnedChildTree(
   child: UiChildHandle,
   deps: UiProcessTreeDependencies = defaultProcessTreeDependencies(),
 ): Promise<void> {
-  assertPid(child.pid)
-  const treeAlive = deps.treeAlive
-  if (deps.platform === 'windows') {
-    await deps.taskkill(windowsTreeKillArgs(child.pid))
-    if (!await deps.waitForExit(child.exited, deps.termGraceMs) || treeAlive?.(child.pid)) throw new Error('owned Windows child tree did not close after taskkill')
-    return
-  }
-  const group = posixProcessGroup(child.pid)
-  deps.signalGroup(group, 'SIGTERM')
-  if (await deps.waitForExit(child.exited, deps.termGraceMs) && (treeAlive === undefined || !treeAlive(group))) return
-  deps.signalGroup(group, 'SIGKILL')
-  if (!await deps.waitForExit(child.exited, deps.killGraceMs) || treeAlive?.(group)) throw new Error('owned POSIX process group did not close after SIGKILL')
-}
-
-function defaultProcessTreeDependencies(): UiProcessTreeDependencies {
-  const platform = process.platform === 'win32' ? 'windows' : 'posix'
-  return {
-    platform,
-    taskkill: args => new Promise<void>((resolvePromise, reject) => {
-      execFile('taskkill.exe', args, { windowsHide: true }, error => error ? reject(error) : resolvePromise())
-    }),
-    signalGroup: (group, signal) => {
-      try { process.kill(group, signal) } catch (error) {
-        if (!(error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ESRCH')) throw error
-      }
-    },
-    waitForExit: waitForExitWithin,
-    treeAlive: pidOrGroup => {
-      try { process.kill(pidOrGroup, 0); return true } catch { return false }
-    },
-    termGraceMs: 5_000,
-    killGraceMs: 5_000,
-  }
-}
-
-async function waitForExitWithin(exited: Promise<UiChildExit>, timeoutMs: number): Promise<boolean> {
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 0) throw new Error('process-tree timeout must be a non-negative integer')
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<boolean>(resolveTimeout => {
-    timer = setTimeout(() => resolveTimeout(false), timeoutMs)
-  })
-  try {
-    return await Promise.race([exited.then(() => true), timeout])
-  } finally {
-    if (timer !== undefined) clearTimeout(timer)
-  }
+  return stopOwnedProcessTree(child, { ...deps, treeAlive: deps.treeAlive ?? (() => false) })
 }
 
 export function validateUiSupervisorRequest(value: unknown): asserts value is UiSupervisorRequestV1 {

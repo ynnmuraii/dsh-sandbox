@@ -1,4 +1,4 @@
-import { lstatSync, renameSync, rmSync } from 'node:fs'
+import { lstatSync, renameSync, rmSync, unlinkSync } from 'node:fs'
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 
 export interface UiDirectoryIdentity {
@@ -7,7 +7,7 @@ export interface UiDirectoryIdentity {
 }
 
 export interface OwnedUiDirectoryHooks {
-  beforeMutation?(operation: 'quarantine' | 'remove', path: string): void
+  beforeMutation?(operation: 'quarantine' | 'remove' | 'remove-file', path: string): void
   afterQuarantine?(path: string): void
 }
 
@@ -20,6 +20,7 @@ export interface ClaimOwnedUiDirectoryOptions {
 
 export interface OwnedUiDirectory {
   removeDirectoryLeaf(name: string): void
+  removeFileLeaf(name: string): void
 }
 
 export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): OwnedUiDirectory {
@@ -71,6 +72,22 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
         throw error
       }
     },
+    removeFileLeaf(name: string): void {
+      if (!isSingleComponent(name)) throw new Error(`unsafe owned UI directory leaf ${JSON.stringify(name)}`)
+      assertAnchors()
+      const leaf = join(directory, name)
+      assertContained(directory, leaf)
+      if (!exists(leaf)) return
+      assertNoSymlinkComponents(leaf, 'owned UI file leaf')
+      const leafAnchor = identify(leaf)
+      if (leafAnchor === undefined) throw new Error(`stable identity unavailable for owned UI file leaf ${leaf}`)
+      assertRegularFileLeaf(leaf, 'owned UI file leaf')
+      opts.hooks?.beforeMutation?.('remove-file', leaf)
+      assertAnchors()
+      assertIdentity(leaf, leafAnchor, `owned UI file leaf ${leaf} changed before removal`, identify)
+      assertRegularFileLeaf(leaf, 'owned UI file leaf')
+      unlinkSync(leaf)
+    },
   }
 }
 
@@ -93,6 +110,11 @@ function assertIdentity(path: string, expected: UiDirectoryIdentity | undefined,
 function assertDirectory(path: string, label: string): void {
   const stat = lstatSync(path)
   if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`${label} is not a regular directory at ${path}`)
+}
+
+function assertRegularFileLeaf(path: string, label: string): void {
+  const stat = lstatSync(path)
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) throw new Error(`${label} is not a unique regular file at ${path}`)
 }
 
 function assertContained(root: string, candidate: string): void {
