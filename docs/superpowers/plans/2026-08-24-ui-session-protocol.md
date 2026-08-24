@@ -534,11 +534,12 @@ export interface UiServiceDependencies {
 
 export interface UiSupervisorSpawnPlan {
   command: string
-  args: [string, string]
+  args: string[]
   options: { detached: true; shell: false; stdio: 'ignore'; windowsHide: true }
 }
 
 export function buildUiSupervisorSpawn(requestPath: string): UiSupervisorSpawnPlan
+export function writeUiSessionRequest(opts: { runtimeRoot: string; sessionId: string; request: unknown }): string
 
 export async function startUiSession(opts: StartUiOptions, deps?: UiServiceDependencies): Promise<UiSessionViewV1>
 export function getUiSessionStatus(
@@ -551,15 +552,15 @@ export async function abortUiSession(opts: AbortUiOptions, deps?: UiServiceDepen
 
 - [ ] **Step 1: Test start validation and readiness wait**
 
-Assert start resolves current plugin/context/target identities and a safe `runtimeName` before launching, rejects invalid inspection/entry/declared target, creates a unique `starting` lease and environment-free request, spawns `process.execPath` with `ui-supervisor-bin` and one request path using `{ detached: true, shell: false, stdio: 'ignore' }`, calls `unref()`, then waits up to 120 seconds for `ready` or `crashed`. Runtime preparation is not called by the CLI process. Inject a 10 ms timeout and assert cleanup is requested and awaited.
+Assert start resolves current plugin/context/target identities and a safe `runtimeName` before launching, rejects invalid inspection/entry/declared target, creates a unique `starting` lease and environment-free request, and writes `request.json` only through the validated session store. Spawn `process.execPath` with `ui-supervisor-bin` and one request path using `{ detached: true, shell: false, stdio: 'ignore' }`; when the bin is a TypeScript source file, include the resolved `tsx` loader. Call `unref()`, then wait up to 120 seconds for `ready` or `crashed`. Use the injected monotonic wall-clock seam for `startedAt`, deadlines, and terminal timestamps. At the deadline, re-read state before cleanup so readiness exactly on the boundary wins. Runtime preparation is not called by the CLI process. Inject a 10 ms timeout and assert cleanup is requested and awaited. Assert spawn failure becomes a visible `crashed` lease with failed cleanup rather than leaving `starting` behind.
 
 - [ ] **Step 2: Test bounded session status and stale latching**
 
-Assert status computes `plugin-changed`, `context-changed`, and `target-changed`, writes only when it must latch a newly observed reason, never creates unknown sessions, reports a dead supervisor as orphaned/crashed without calling a PID killer, and returns the URL only for a current ready lease.
+Assert status computes `plugin-changed`, `context-changed`, and `target-changed`, comparing target identity structurally rather than by JSON key insertion order. It writes only when it must latch a newly observed reason, never creates unknown sessions, reports either a dead supervisor or dead child as orphaned/crashed without calling a PID killer, and returns the URL only for a current ready lease with both processes alive.
 
 - [ ] **Step 3: Test finish rules and publication order**
 
-Assert pass is allowed only after readiness; fail is allowed after ready or crash; summary validation happens before control; stale sessions publish nothing; cleaned `stopping` with `cleanup: 'pass'` is awaited before `publishUiResult`; pass/fail evidence has the captured identities and `cleanup: 'pass'`; the service writes compact `finished` only after publication. Assert a publication failure leaves a diagnosable cleaned `stopping` lease and an existing finalized result can never be replaced.
+Assert pass is allowed only after readiness; fail is allowed after ready or crash; neither verdict may be claimed by a second caller that observes `stopping`. Summary validation happens before control; stale sessions publish nothing; cleaned `stopping` with `cleanup: 'pass'` is awaited only by the caller that owns the finish operation. Recompute identities after cleanup and immediately before immutable publication; late drift latches stale and publishes nothing. Pass/fail evidence has the captured identities and `cleanup: 'pass'`; the service writes compact `finished` only after publication. Assert a publication failure leaves a diagnosable cleaned `stopping` lease and an existing finalized result can never be replaced.
 
 - [ ] **Step 4: Test abort rules**
 
@@ -589,11 +590,11 @@ Use `computePluginDigest`, the canonical context hash, and parsed compatibility 
 
 - [ ] **Step 2: Implement detached start and bounded waits**
 
-Serialize a validated request under the session directory, start the supervisor bin without a shell, unref it, and poll atomic state. On timeout write abort control, await cleanup, and return a tooling error with the session ID and exact runtime path.
+Serialize a validated request through the session-store API, start the supervisor bin without a shell, load `tsx` when executing a TypeScript supervisor source, unref it, and poll atomic state using the injected clock. Re-read state at the timeout boundary before requesting cleanup. On timeout write abort control, await cleanup, and return a tooling error with the session ID and exact runtime path. Preserve a visible crashed lease on spawn failure.
 
 - [ ] **Step 3: Implement finish and abort**
 
-Validate before mutating, write one atomic control request, wait for cleaned `stopping`, publish only after cleanup, then write compact `finished`. Abort waits for compact `aborted` and never publishes. Preserve immutable evidence semantics and never infer a verdict from logs or browser state.
+Validate before mutating, reject competing finish callers that observe `stopping`, write one atomic control request, and let only that operation owner wait for cleaned `stopping`. Recheck structured plugin/context/target identities after cleanup, publish only when still current, then write compact `finished`. Abort waits for compact `aborted` and never publishes. Keep lifecycle transitions narrow—active sessions reach `aborted` only through `stopping`. Preserve immutable evidence semantics and never infer a verdict from logs or browser state.
 
 - [ ] **Step 4: Run tests and commit production only**
 
