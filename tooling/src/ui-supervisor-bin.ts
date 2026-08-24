@@ -15,7 +15,7 @@ import {
   validateUiSupervisorRequest,
   type UiSupervisorRequestV1,
 } from './ui-supervisor.js'
-import { claimOwnedUiDirectory, type OwnedUiDirectory } from './ui-owned-directory.js'
+import { claimOwnedUiDirectory, type OwnedUiDirectory, type UiDirectoryIdentity } from './ui-owned-directory.js'
 
 export interface UiSupervisorBinDependencies {
   runSupervisor(request: UiSupervisorRequestV1): Promise<void>
@@ -25,6 +25,7 @@ export interface UiSupervisorBinDependencies {
   beforeRequestOpen?(path: string): void
   afterRequestRead?(path: string): void
   beforeSessionOwnerClaim?(path: string): void
+  afterSessionParentRevalidation?(path: string): void
 }
 
 export async function runSupervisorBin(
@@ -51,7 +52,12 @@ export async function runSupervisorBin(
     assertNoSymlinkComponents(sessionDir, 'session directory')
     deps.beforeSessionOwnerClaim?.(sessionDir)
     assertIdentity(resolve(requestPath, '..'), requestRead.parentIdentity, 'request parent identity changed')
-    ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
+    deps.afterSessionParentRevalidation?.(sessionDir)
+    ownedSession = claimOwnedUiDirectory({
+      root: runtimeRoot,
+      directory: sessionDir,
+      expectedIdentity: requestRead.parentIdentity,
+    })
     ownedSession.assertCurrent()
     safeToReport = true
     await deps.runSupervisor(request)
@@ -66,7 +72,7 @@ export async function runSupervisorBin(
   }
 }
 
-interface FileIdentity {
+interface FileIdentity extends UiDirectoryIdentity {
   dev: number
   ino: number
 }

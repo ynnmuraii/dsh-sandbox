@@ -14,6 +14,7 @@ export interface OwnedUiDirectoryHooks {
 export interface ClaimOwnedUiDirectoryOptions {
   root: string
   directory: string
+  expectedIdentity?: UiDirectoryIdentity
   identity?: (path: string) => UiDirectoryIdentity | undefined
   hooks?: OwnedUiDirectoryHooks
 }
@@ -35,6 +36,10 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
   const identify = opts.identity ?? stableIdentity
   const rootAnchor = identify(root)
   const directoryAnchor = identify(directory)
+  if (opts.expectedIdentity !== undefined &&
+      (directoryAnchor === undefined || directoryAnchor.dev !== opts.expectedIdentity.dev || directoryAnchor.ino !== opts.expectedIdentity.ino)) {
+    throw new Error(`owned UI directory identity changed or does not match the retained authority at ${directory}`)
+  }
 
   function assertAnchors(): void {
     assertNoSymlinkComponents(root, 'owned UI directory root')

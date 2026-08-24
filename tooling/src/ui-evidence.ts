@@ -180,6 +180,7 @@ export function loadUiResults(opts: {
   afterResultRead?: (resultPath: string) => void
   beforePluginEnumeration?: (pluginRoot: string) => void
   afterPluginEnumeration?: (pluginRoot: string) => void
+  beforeSessionEvidenceCapture?: (sessionDirectory: string) => void
 }): UiResultV1[] {
   if (!isNonEmptyString(opts.uiRunsRoot)) throw new Error('uiRunsRoot must be a non-empty string')
   validatePluginKey(opts.pluginKey)
@@ -205,6 +206,9 @@ export function loadUiResults(opts: {
   const results: UiResultV1[] = []
   for (const entry of entries) {
     const sessionDirectory = join(pluginRoot, entry.name)
+    assertDirectoryIdentity(pluginRoot, pluginIdentity)
+    opts.beforeSessionEvidenceCapture?.(sessionDirectory)
+    assertDirectoryIdentity(pluginRoot, pluginIdentity)
     let sessionStat
     try {
       sessionStat = lstatSync(sessionDirectory)
@@ -243,6 +247,7 @@ export function loadUiResults(opts: {
       opts.afterResultRead?.(resultPath)
       assertDirectoryIdentity(sessionDirectory, sessionIdentity)
       assertFileIdentity(resultPath, resultIdentity)
+      assertDirectoryIdentity(pluginRoot, pluginIdentity)
     } catch (error) {
       throw corruptionError(resultPath, error)
     }
