@@ -194,6 +194,8 @@ export async function runUiSupervisor(
     while (!done) {
       if (outputFailure !== undefined) await outputFailure
       await deps.sleep(deps.pollIntervalMs)
+      if (outputFailure !== undefined) await outputFailure
+      if (done) break
       const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
       if (state.state === 'finished' || state.state === 'aborted') { done = true; break }
       const control = readUiControl({ runtimeRoot, sessionId: request.sessionId })
@@ -217,6 +219,16 @@ export async function runUiSupervisor(
     done = true
     const message = error instanceof Error ? error.message : String(error)
     try { diagnosticLog?.close() } catch { /* preserve the primary lifecycle error */ }
+    if (child !== undefined && !exitSettled && !stopIssued) {
+      stopIssued = true
+      try {
+        await deps.stopChildTree(child)
+        await child.exited
+        exitSettled = true
+      } catch {
+        // Preserve the original setup/publication failure as the primary error.
+      }
+    }
     try {
       const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
       if (state.cleanup !== 'fail' && (state.state === 'starting' || state.state === 'ready' || state.state === 'crashed')) {
