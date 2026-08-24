@@ -455,6 +455,27 @@ describe('publishUiResult', () => {
     expect(readFileSync(join(sessionDirectory, `${value.sessionId}.tmp`), 'utf8')).toBe('{"owner":"replacement"}\n')
     expect(existsSync(join(parked, 'result.json'))).toBe(false)
   })
+
+  it('revalidates the descriptor-owned temporary leaf at the final publication boundary', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const sessionDirectory = join(root, pluginEvidenceKey(value.plugin), value.sessionId)
+    const temporaryPath = join(sessionDirectory, `${value.sessionId}.tmp`)
+    const parked = `${temporaryPath}.before-final-link-parked`
+    const replacement = '{"owner":"replacement before final link"}\n'
+
+    expect(() => publishUiResult({
+      uiRunsRoot: root,
+      result: value,
+      beforeFinalize() {
+        renameSync(temporaryPath, parked)
+        writeFileSync(temporaryPath, replacement, { flag: 'wx' })
+      },
+    })).toThrow(/identity|changed|replaced|temporary|ownership|refus/i)
+
+    expect(existsSync(join(sessionDirectory, 'result.json'))).toBe(false)
+    expect(readFileSync(temporaryPath, 'utf8')).toBe(replacement)
+  })
 })
 
 describe('loadUiResults', () => {
