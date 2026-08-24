@@ -66,7 +66,7 @@ export function createUiSession(opts: { runtimeRoot: string; state: UiSessionSta
   return createOwnedUiSession(opts).sessionDir
 }
 
-export function createOwnedUiSession(opts: { runtimeRoot: string; state: UiSessionStateV1 }): { sessionDir: string; ownedSession: OwnedUiDirectory } {
+export function createOwnedUiSession(opts: { runtimeRoot: string; state: UiSessionStateV1; afterOwnerCapture?: (sessionDir: string) => void }): { sessionDir: string; ownedSession: OwnedUiDirectory } {
   validateState(opts.state)
   assertSessionId(opts.state.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.state.sessionId)
@@ -85,14 +85,17 @@ export function createOwnedUiSession(opts: { runtimeRoot: string; state: UiSessi
   assertDirectoryEntry(paths.sessionDir, 'UI session directory')
   const ownedSession = claimOwnedUiDirectory({ root: paths.runtimeRoot, directory: paths.sessionDir })
   ownedSession.assertCurrent()
-  writeAtomic(paths.statePath, JSON.stringify(opts.state, null, 2) + '\n', false, directoryIdentity(paths.sessionDir))
+  opts.afterOwnerCapture?.(paths.sessionDir)
+  ownedSession.assertCurrent()
+  writeAtomic(paths.statePath, JSON.stringify(opts.state, null, 2) + '\n', false, directoryIdentity(paths.sessionDir), ownedSession)
   ownedSession.assertCurrent()
   return { sessionDir: paths.sessionDir, ownedSession }
 }
 
-export function writeUiSessionRequest(opts: { runtimeRoot: string; sessionId: string; request: unknown; beforeRequestOpen?: (requestPath: string) => void }): string {
+export function writeUiSessionRequest(opts: { runtimeRoot: string; sessionId: string; request: unknown; beforeRequestOpen?: (requestPath: string) => void; ownedSession?: OwnedUiDirectory }): string {
   assertSessionId(opts.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
+  opts.ownedSession?.assertCurrent()
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
   const requestPath = join(paths.sessionDir, 'request.json')
@@ -100,8 +103,10 @@ export function writeUiSessionRequest(opts: { runtimeRoot: string; sessionId: st
   const serialized = JSON.stringify(opts.request, null, 2)
   if (serialized === undefined) throw new Error('UI session request must be JSON-serializable')
   opts.beforeRequestOpen?.(requestPath)
+  opts.ownedSession?.assertCurrent()
   assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   writeExclusiveRegular(requestPath, serialized + '\n')
+  opts.ownedSession?.assertCurrent()
   assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   return requestPath
 }
@@ -124,6 +129,7 @@ export function readUiSession(opts: { runtimeRoot: string; sessionId: string }):
 export function writeUiSession(opts: {
   runtimeRoot: string
   state: UiSessionStateV1
+  ownedSession?: OwnedUiDirectory
   beforeStateReplace?: (statePath: string) => void
   beforeStateTemporaryWrite?: (temporaryPath: string) => void
   beforeStateRename?: (statePath: string) => void
@@ -133,25 +139,27 @@ export function writeUiSession(opts: {
 }): void {
   assertSessionId(opts.state.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.state.sessionId)
+  opts.ownedSession?.assertCurrent()
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.state.sessionId}`)
   const sessionIdentity = directoryIdentity(paths.sessionDir)
   let current = readUiSession({ runtimeRoot: opts.runtimeRoot, sessionId: opts.state.sessionId })
   validateStateCandidate(current, opts.state, opts.state.sessionId)
   opts.beforeStateReplace?.(paths.statePath)
+  opts.ownedSession?.assertCurrent()
   assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   const lockPath = join(paths.sessionDir, '.state.lock')
-  const lockIdentity = acquireSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath, opts.afterStateLockCreate)
+  const lockIdentity = acquireSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath, opts.afterStateLockCreate, opts.ownedSession)
   try {
     assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
     current = readUiSession({ runtimeRoot: opts.runtimeRoot, sessionId: opts.state.sessionId })
     const state = validateStateCandidate(current, opts.state, opts.state.sessionId)
     if (state === undefined) return
     assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
-    writeAtomic(paths.statePath, JSON.stringify(state, null, 2) + '\n', true, sessionIdentity, opts.beforeStateTemporaryWrite, opts.beforeStateRename)
+    writeAtomic(paths.statePath, JSON.stringify(state, null, 2) + '\n', true, sessionIdentity, opts.ownedSession, opts.beforeStateTemporaryWrite, opts.beforeStateRename)
     assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   } finally {
-    releaseSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath, lockIdentity, opts.beforeStateLockRemove, opts.afterStateLockRemove)
+    releaseSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath, lockIdentity, opts.beforeStateLockRemove, opts.afterStateLockRemove, opts.ownedSession)
   }
 }
 
@@ -160,10 +168,12 @@ export function writeUiControl(opts: {
   sessionId: string
   control: UiControlV1
   beforeControlLink?: (controlPath: string) => void
+  ownedSession?: OwnedUiDirectory
 }): void {
   validateControl(opts.control)
   assertSessionId(opts.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
+  opts.ownedSession?.assertCurrent()
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
   const sessionIdentity = directoryIdentity(paths.sessionDir)
@@ -176,11 +186,14 @@ export function writeUiControl(opts: {
     throw new Error(`UI session ${opts.sessionId} already has a pending control at ${paths.controlPath}`)
   }
   const temporaryPath = `${paths.controlPath}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`
+  opts.ownedSession?.assertCurrent()
   writeExclusiveRegular(temporaryPath, JSON.stringify(opts.control, null, 2) + '\n')
+  opts.ownedSession?.assertCurrent()
   try {
     assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
     assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
     opts.beforeControlLink?.(paths.controlPath)
+    opts.ownedSession?.assertCurrent()
     assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
     try {
       linkSync(temporaryPath, paths.controlPath)
@@ -188,8 +201,14 @@ export function writeUiControl(opts: {
       if (isExistsError(error)) throw new Error(`pending UI control already exists at ${paths.controlPath}`)
       throw error
     }
+    opts.ownedSession?.assertCurrent()
   } finally {
-    try { unlinkSync(temporaryPath) } catch (error) { if (!isNotFoundError(error)) throw error }
+    try {
+      opts.ownedSession?.assertCurrent()
+      unlinkSync(temporaryPath)
+    } catch (error) {
+      if (!isNotFoundError(error) && opts.ownedSession === undefined) throw error
+    }
   }
 }
 
@@ -208,9 +227,11 @@ export function clearUiControl(opts: {
   runtimeRoot: string
   sessionId: string
   beforeControlUnlink?: (controlPath: string) => void
+  ownedSession?: OwnedUiDirectory
 }): void {
   assertSessionId(opts.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
+  opts.ownedSession?.assertCurrent()
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
   const sessionIdentity = directoryIdentity(paths.sessionDir)
@@ -220,8 +241,10 @@ export function clearUiControl(opts: {
   // for diagnosis instead of being silently discarded.
   readUiControl(opts)
   opts.beforeControlUnlink?.(paths.controlPath)
+  opts.ownedSession?.assertCurrent()
   assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   unlinkSync(paths.controlPath)
+  opts.ownedSession?.assertCurrent()
 }
 
 export function latchUiStaleReasons(
@@ -441,7 +464,8 @@ function validateStateCandidate(current: UiSessionStateV1, candidate: UiSessionS
   return state
 }
 
-function acquireSessionMutationLock(sessionDir: string, sessionIdentity: DirectoryIdentity, lockPath: string, afterCreate?: (lockPath: string) => void): DirectoryIdentity {
+function acquireSessionMutationLock(sessionDir: string, sessionIdentity: DirectoryIdentity, lockPath: string, afterCreate?: (lockPath: string) => void, ownedSession?: OwnedUiDirectory): DirectoryIdentity {
+  ownedSession?.assertCurrent()
   assertDirectoryIdentity(sessionDir, sessionIdentity)
   try { mkdirSync(lockPath) } catch (error) {
     if (isExistsError(error)) throw new Error(`concurrent UI session mutation is already locked at ${lockPath}`)
@@ -453,12 +477,14 @@ function acquireSessionMutationLock(sessionDir: string, sessionIdentity: Directo
     lockIdentity = directoryIdentity(lockPath)
     if (lockIdentity.dev <= 0 || lockIdentity.ino <= 0) throw new Error(`stable identity unavailable for UI session mutation lock ${lockPath}`)
     afterCreate?.(lockPath)
+    ownedSession?.assertCurrent()
     assertDirectoryIdentity(sessionDir, sessionIdentity)
     assertLockIdentity(lockPath, lockIdentity)
     return lockIdentity
   } catch (error) {
     if (lockIdentity !== undefined) {
       try {
+        ownedSession?.assertCurrent()
         assertDirectoryIdentity(sessionDir, sessionIdentity)
         assertLockIdentity(lockPath, lockIdentity)
         rmdirSync(lockPath)
@@ -475,14 +501,17 @@ function releaseSessionMutationLock(
   expectedLockIdentity: DirectoryIdentity,
   beforeRemove?: (lockPath: string) => void,
   afterRemove?: (lockPath: string) => void,
+  ownedSession?: OwnedUiDirectory,
 ): void {
   try {
     beforeRemove?.(lockPath)
+    ownedSession?.assertCurrent()
     assertDirectoryIdentity(sessionDir, sessionIdentity)
     assertLockIdentity(lockPath, expectedLockIdentity)
     assertDirectoryIdentity(sessionDir, sessionIdentity)
     rmdirSync(lockPath)
     afterRemove?.(lockPath)
+    ownedSession?.assertCurrent()
     assertDirectoryIdentity(sessionDir, sessionIdentity)
   } catch (error) {
     throw error
@@ -495,27 +524,32 @@ function assertLockIdentity(path: string, expected: DirectoryIdentity): void {
   const current = directoryIdentity(path)
   if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error(`UI session mutation lock identity changed at ${path}`)
 }
-function writeAtomic(path: string, contents: string, replace: boolean, parentIdentity: DirectoryIdentity, beforeTemporaryWrite?: (temporaryPath: string) => void, beforeRename?: (statePath: string) => void): void {
+function writeAtomic(path: string, contents: string, replace: boolean, parentIdentity: DirectoryIdentity, ownedSession?: OwnedUiDirectory, beforeTemporaryWrite?: (temporaryPath: string) => void, beforeRename?: (statePath: string) => void): void {
   const parent = resolve(path, '..')
   assertDirectoryEntry(parent, 'UI session directory')
   const existing = existingEntry(path)
   if (existing !== undefined && (existing.isSymbolicLink() || !existing.isFile())) throw new Error(`UI state at ${path} is not a regular file`)
   const temp = `${path}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`
   beforeTemporaryWrite?.(temp)
+  ownedSession?.assertCurrent()
   assertDirectoryIdentity(parent, parentIdentity)
   writeExclusiveRegular(temp, contents)
+  ownedSession?.assertCurrent()
   assertDirectoryIdentity(parent, parentIdentity)
   try {
     const current = existingEntry(path)
     if (current !== undefined && (current.isSymbolicLink() || !current.isFile())) throw new Error(`UI state at ${path} is not a regular file`)
     if (!replace && current !== undefined) throw new Error(`UI state already exists at ${path}`)
     beforeRename?.(path)
+    ownedSession?.assertCurrent()
     assertDirectoryIdentity(parent, parentIdentity)
     renameSync(temp, path)
+    ownedSession?.assertCurrent()
     assertDirectoryIdentity(parent, parentIdentity)
   } finally {
     try {
       assertDirectoryIdentity(parent, parentIdentity)
+      ownedSession?.assertCurrent()
       unlinkSync(temp)
     } catch (error) {
       if (!isNotFoundError(error) && !/identity changed|not found|stable identity unavailable/i.test(error instanceof Error ? error.message : String(error))) throw error

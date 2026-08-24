@@ -17,6 +17,7 @@ export interface UiSupervisorBinDependencies {
   runSupervisor(request: UiSupervisorRequestV1): Promise<void>
   stderr(message: string): void
   now(): string
+  beforeFailureWrite?(): void
 }
 
 export async function runSupervisorBin(
@@ -48,7 +49,7 @@ export async function runSupervisorBin(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (request !== undefined && safeToReport) {
-      try { if (ownedSession !== undefined) reportFailure(request, ownedSession, message, deps.now()) } catch { /* safe reporting is best effort */ }
+      try { if (ownedSession !== undefined) reportFailure(request, ownedSession, message, deps.now(), deps.beforeFailureWrite) } catch { /* safe reporting is best effort */ }
     }
     deps.stderr(`ui supervisor: ${sanitize(message)}`)
     return 1
@@ -69,7 +70,7 @@ function defaultDependencies(): UiSupervisorBinDependencies {
   }
 }
 
-function reportFailure(request: UiSupervisorRequestV1, ownedSession: OwnedUiDirectory, message: string, now: string): void {
+function reportFailure(request: UiSupervisorRequestV1, ownedSession: OwnedUiDirectory, message: string, now: string, beforeFailureWrite?: () => void): void {
   const root = resolve(request.root)
   const runtimeRoot = rootPath(root, ROOT_PATHS.runtime)
   ownedSession.assertCurrent()
@@ -78,9 +79,12 @@ function reportFailure(request: UiSupervisorRequestV1, ownedSession: OwnedUiDire
   if (state.state !== 'starting' && state.state !== 'ready' && state.state !== 'crashed') return
   if (state.cleanup === 'fail') return
   const { url: _url, cleanup: _cleanup, ...base } = state
+  beforeFailureWrite?.()
+  ownedSession.assertCurrent()
   try {
     writeUiSession({
       runtimeRoot,
+      ownedSession,
       state: {
         ...base,
         state: 'crashed',

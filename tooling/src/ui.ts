@@ -135,7 +135,7 @@ export async function startUiSession(opts: StartUiOptions, deps: UiServiceDepend
   ownedSession.assertCurrent()
   deps.beforeRequestWrite?.(sessionDir)
   ownedSession.assertCurrent()
-  const requestPath = writeUiSessionRequest({ runtimeRoot, sessionId, request: {
+  const requestPath = writeUiSessionRequest({ runtimeRoot, sessionId, ownedSession, request: {
       schemaVersion: 1,
       root: resolve(opts.root),
       sessionId,
@@ -523,7 +523,7 @@ function readOwnedControl(runtimeRoot: string, sessionId: string, ownedSession: 
 
 function writeOwnedControl(ownedSession: OwnedUiDirectory, opts: Parameters<typeof writeUiControl>[0]): void {
   ownedSession.assertCurrent()
-  try { writeUiControl(opts) } finally { ownedSession.assertCurrent() }
+  try { writeUiControl({ ...opts, ownedSession }) } finally { ownedSession.assertCurrent() }
 }
 
 function writeOwnedSession(
@@ -532,5 +532,5 @@ function writeOwnedSession(
   writeSession: (opts: Parameters<typeof writeUiSession>[0]) => void = writeUiSession,
 ): void {
   ownedSession.assertCurrent()
-  try { writeSession(opts) } finally { ownedSession.assertCurrent() }
+  try { writeSession({ ...opts, ownedSession }) } finally { ownedSession.assertCurrent() }
 }

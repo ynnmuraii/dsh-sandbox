@@ -558,9 +558,9 @@ function writeState(runtimeRoot: string, state: UiSessionStateV1, deps: UiSuperv
   try {
     if (state.error === undefined) {
       const { error: _error, ...withoutError } = state
-      writeUiSession({ runtimeRoot, state: { ...withoutError, updatedAt } })
+      writeUiSession({ runtimeRoot, state: { ...withoutError, updatedAt }, ownedSession })
     } else {
-      writeUiSession({ runtimeRoot, state: { ...state, error: sanitizeDiagnostic(state.error), updatedAt } })
+      writeUiSession({ runtimeRoot, state: { ...state, error: sanitizeDiagnostic(state.error), updatedAt }, ownedSession })
     }
   } finally {
     ownedSession.assertCurrent()
@@ -588,7 +588,7 @@ function readOwnedControl(runtimeRoot: string, sessionId: string, ownedSession: 
 function clearOwnedControl(runtimeRoot: string, sessionId: string, ownedSession: OwnedUiDirectory): void {
   ownedSession.assertCurrent()
   try {
-    clearUiControl({ runtimeRoot, sessionId })
+    clearUiControl({ runtimeRoot, sessionId, ownedSession })
   } finally {
     ownedSession.assertCurrent()
   }
