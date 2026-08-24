@@ -468,20 +468,9 @@ describe('runUiSupervisor', () => {
     void running.catch(() => undefined)
     bundle.child.exit({ code: 7, signal: null })
 
-    const outcome = await Promise.race([
-      running.then(() => 'resolved', () => 'rejected'),
-      new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 50)),
-    ])
-    if (outcome === 'timed-out') {
-      writeUiControl({
-        runtimeRoot: current.runtimeRoot,
-        sessionId: SESSION,
-        control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
-      })
-      await running.catch(() => undefined)
-    }
+    await expect(running).rejects.toThrow(/descendant|cleanup|tree/i)
 
-    expect(outcome).toBe('rejected')
+    expect(bundle.deps.stopChildTree).toHaveBeenCalledWith(bundle.child.handle)
     expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
       state: 'crashed',
       supervisorPid: process.pid,
