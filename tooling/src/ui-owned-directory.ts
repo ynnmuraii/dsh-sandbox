@@ -78,6 +78,7 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
   }
 
   function quarantineDirectoryLeaf(name: string, retained: UiDirectoryIdentity | undefined): { quarantine: string, leafAnchor: UiDirectoryIdentity } | undefined {
+    if (!isSingleComponent(name)) throw new Error(`unsafe owned UI directory leaf ${JSON.stringify(name)}`)
     const leaf = join(directory, name)
     assertAnchors()
     assertContained(directory, leaf)
@@ -97,10 +98,10 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
     renameSync(leaf, quarantine)
     return { quarantine, leafAnchor }
   }
-
-  function removeQuarantine(quarantine: string, leafAnchor: UiDirectoryIdentity): void {
-    opts.hooks?.afterQuarantine?.(quarantine)
+  function removeQuarantine(quarantine: string, leafAnchor: UiDirectoryIdentity, announceQuarantine: boolean): void {
+    if (announceQuarantine) opts.hooks?.afterQuarantine?.(quarantine)
     assertAnchors()
+    assertNoSymlinkComponents(quarantine, 'owned UI quarantine')
     assertIdentity(quarantine, leafAnchor, `owned UI quarantine ${quarantine} changed before removal`, identify)
     opts.hooks?.beforeMutation?.('remove', quarantine)
     assertAnchors()
@@ -111,10 +112,10 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
   function attemptRemoveDirectoryLeaf(name: string): void {
     const captured = quarantineDirectoryLeaf(name, undefined)
     if (captured === undefined) return
-    removeQuarantine(captured.quarantine, captured.leafAnchor)
+    removeQuarantine(captured.quarantine, captured.leafAnchor, true)
   }
-
   function removeFileOnce(name: string, retained: UiDirectoryIdentity | undefined): { leaf: string, leafAnchor: UiDirectoryIdentity } | undefined {
+    if (!isSingleComponent(name)) throw new Error(`unsafe owned UI directory leaf ${JSON.stringify(name)}`)
     const leaf = join(directory, name)
     assertAnchors()
     assertContained(directory, leaf)
@@ -168,10 +169,10 @@ export function claimOwnedUiDirectory(opts: ClaimOwnedUiDirectoryOptions): Owned
             retained = captured.leafAnchor
             quarantine = captured.quarantine
             quarantineAnchor = captured.leafAnchor
-            removeQuarantine(quarantine, quarantineAnchor)
+            removeQuarantine(quarantine, quarantineAnchor, true)
             return
           } else {
-            removeQuarantine(quarantine, quarantineAnchor!)
+            removeQuarantine(quarantine, quarantineAnchor!, false)
             return
           }
         } catch (error) {
