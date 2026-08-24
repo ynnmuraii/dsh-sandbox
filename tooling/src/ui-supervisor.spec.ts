@@ -192,7 +192,7 @@ describe('parseDshReadyUrl', () => {
 
     await stopOwnedChildTree(child.handle, deps)
 
-    expect(treeAlive).toHaveBeenCalledWith(child.handle.pid)
+    expect(treeAlive).toHaveBeenCalledWith(-child.handle.pid)
     expect(signalGroup).toHaveBeenCalledWith(-child.handle.pid, 'SIGTERM')
   })
 
