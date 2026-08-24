@@ -635,6 +635,79 @@ describe('getUiSessionStatus', () => {
     expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION }).staleReasons).toBeUndefined()
   })
 
+  it.each(['next', 'master'] as const)('treats a missing selected %s identity field as typed target drift', async target => {
+    const current = fixture()
+    const ready = currentState(current, SESSION, 'ready')
+    createUiSession({
+      runtimeRoot: runtimeRoot(current.root),
+      state: target === 'next' ? ready : { ...ready, target: { name: 'master', commit: MASTER } },
+    })
+    writeFileSync(join(current.root, 'workbench', 'compatibility.yaml'), target === 'next'
+      ? [
+          'targets:',
+          '  next:',
+          '    cordis: 4.0.1',
+          '    node: 22.20.0',
+          '    pnpm: 11.7.0',
+          '  master:',
+          '    repository: deepseek-ai/deepseek-harness',
+          `    commit: ${MASTER}`,
+          '    pnpm: 11.7.0',
+          '    node: ^22.19.0',
+          '',
+        ].join('\n')
+      : [
+          'targets:',
+          '  next:',
+          `    dsh: ${NEXT}`,
+          '    cordis: 4.0.1',
+          '    node: 22.20.0',
+          '    pnpm: 11.7.0',
+          '  master:',
+          '    repository: deepseek-ai/deepseek-harness',
+          '    pnpm: 11.7.0',
+          '    node: ^22.19.0',
+          '',
+        ].join('\n'))
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, serviceDependencies().deps)
+    expect(view).toMatchObject({ stale: true, staleReasons: ['target-changed'] })
+
+    const bundle = serviceDependencies()
+    await expect(finishUiSession({
+      root: current.root,
+      sessionId: SESSION,
+      verdict: 'pass',
+      summary: 'selected target identity disappeared',
+    }, bundle.deps)).rejects.toMatchObject({ name: 'UiProtocolOutcomeError', outcome: 'stale', exitCode: 2 })
+    expect(bundle.deps.publishResult).not.toHaveBeenCalled()
+  })
+
+  it('keeps a missing selected target toolchain field as a tooling error', () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    const statePath = join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json')
+    const before = readFileSync(statePath)
+    writeFileSync(join(current.root, 'workbench', 'compatibility.yaml'), [
+      'targets:',
+      '  next:',
+      `    dsh: ${NEXT}`,
+      '    cordis: 4.0.1',
+      '    node: 22.20.0',
+      '  master:',
+      '    repository: deepseek-ai/deepseek-harness',
+      `    commit: ${MASTER}`,
+      '    pnpm: 11.7.0',
+      '    node: ^22.19.0',
+      '',
+    ].join('\n'))
+
+    expect(() => getUiSessionStatus({ root: current.root, sessionId: SESSION }, serviceDependencies().deps)).toThrow(
+      /next.*mandatory pin field 'pnpm'|pnpm/i,
+    )
+    expect(readFileSync(statePath)).toEqual(before)
+  })
+
   it('derives an orphaned crash without killing or rewriting a recorded PID', () => {
     const current = fixture()
     createState(current, SESSION, 'ready')

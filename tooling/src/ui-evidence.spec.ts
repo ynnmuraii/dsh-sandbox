@@ -476,6 +476,27 @@ describe('publishUiResult', () => {
     expect(existsSync(join(sessionDirectory, 'result.json'))).toBe(false)
     expect(readFileSync(temporaryPath, 'utf8')).toBe(replacement)
   })
+
+  it('does not unlink an unowned temporary-name replacement after immutable commit', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const sessionDirectory = join(root, pluginEvidenceKey(value.plugin), value.sessionId)
+    const temporaryPath = join(sessionDirectory, `${value.sessionId}.tmp`)
+    const parked = `${temporaryPath}.committed-owner`
+    const replacement = '{"owner":"replacement after final link"}\n'
+
+    const finalPath = publishUiResult({
+      uiRunsRoot: root,
+      result: value,
+      afterFinalize() {
+        renameSync(temporaryPath, parked)
+        writeFileSync(temporaryPath, replacement, { flag: 'wx' })
+      },
+    })
+
+    expect(JSON.parse(readFileSync(finalPath, 'utf8'))).toEqual(value)
+    expect(readFileSync(temporaryPath, 'utf8')).toBe(replacement)
+  })
 })
 
 describe('loadUiResults', () => {
