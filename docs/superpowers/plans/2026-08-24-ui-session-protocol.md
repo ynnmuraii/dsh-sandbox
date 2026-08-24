@@ -478,6 +478,8 @@ Parse stdout as lines while preserving an incomplete tail. Write bounded diagnos
 
 Spawn with `shell: false`, ignored stdin, piped stdout/stderr, and a dedicated process group where supported. Record PIDs only while active. Poll the atomic control file, transition monotonically, stop once, await close, then remove only validated session descendants. Finish ends in cleaned `stopping` so the service can publish evidence; abort ends directly in compact `aborted`.
 
+Once a child handle exists, every later setup, state-publication, output, or control failure is serialized through one lifecycle owner and stops that handle exactly once. An active diagnostic failure takes precedence over a pending control and cannot be overwritten by successful finish/abort cleanup.
+
 - [ ] **Step 3: Implement platform cleanup**
 
 The live supervisor may use `taskkill.exe` with validated numeric PID on Windows or signal its owned process group on POSIX. The bin deserializes one request-file path, validates containment, runs one supervisor, reports failures into the lease, and never accepts arbitrary command text.
