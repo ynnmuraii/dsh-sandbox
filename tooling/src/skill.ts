@@ -70,8 +70,9 @@ function hasAlternateTopLevelHeading(lines: readonly string[]): boolean {
       previous = undefined
       continue
     }
-    if (marker && marker.length >= 3) {
-      fence = { marker: marker[0] as '`' | '~', length: marker.length }
+    const opening = parseFenceOpening(line)
+    if (opening) {
+      fence = opening
       previous = undefined
       continue
     }
@@ -90,4 +91,19 @@ function hasAlternateTopLevelHeading(lines: readonly string[]): boolean {
     previous = line
   }
   return false
+}
+
+function parseFenceOpening(
+  line: string,
+): { marker: '`' | '~'; length: number } | undefined {
+  const run =
+    /^(?: {0,3}(?:[-+*]|\d+[.)])[ \t]+| {0,3})(`{3,}|~{3,})(.*)$/.exec(line)
+  if (!run) return undefined
+
+  const markerRun = run[1]
+  const info = run[2]
+  if (!markerRun || info === undefined) return undefined
+  if (markerRun[0] === '`' && info.includes('`')) return undefined
+
+  return { marker: markerRun[0] as '`' | '~', length: markerRun.length }
 }
