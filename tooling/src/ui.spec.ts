@@ -783,6 +783,74 @@ describe('getUiSessionStatus', () => {
     expect(readFileSync(statePath)).toEqual(before)
   })
 
+  it('flags a crashed lease without a recorded recovery owner as orphaned', () => {
+    const current = fixture()
+    createState(current, SESSION, 'crashed')
+    const statePath = join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json')
+    const before = readFileSync(statePath)
+    const processAlive = vi.fn(() => true)
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, {
+      now: () => '2026-08-24T12:00:04.000Z',
+      processAlive,
+    })
+
+    expect(view).toMatchObject({ state: 'crashed', orphan: true })
+    expect(view.error).toMatch(/missing|owner|orphan/i)
+    expect(view.error).toContain(join(runtimeRoot(current.root), 'ui-sessions', SESSION))
+    expect(processAlive).not.toHaveBeenCalled()
+    expect(readFileSync(statePath)).toEqual(before)
+  })
+
+  it('flags a crashed lease with a dead recovery supervisor as orphaned', () => {
+    const current = fixture()
+    createUiSession({
+      runtimeRoot: runtimeRoot(current.root),
+      state: { ...currentState(current, SESSION, 'crashed'), supervisorPid: 7001 },
+    })
+    const processAlive = vi.fn(() => false)
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, {
+      now: () => '2026-08-24T12:00:04.000Z',
+      processAlive,
+    })
+
+    expect(view).toMatchObject({ state: 'crashed', orphan: true })
+    expect(view.error).toMatch(/recovery|supervisor|orphan|not running/i)
+  })
+
+  it('flags a starting lease whose supervisor died as orphaned', () => {
+    const current = fixture()
+    createUiSession({
+      runtimeRoot: runtimeRoot(current.root),
+      state: { ...currentState(current, SESSION, 'starting'), supervisorPid: 7001 },
+    })
+    const processAlive = vi.fn(() => false)
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, {
+      now: () => '2026-08-24T12:00:04.000Z',
+      processAlive,
+    })
+
+    expect(view).toMatchObject({ state: 'crashed', orphan: true })
+    expect(view.error).toMatch(/supervisor|orphan|not running/i)
+  })
+
+  it('flags a pidless starting lease as orphaned', () => {
+    const current = fixture()
+    createState(current, SESSION, 'starting')
+    const processAlive = vi.fn(() => true)
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, {
+      now: () => '2026-08-24T12:00:04.000Z',
+      processAlive,
+    })
+
+    expect(view).toMatchObject({ state: 'crashed', orphan: true })
+    expect(view.error).toMatch(/missing|owner|supervisor|orphan/i)
+    expect(processAlive).not.toHaveBeenCalled()
+  })
+
   it('derives current drift for immutable terminal status without rewriting history', () => {
     const current = fixture()
     createState(current, SESSION, 'finished')

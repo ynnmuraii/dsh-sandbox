@@ -719,6 +719,33 @@ describe('UI session CLI', () => {
     expect(text).toMatch(/aborted/i)
   })
 
+  it('advises manual runtime removal for an orphaned crashed session', async () => {
+    const output = captureConsole()
+    vi.mocked(getUiSessionStatus).mockReturnValue(uiView('crashed', {
+      error: `UI session crashed; recovery owner is missing; session is orphaned at A:/forge/.lab/runtime/ui-sessions/${sessionId}`,
+      orphan: true,
+    }))
+
+    expect(await runCli(['ui', 'status', sessionId])).toBe(2)
+
+    const text = output.logs.join('\n')
+    expect(text).toMatch(/remove the orphaned runtime/i)
+    const errorLine = output.logs.find(line => line.startsWith('error:'))
+    expect(errorLine).toBeDefined()
+    expect(errorLine).not.toMatch(/abort/i)
+  })
+
+  it('keeps abort remediation for a crashed session with a live recovery owner', async () => {
+    const output = captureConsole()
+    vi.mocked(getUiSessionStatus).mockReturnValue(uiView('crashed', { error: 'UI session crashed; awaiting recovery control' }))
+
+    expect(await runCli(['ui', 'status', sessionId])).toBe(2)
+
+    const errorLine = output.logs.find(line => line.startsWith('error:'))
+    expect(errorLine).toBeDefined()
+    expect(errorLine).toMatch(/abort the session/i)
+  })
+
   it.each(([
     ['ui'],
     ['ui', 'wat'],
