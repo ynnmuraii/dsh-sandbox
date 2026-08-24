@@ -172,6 +172,7 @@ export function loadUiResults(opts: {
   uiRunsRoot: string
   pluginKey: string
   beforeResultRead?: (resultPath: string) => void
+  afterResultRead?: (resultPath: string) => void
 }): UiResultV1[] {
   if (!isNonEmptyString(opts.uiRunsRoot)) throw new Error('uiRunsRoot must be a non-empty string')
   validatePluginKey(opts.pluginKey)
@@ -225,6 +226,9 @@ export function loadUiResults(opts: {
     let parsed: unknown
     try {
       parsed = JSON.parse(readResultNoFollow(resultPath, resultIdentity))
+      opts.afterResultRead?.(resultPath)
+      assertDirectoryIdentity(sessionDirectory, sessionIdentity)
+      assertFileIdentity(resultPath, resultIdentity)
     } catch (error) {
       throw corruptionError(resultPath, error)
     }

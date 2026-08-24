@@ -6,10 +6,10 @@ import { inspectPlugin } from './inspect.js'
 import type { PluginRef } from './plugin-ref.js'
 import { computePluginDigest } from './plugin-snapshot.js'
 import { ROOT_PATHS, rootPath } from './context.js'
-import { loadCompatibilityFromFile, type Compatibility } from './schemas.js'
+import { CompatibilityError, loadCompatibilityFromFile, type Compatibility } from './schemas.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
 import {
-  createUiSession,
+  createOwnedUiSession,
   createUiSessionId,
   latchUiStaleReasons,
   readUiControl,
@@ -129,8 +129,7 @@ export async function startUiSession(opts: StartUiOptions, deps: UiServiceDepend
     startedAt,
     updatedAt: startedAt,
   }
-  const sessionDir = createUiSession({ runtimeRoot, state })
-  const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
+  const { sessionDir, ownedSession } = createOwnedUiSession({ runtimeRoot, state })
   ownedSession.assertCurrent()
   deps.afterSessionCreate?.(sessionDir)
   ownedSession.assertCurrent()
@@ -377,8 +376,9 @@ function captureCurrentIdentity(root: string, state: UiSessionStateV1): Captured
   let target = state.target
   try {
     target = currentTargetIdentity(root, state.target.name)
-  } catch {
-    unavailableReasons.push('target-changed')
+  } catch (error) {
+    if (error instanceof CompatibilityError && /compatibility manifest requires both next and master targets/i.test(error.message)) unavailableReasons.push('target-changed')
+    else throw error
   }
   return {
     plugin,

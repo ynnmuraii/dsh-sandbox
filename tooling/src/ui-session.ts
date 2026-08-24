@@ -15,6 +15,7 @@ import {
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { UiTargetIdentity } from './ui-evidence.js'
+import { claimOwnedUiDirectory, type OwnedUiDirectory } from './ui-owned-directory.js'
 
 export type UiSessionPhase = 'starting' | 'ready' | 'crashed' | 'stopping' | 'finished' | 'aborted'
 export type UiStaleReason = 'plugin-changed' | 'context-changed' | 'target-changed'
@@ -62,6 +63,10 @@ export function createUiSessionId(now = new Date(), randomHex = () => randomByte
 }
 
 export function createUiSession(opts: { runtimeRoot: string; state: UiSessionStateV1 }): string {
+  return createOwnedUiSession(opts).sessionDir
+}
+
+export function createOwnedUiSession(opts: { runtimeRoot: string; state: UiSessionStateV1 }): { sessionDir: string; ownedSession: OwnedUiDirectory } {
   validateState(opts.state)
   assertSessionId(opts.state.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.state.sessionId)
@@ -78,8 +83,11 @@ export function createUiSession(opts: { runtimeRoot: string; state: UiSessionSta
     throw error
   }
   assertDirectoryEntry(paths.sessionDir, 'UI session directory')
+  const ownedSession = claimOwnedUiDirectory({ root: paths.runtimeRoot, directory: paths.sessionDir })
+  ownedSession.assertCurrent()
   writeAtomic(paths.statePath, JSON.stringify(opts.state, null, 2) + '\n', false, directoryIdentity(paths.sessionDir))
-  return paths.sessionDir
+  ownedSession.assertCurrent()
+  return { sessionDir: paths.sessionDir, ownedSession }
 }
 
 export function writeUiSessionRequest(opts: { runtimeRoot: string; sessionId: string; request: unknown; beforeRequestOpen?: (requestPath: string) => void }): string {
