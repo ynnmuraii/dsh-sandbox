@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { computePluginDigest } from './plugin-snapshot.js'
 import type { Compatibility } from './schemas.js'
 import { resolveUiLauncher } from './run.js'
@@ -132,6 +132,38 @@ describe('prepareUiRuntime', () => {
     expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
     expect(existsSync(targetPath(sessionDir))).toBe(false)
     expect(existsSync(targetPath(parked))).toBe(false)
+    expect(bundle.installNextProfile).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['overlay-write', (sessionDir: string) => join(sessionDir, 'overlay', 'cordis.patch.yml')],
+    ['manifest-write', (sessionDir: string) => join(sessionDir, 'home', 'profiles', `example-next-ui-${SESSION}`, 'package.json')],
+  ] as const)('rejects a child-directory symlink replacement before %s', async (targetOperation, targetPath) => {
+    const current = fixture()
+    const outside = mkdtempSync(join(tmpdir(), 'dsh-lab-ui-runtime-outside-'))
+    roots.push(outside)
+    const bundle = dependencies(current.compatibility)
+    const runtimeRoot = join(current.root, '.lab', 'runtime')
+    const sessionDir = join(runtimeRoot, 'ui-sessions', SESSION)
+    mkdirSync(sessionDir, { recursive: true })
+    const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
+    bundle.deps.beforeRuntimeMutation = vi.fn((operation, path) => {
+      if (operation !== targetOperation) return
+      expect(path).toBe(targetPath(sessionDir))
+      const childDirectory = dirname(path)
+      rmSync(childDirectory, { recursive: true, force: true })
+      symlinkSync(outside, childDirectory, process.platform === 'win32' ? 'junction' : 'dir')
+    })
+
+    await expect(prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+      ownedSession,
+    }, bundle.deps)).rejects.toThrow(/symlink|junction|containment|directory|unsafe|refus/i)
+
+    expect(existsSync(join(outside, targetOperation === 'overlay-write' ? 'cordis.patch.yml' : 'package.json'))).toBe(false)
     expect(bundle.installNextProfile).not.toHaveBeenCalled()
   })
 

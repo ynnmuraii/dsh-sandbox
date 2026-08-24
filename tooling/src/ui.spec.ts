@@ -1127,6 +1127,29 @@ describe('finishUiSession', () => {
     expect(bundle.deps.publishResult).not.toHaveBeenCalled()
     expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION }).staleReasons).toContain('plugin-changed')
   })
+
+  it('rechecks current identity inside the immutable evidence publication boundary', async () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    const bundle = serviceDependencies({ sleep: cleanupResponder(current, SESSION, 'finish') })
+    bundle.deps.publishResult = vi.fn(opts => {
+      writeFileSync(join(current.sourcePath, 'src', 'index.ts'), 'export const uiService = "changed at commit boundary"\n')
+      return publishUiResult(opts)
+    })
+
+    await expect(finishUiSession({
+      root: current.root,
+      sessionId: SESSION,
+      verdict: 'pass',
+      summary: 'commit boundary must remain factual',
+    }, bundle.deps)).rejects.toMatchObject({ name: 'UiProtocolOutcomeError', outcome: 'stale', exitCode: 2 })
+
+    expect(loadUiResults({
+      uiRunsRoot: join(current.root, '.lab', 'ui-runs'),
+      pluginKey: pluginEvidenceKey(current.plugin),
+    })).toEqual([])
+    expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION }).staleReasons).toContain('plugin-changed')
+  })
 })
 
 describe('abortUiSession', () => {
