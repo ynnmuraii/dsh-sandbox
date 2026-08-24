@@ -160,6 +160,27 @@ describe('UI session store', () => {
     })
   })
 
+  it('represents in-progress stopping ownership until cleanup is complete', () => {
+    const root = runtimeRoot()
+    createUiSession({ runtimeRoot: root, state: state() })
+    const ownedStopping = state({
+      state: 'stopping',
+      supervisorPid: 10,
+      childPid: 11,
+      updatedAt: '2026-08-24T12:00:01.000Z',
+    })
+    writeUiSession({ runtimeRoot: root, state: ownedStopping })
+    expect(readUiSession({ runtimeRoot: root, sessionId: SESSION })).toEqual(ownedStopping)
+
+    expect(() => writeUiSession({
+      runtimeRoot: root,
+      state: { ...ownedStopping, cleanup: 'pass', updatedAt: '2026-08-24T12:00:02.000Z' },
+    })).toThrow(/stopping|cleanup|process|pid|compact/i)
+
+    const cleaned = state({ state: 'stopping', cleanup: 'pass', updatedAt: '2026-08-24T12:00:02.000Z' })
+    expect(() => writeUiSession({ runtimeRoot: root, state: cleaned })).not.toThrow()
+  })
+
   it('allows only monotonic lifecycle transitions and identical terminal rewrites', () => {
     const root = runtimeRoot()
     createUiSession({ runtimeRoot: root, state: state() })

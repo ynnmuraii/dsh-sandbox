@@ -173,6 +173,29 @@ describe('parseDshReadyUrl', () => {
     await expect(stopOwnedChildTree(child, deps)).rejects.toThrow(/close|exit|timeout|terminate/i)
   })
 
+  it('proves the owned process tree is absent even after the direct child has exited', async () => {
+    const child = fakeChild()
+    child.exit({ code: 0, signal: null })
+    const treeAlive = vi.fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false)
+    const signalGroup = vi.fn()
+    const deps = {
+      platform: 'posix' as const,
+      taskkill: vi.fn(),
+      signalGroup,
+      waitForExit: vi.fn(async () => true),
+      treeAlive,
+      termGraceMs: 5,
+      killGraceMs: 5,
+    } as UiProcessTreeDependencies & { treeAlive(pid: number): boolean }
+
+    await stopOwnedChildTree(child.handle, deps)
+
+    expect(treeAlive).toHaveBeenCalledWith(child.handle.pid)
+    expect(signalGroup).toHaveBeenCalledWith(-child.handle.pid, 'SIGTERM')
+  })
+
   it('refuses to open a bounded log through an externally linked file', () => {
     const current = fixture()
     const canary = join(current.root, 'outside.log')
@@ -233,7 +256,7 @@ describe('runUiSupervisor', () => {
     expect(existsSync(join(current.root, '.lab', 'ui-runs'))).toBe(false)
   })
 
-  it.each(['before', 'after'] as const)('records a child crash %s readiness and waits for abort cleanup', async when => {
+  it.each(['before', 'after'] as const)('records a child crash %s readiness and still proves tree cleanup on abort', async when => {
     const current = fixture()
     const { deps, child, stopChildTree } = dependencies(current.plan)
     const running = runUiSupervisor(current.request, deps)
@@ -254,7 +277,62 @@ describe('runUiSupervisor', () => {
     expect(crashed).not.toHaveProperty('supervisorPid')
     expect(crashed).not.toHaveProperty('childPid')
     expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).state).toBe('aborted')
-    expect(stopChildTree).not.toHaveBeenCalled()
+    expect(stopChildTree).toHaveBeenCalledTimes(1)
+  })
+
+  it('owns and cancels startup preparation before a child exists', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.prepareRuntime = vi.fn(async (opts: Parameters<UiSupervisorDependencies['prepareRuntime']>[0] & { signal?: AbortSignal }): Promise<UiRuntimePlan> => {
+      expect(opts.signal).toBeInstanceOf(AbortSignal)
+      return await new Promise<UiRuntimePlan>((_resolve, reject) => {
+        opts.signal!.addEventListener('abort', () => reject(new Error('preparation aborted')), { once: true })
+      })
+    })
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+
+    await waitFor(() => readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).supervisorPid === process.pid, 'starting supervisor ownership')
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).resolves.toBeUndefined()
+    expect(bundle.deps.spawnChild).not.toHaveBeenCalled()
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'aborted',
+      cleanup: 'pass',
+    })
+    expect(existsSync(join(current.sessionDir, 'control.json'))).toBe(false)
+    expect(existsSync(current.plan.runtimeHome)).toBe(false)
+  })
+
+  it('keeps a recovery owner after preparation failure until explicit abort cleans partial runtime', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.prepareRuntime = vi.fn(async () => { throw new Error('profile install failed') })
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+
+    await waitFor(() => {
+      const state = readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })
+      return state.state === 'crashed' && state.supervisorPid === process.pid && state.cleanup === undefined
+    }, 'crashed startup recovery owner')
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).resolves.toBeUndefined()
+    expect(bundle.deps.spawnChild).not.toHaveBeenCalled()
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'aborted',
+      cleanup: 'pass',
+    })
+    expect(existsSync(current.plan.runtimeHome)).toBe(false)
   })
 
   it('bounds the live diagnostic log to the newest configured bytes', async () => {
@@ -349,6 +427,13 @@ describe('runUiSupervisor', () => {
       control: { schemaVersion: 1, action: 'finish', requestedAt: '2026-08-24T12:01:00.000Z' },
     })
     await waitFor(() => vi.mocked(bundle.deps.stopChildTree).mock.calls.length === 1, 'control cleanup')
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'stopping',
+      supervisorPid: process.pid,
+      childPid: bundle.child.handle.pid,
+    })
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).cleanup).toBeUndefined()
+    expect(existsSync(join(current.sessionDir, 'control.json'))).toBe(true)
     bundle.child.stderr.write('late output must be ignored\n')
     releaseStop()
     await expect(running).resolves.toBeUndefined()

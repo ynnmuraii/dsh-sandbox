@@ -673,6 +673,25 @@ describe('UI session CLI', () => {
     expect(await runCli(['ui', 'finish', sessionId, '--verdict', 'fail', '--summary', 'layout is broken'])).toBe(2)
   })
 
+  it.each([
+    ['stale', 'UI session became stale'],
+    ['cleanup-incomplete', 'UI session cleanup timed out'],
+  ] as const)('maps typed %s protocol refusal to exit 2 while keeping JSON stdout empty', async (outcome, message) => {
+    const output = captureConsole()
+    const error = Object.assign(new Error(message), {
+      name: 'UiProtocolOutcomeError',
+      outcome,
+      exitCode: 2 as const,
+    })
+    vi.mocked(finishUiSession).mockRejectedValue(error)
+
+    expect(await runCli([
+      'ui', 'finish', sessionId, '--verdict', 'pass', '--summary', 'cannot publish', '--json',
+    ])).toBe(2)
+    expect(output.logs).toEqual([])
+    expect(output.errors.join('\n')).toContain(message)
+  })
+
   it('keeps human output concise and includes stale remediation', async () => {
     const output = captureConsole()
     vi.mocked(resolvePluginRef).mockReturnValue(plugin)

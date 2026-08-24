@@ -77,7 +77,7 @@ The URL is loopback-only. It is session state, not finalized evidence.
 
 ### `ui status`
 
-`status` does not create sessions, evidence, profiles, controls, or processes. It loads the named lease, validates it, refreshes process liveness, and compares the captured identities with current inputs. Its only permitted write is an atomic rewrite of that existing lease to latch a newly observed stale reason. It returns the operational state, the loopback URL when known, and zero or more stale reasons.
+`status` does not create sessions, evidence, profiles, controls, or processes. It loads the named lease, validates it, refreshes process liveness, and compares the captured identities with current inputs. Its only permitted write is an atomic rewrite of a non-terminal existing lease to latch a newly observed stale reason. Drift of an immutable terminal lease is derived in the returned view without rewriting history. It returns the operational state, the loopback URL when known, and zero or more stale reasons.
 
 Stable operational states are:
 
@@ -102,7 +102,7 @@ A `pass` verdict requires a session that reached `ready`. A `fail` verdict is ac
 
 The supervisor must stop the DSH process tree and remove the session's profile, overlay, temporary log, and control files before a result is finalized. Cleanup failure is an operation failure: a `pass` result must never be published while forge-owned runtime remains unaccounted for.
 
-After successful cleanup, the supervisor rewrites `stopping` with `cleanup: 'pass'` and no live process fields. The finishing CLI atomically publishes one immutable `UiResultV1`, changes the lease to `finished`, and removes the ordinary runtime descendants. The compact terminal lease may remain so `ui status <session-id>` can report `finished`; it contains no URL, PID, environment, log, or browser artifact. Abort skips the publication boundary and the supervisor writes `aborted` after cleanup.
+As soon as it claims a valid control, the supervisor rewrites `stopping` while retaining its owner PIDs and the exclusive control file. After successful tree and runtime cleanup it rewrites compact `stopping` with `cleanup: 'pass'`, then releases the control file last. The finishing CLI waits for both facts before it atomically publishes one immutable `UiResultV1` and changes the lease to `finished`. The compact terminal lease may remain so `ui status <session-id>` can report `finished`; it contains no URL, PID, environment, log, or browser artifact. Abort skips the publication boundary and the supervisor writes `aborted` after cleanup before releasing control.
 
 ### `ui abort`
 
@@ -180,22 +180,23 @@ The CLI process must not own the long-running DSH child. `ui start` launches a d
 
 The supervisor:
 
-1. materializes a unique source overlay and web profile under the session directory;
-2. installs the exact target-owned profile dependencies using existing target policy;
-3. launches the pinned DSH entry point without a shell;
-4. passes the materialized profile, overlay, `--host 127.0.0.1`, `--port 0`, and `--no-open`;
-5. directs `DSH_HOME` and any generated state into the session runtime;
-6. builds the child environment in memory from the inherited environment plus the session-local `DSH_HOME`; no environment is serialized into `request.json` or state;
-7. captures stdout and stderr to a temporary log capped at 64 KiB;
-8. recognizes readiness only from an upstream `dsh web: http://127.0.0.1:<port>` line, tolerating its optional LAN display suffix while discarding that suffix;
-9. atomically publishes `ready` with only the parsed loopback URL;
-10. listens for a finish or abort control request;
-11. terminates the owned DSH process tree and removes session runtime descendants;
-12. writes `stopping` with `cleanup: 'pass'` for finish, or compact `aborted` for abort.
+1. records its own PID in the starting lease and takes ownership of cancellable preparation;
+2. materializes a unique source overlay and web profile under the session directory;
+3. installs the exact target-owned profile dependencies using existing target policy and an owned cancellable subprocess;
+4. launches the pinned DSH entry point without a shell;
+5. passes the materialized profile, overlay, `--host 127.0.0.1`, `--port 0`, and `--no-open`;
+6. directs `DSH_HOME` and any generated state into the session runtime;
+7. builds the child environment in memory from the inherited environment plus the session-local `DSH_HOME`; no environment is serialized into `request.json` or state;
+8. captures stdout and stderr to a temporary log capped at 64 KiB;
+9. recognizes readiness only from an upstream `dsh web: http://127.0.0.1:<port>` line, tolerating its optional LAN display suffix while discarding that suffix;
+10. atomically publishes `ready` with only the parsed loopback URL;
+11. listens for a finish or abort control request during preparation and child execution;
+12. claims `stopping`, terminates and proves absence of the owned DSH process tree even if its leader already exited, and quarantines runtime descendants before recursive removal;
+13. writes compact `stopping` with `cleanup: 'pass'` for finish, or compact `aborted` for abort, then releases control.
 
 The upstream contract explicitly supports port `0`, so the lab never probes and releases a port before launch. Wildcard binding is prohibited. Launch arguments are arrays passed without shell interpolation.
 
-On Windows, the live supervisor may terminate its child tree with `taskkill.exe /PID <validated-pid> /T /F`; on POSIX it owns a dedicated process group and terminates that group. A later CLI invocation must not blindly kill a recorded PID after possible PID reuse. If the supervisor is gone and child ownership cannot be demonstrated from the live session identity, the lab reports an orphan with the exact runtime path and does not risk terminating an unrelated process.
+On Windows, the live supervisor may terminate its child tree with `taskkill.exe /PID <validated-pid> /T /F`; on POSIX it owns a dedicated process group and terminates that group. Direct-child exit alone is not proof that descendants are gone. If Windows cannot conservatively prove absence after the leader exited, cleanup fails rather than claiming success. A later CLI invocation must not blindly kill a recorded PID after possible PID reuse. If the supervisor is gone and child ownership cannot be demonstrated from the live session identity, the lab reports an orphan with the exact runtime path and does not risk terminating an unrelated process.
 
 Startup has a configurable internal deadline for tests and a fixed user-facing default of 120 seconds. A timeout asks the live supervisor to clean up; it is a tooling failure unless cleanup itself remains incomplete, which is reported explicitly.
 
@@ -207,7 +208,7 @@ Finalized UI evidence is separate from ordinary verify evidence:
 .lab/ui-runs/<plugin-key>/<session-id>/result.json
 ```
 
-The plugin key uses the same collision-resistant package/source identity strategy as verify evidence. Publication uses containment and non-symlink checks, an exclusive temporary file, and an atomic no-replace final link so a concurrent creator can never be overwritten. The temporary link is removed only after the final name exists; finalized evidence remains immutable.
+The plugin key uses the same collision-resistant package/source identity strategy as verify evidence. Publication uses captured directory identity, containment and non-symlink checks, an exclusive temporary file, and an atomic no-replace final link so a concurrent creator can never be overwritten. The final link is the commit point: failure to remove the temporary name or publication lock afterward is recoverable bookkeeping and cannot make the command falsely report that immutable publication failed. Finalized evidence remains immutable.
 
 ```ts
 interface UiResultV1 {
@@ -265,7 +266,10 @@ An active session does not count as finalized status evidence. `lab status` rema
 - Keep credentials in the caller's ignored runtime environment; evidence excludes them.
 - Enforce path containment before every write, rename, removal, or process-control lookup.
 - Treat symlinked session, plugin-key, and result directories as unsafe.
+- Capture stable filesystem identity for runtime/evidence anchors. Recursive cleanup first atomically renames a captured leaf to a unique quarantine sibling, revalidates its identity, then deletes the quarantine. Missing or unreliable identity fails closed.
 - Keep temporary logs bounded and remove them on normal finish or abort.
+
+Pure Node on Windows cannot provide handle-relative `openat`/`unlinkat` semantics. The lab defends against existing redirects and parent/leaf swaps observable before or after each pathname syscall; an actively malicious same-user process winning the unobservable interval inside a Win32 syscall is outside this version's threat model and would require a native helper. This limitation does not permit following junctions, accepting changed directory identity, or reporting cleanup success when identity cannot be established.
 
 ## Verification strategy
 

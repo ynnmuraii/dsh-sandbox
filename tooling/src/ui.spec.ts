@@ -160,6 +160,7 @@ function serviceDependencies(overrides: Partial<UiServiceDependencies> = {}) {
     now: vi.fn(() => '2026-08-24T12:00:04.000Z'),
     processAlive: vi.fn(() => true),
     publishResult: vi.fn(opts => publishUiResult(opts)),
+    writeSession: vi.fn(opts => writeUiSession(opts)),
     ...overrides,
   }
   return { deps, unref }
@@ -205,7 +206,6 @@ function cleanupResponder(current: ReturnType<typeof fixture>, sessionId: string
     const control = readUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId })
     if (control?.action !== action) return
     const state = readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId })
-    clearUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId })
     const stopping = compactForCleanup(state, 'stopping')
     writeUiSession({ runtimeRoot: runtimeRoot(current.root), state: stopping })
     if (action === 'abort') {
@@ -214,6 +214,7 @@ function cleanupResponder(current: ReturnType<typeof fixture>, sessionId: string
         state: { ...stopping, state: 'aborted', updatedAt: '2026-08-24T12:00:04.000Z' },
       })
     }
+    clearUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId })
   })
 }
 
@@ -352,6 +353,34 @@ describe('startUiSession', () => {
     }, bundle.deps)).resolves.toMatchObject({ state: 'ready', url: 'http://127.0.0.1:49152' })
   })
 
+  it('persists the detached supervisor PID before the first startup wait', async () => {
+    const current = fixture()
+    let sessionId = ''
+    const bundle = serviceDependencies({
+      spawnSupervisor: vi.fn(requestPath => {
+        sessionId = (JSON.parse(readFileSync(requestPath, 'utf8')) as { sessionId: string }).sessionId
+        return { pid: 7001, unref: vi.fn() }
+      }),
+      sleep: vi.fn(async () => {
+        const state = readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId })
+        expect(state).toMatchObject({ state: 'starting', supervisorPid: 7001 })
+        writeUiSession({
+          runtimeRoot: runtimeRoot(current.root),
+          state: {
+            ...state,
+            state: 'crashed',
+            error: 'fixture startup stopped',
+            updatedAt: '2026-08-24T12:00:01.000Z',
+          },
+        })
+      }),
+    })
+
+    await expect(startUiSession({ root: current.root, plugin: current.plugin, target: 'next' }, bundle.deps)).resolves.toMatchObject({
+      state: 'crashed',
+    })
+  })
+
   it('records a visible cleanup failure when the detached supervisor cannot be spawned', async () => {
     const current = fixture()
     const bundle = serviceDependencies({
@@ -399,9 +428,45 @@ describe('getUiSessionStatus', () => {
     const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, bundle.deps)
     expect(view).toMatchObject({ state: 'crashed', stale: false })
     expect(view.error).toMatch(/orphan|supervisor|not running/i)
+    expect(view.error).toContain(join(runtimeRoot(current.root), 'ui-sessions', SESSION))
     expect(view).not.toHaveProperty('url')
     expect(bundle.deps.processAlive).toHaveBeenCalledWith(7001)
     expect(readFileSync(join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json'))).toEqual(before)
+  })
+
+  it('checks a starting supervisor owner and reports the exact orphan runtime without rewriting', () => {
+    const current = fixture()
+    createUiSession({
+      runtimeRoot: runtimeRoot(current.root),
+      state: { ...currentState(current, SESSION, 'starting'), supervisorPid: 7001 },
+    })
+    const statePath = join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json')
+    const before = readFileSync(statePath)
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, {
+      now: () => '2026-08-24T12:00:04.000Z',
+      processAlive: vi.fn(() => false),
+    })
+
+    expect(view).toMatchObject({ state: 'crashed' })
+    expect(view.error).toMatch(/supervisor|orphan|not running/i)
+    expect(view.error).toContain(join(runtimeRoot(current.root), 'ui-sessions', SESSION))
+    expect(readFileSync(statePath)).toEqual(before)
+  })
+
+  it('derives current drift for immutable terminal status without rewriting history', () => {
+    const current = fixture()
+    createState(current, SESSION, 'finished')
+    const statePath = join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json')
+    const before = readFileSync(statePath)
+    writeFileSync(join(current.sourcePath, 'src', 'index.ts'), 'export const uiService = "changed after finish"\n')
+
+    expect(getUiSessionStatus({ root: current.root, sessionId: SESSION }, serviceDependencies().deps)).toMatchObject({
+      state: 'finished',
+      stale: true,
+      staleReasons: ['plugin-changed'],
+    })
+    expect(readFileSync(statePath)).toEqual(before)
   })
 
   it('does not expose a ready URL when either recorded process is no longer live', () => {
@@ -452,6 +517,7 @@ describe('finishUiSession', () => {
       expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })).toMatchObject({
         state: 'stopping', cleanup: 'pass',
       })
+      expect(readUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })).toBeUndefined()
       return publishUiResult(opts)
     })
     const result = await finishUiSession({
@@ -500,7 +566,11 @@ describe('finishUiSession', () => {
     createState(current, SESSION, 'ready')
     writeFileSync(join(current.sourcePath, 'src', 'index.ts'), 'export const uiService = "stale"\n')
     const bundle = serviceDependencies()
-    await expect(finishUiSession({ root: current.root, sessionId: SESSION, verdict: 'pass', summary: 'looks good' }, bundle.deps)).rejects.toThrow(/stale|changed/i)
+    await expect(finishUiSession({ root: current.root, sessionId: SESSION, verdict: 'pass', summary: 'looks good' }, bundle.deps)).rejects.toMatchObject({
+      name: 'UiProtocolOutcomeError',
+      outcome: 'stale',
+      exitCode: 2,
+    })
     expect(readUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })).toBeUndefined()
     expect(bundle.deps.publishResult).not.toHaveBeenCalled()
     expect(existsSync(join(current.root, '.lab', 'ui-runs'))).toBe(false)
@@ -552,13 +622,18 @@ describe('finishUiSession', () => {
         const control = readUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })
         if (control?.action !== 'finish') return
         const state = readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })
-        clearUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })
-        writeUiSession({ runtimeRoot: runtimeRoot(current.root), state: compactForCleanup(state, 'stopping') })
+        writeFileSync(
+          join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json'),
+          `${JSON.stringify({ ...state, state: 'stopping', updatedAt: '2026-08-24T12:00:02.000Z' }, null, 2)}\n`,
+        )
         sleepEntered()
         await gate
+        writeUiSession({ runtimeRoot: runtimeRoot(current.root), state: compactForCleanup(state, 'stopping') })
+        clearUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })
       }),
     })
     const first = finishUiSession({ root: current.root, sessionId: SESSION, verdict: 'pass', summary: 'first owner' }, firstBundle.deps)
+    void first.catch(() => undefined)
     await entered
     const competitor = serviceDependencies()
     const competing = await finishUiSession({
@@ -580,6 +655,33 @@ describe('finishUiSession', () => {
     if (competing.status === 'rejected') expect(competing.error).toMatchObject({ message: expect.stringMatching(/stopping|owner|phase|ready|crashed/i) })
     expect(competitor.deps.publishResult).not.toHaveBeenCalled()
     expect(original).toMatchObject({ status: 'resolved', value: { verdict: 'pass', summary: 'first owner' } })
+  })
+
+  it('returns committed immutable evidence even if terminal lease compaction fails afterward', async () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    const bundle = serviceDependencies({ sleep: cleanupResponder(current, SESSION, 'finish') })
+    bundle.deps.writeSession = vi.fn(opts => {
+      if (opts.state.state === 'finished') throw new Error('injected terminal bookkeeping failure')
+      writeUiSession(opts)
+    })
+
+    const result = await finishUiSession({
+      root: current.root,
+      sessionId: SESSION,
+      verdict: 'pass',
+      summary: 'evidence is the commit point',
+    }, bundle.deps)
+
+    expect(result).toMatchObject({ verdict: 'pass', summary: 'evidence is the commit point' })
+    expect(loadUiResults({
+      uiRunsRoot: join(current.root, '.lab', 'ui-runs'),
+      pluginKey: pluginEvidenceKey(current.plugin),
+    })).toEqual([result])
+    expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })).toMatchObject({
+      state: 'stopping',
+      cleanup: 'pass',
+    })
   })
 
   it('rechecks identity after cleanup and before immutable publication', async () => {
@@ -660,7 +762,11 @@ describe('abortUiSession', () => {
       root: current.root,
       sessionId: SESSION,
       stopTimeoutMs: 10,
-    }, bundle.deps)).rejects.toThrow(/timeout|timed out|cleanup/i)
+    }, bundle.deps)).rejects.toMatchObject({
+      name: 'UiProtocolOutcomeError',
+      outcome: 'cleanup-incomplete',
+      exitCode: 2,
+    })
     expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION }).state).toBe('ready')
     expect(readUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })).toMatchObject({ action: 'abort' })
   })

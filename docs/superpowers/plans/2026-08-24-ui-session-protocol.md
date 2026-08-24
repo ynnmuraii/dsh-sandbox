@@ -723,3 +723,21 @@ Confirm the finished session has no profile, overlay, log, control, PID, URL, br
 - [ ] **Step 5: Integrate and re-run from the main checkout**
 
 Fast-forward only after the user-owned dirty main checkout has been re-inspected and preserved. Re-run full deterministic acceptance from main. Remove the temporary worktree only after main acceptance passes; do not delete user files or the recovery stash.
+
+- [ ] **Step 6: Controller RED for final-review lifecycle findings**
+
+Before acceptance, add controller-owned regressions for the complete final-review failure set:
+
+- a supervisor claims `stopping` immediately and retains the exclusive control file through tree termination and descendant cleanup, so a second finisher cannot publish a competing verdict;
+- startup preparation is cancellable and supervisor-owned before any profile install, log open, or child spawn; abort and setup failure leave a live recovery owner until partial runtime cleanup is accounted for;
+- process-tree absence is proved even when the direct child has already exited, rather than treating leader exit as descendant cleanup;
+- path-mutating store, cleanup, and evidence operations revalidate a pinned session/runtime identity at the last mutation boundary and refuse a swapped parent;
+- stale and cleanup-incomplete protocol outcomes are typed non-pass results that the CLI maps to exit `2`;
+- status checks `starting` ownership, derives drift for immutable terminal views without rewriting them, and includes the exact runtime path in orphan diagnostics;
+- once immutable evidence is committed, temporary-file or terminal-lease bookkeeping failures cannot make the command report that publication failed.
+
+Commit tests and this plan amendment separately. Luna may change production files only and may not weaken or edit these tests without controller approval.
+
+- [ ] **Step 7: One Luna GREEN fix wave and scoped review**
+
+Implement the smallest shared lifecycle primitives necessary to satisfy Step 6. Keep one explicit cleanup owner, cancellable owned subprocesses, conservative process-tree proof, typed protocol failures, and post-commit evidence success semantics. Run focused suites first, then full test/typecheck/diff-check. Require a scoped independent review before resuming Steps 2–5.

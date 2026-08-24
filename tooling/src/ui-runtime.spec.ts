@@ -55,8 +55,8 @@ function fixture(): { root: string; plugin: UiRuntimePlugin; compatibility: Comp
 }
 
 function dependencies(compatibility: Compatibility) {
-  const installNextProfile = vi.fn()
-  const resolveLauncher = vi.fn(async (_root: string, target: 'next' | 'master') => (
+  const installNextProfile = vi.fn(async (_profileDir: string, _env: NodeJS.ProcessEnv, _signal?: AbortSignal) => undefined)
+  const resolveLauncher = vi.fn(async (_root: string, target: 'next' | 'master', _compatibility?: Compatibility, _signal?: AbortSignal) => (
     target === 'next'
       ? { cmd: process.execPath, args: ['C:/tools/pnpm.cjs', 'exec', 'dsh'] }
       : { cmd: process.execPath, args: ['A:/upstream/apps/cli/lib/bin.js'] }
@@ -108,7 +108,60 @@ describe('prepareUiRuntime', () => {
     expect(installNextProfile).toHaveBeenCalledTimes(1)
     expect(installNextProfile.mock.calls[0]![0]).toBe(plan.profileDir)
     expect(installNextProfile.mock.calls[0]![1].DSH_HOME).toBe(plan.runtimeHome)
+    expect(installNextProfile.mock.calls[0]![2]).toBeInstanceOf(AbortSignal)
     expect(computePluginDigest(current.plugin.sourcePath)).toEqual(before)
+  })
+
+  it('forwards cancellation to launcher resolution and profile installation', async () => {
+    const current = fixture()
+    const controller = new AbortController()
+    const { deps, installNextProfile, resolveLauncher } = dependencies(current.compatibility)
+    installNextProfile.mockImplementation(async (_profileDir: string, _env: NodeJS.ProcessEnv, signal?: AbortSignal) => {
+      expect(signal).toBeInstanceOf(AbortSignal)
+      await new Promise<never>((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(new Error('install aborted')), { once: true })
+      })
+    })
+    const preparing = prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+      signal: controller.signal,
+    }, deps)
+
+    await vi.waitFor(() => expect(installNextProfile).toHaveBeenCalledTimes(1))
+    expect(resolveLauncher.mock.calls[0]![3]).toBe(controller.signal)
+    controller.abort()
+
+    await expect(preparing).rejects.toThrow(/abort/i)
+  })
+
+  it('lets cancellation interrupt pinned master launcher preparation before profile materialization completes', async () => {
+    const current = fixture()
+    const controller = new AbortController()
+    const { deps, installNextProfile, resolveLauncher } = dependencies(current.compatibility)
+    resolveLauncher.mockImplementation(async (_root, target, _compatibility, signal) => {
+      expect(target).toBe('master')
+      expect(signal).toBe(controller.signal)
+      return await new Promise<{ cmd: string; args: string[] }>((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(new Error('master build aborted')), { once: true })
+      })
+    })
+    const preparing = prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'master',
+      sessionId: SESSION,
+      signal: controller.signal,
+    }, deps)
+    void preparing.catch(() => undefined)
+
+    await vi.waitFor(() => expect(resolveLauncher).toHaveBeenCalledTimes(1))
+    controller.abort()
+
+    await expect(preparing).rejects.toThrow(/abort/i)
+    expect(installNextProfile).not.toHaveBeenCalled()
   })
 
   it('keeps inherited environment in memory and out of the serializable plan', async () => {
@@ -157,7 +210,7 @@ describe('prepareUiRuntime', () => {
       sessionId: SESSION,
     }, deps)
 
-    expect(resolveLauncher).toHaveBeenCalledWith(current.root, 'master', current.compatibility)
+    expect(resolveLauncher).toHaveBeenCalledWith(current.root, 'master', current.compatibility, expect.any(AbortSignal))
     expect(installNextProfile).not.toHaveBeenCalled()
     const manifest = JSON.parse(readFileSync(join(plan.profileDir, 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>

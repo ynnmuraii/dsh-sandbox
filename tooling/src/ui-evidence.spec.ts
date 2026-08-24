@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   existsSync,
   mkdirSync,
@@ -218,6 +218,23 @@ describe('publishUiResult', () => {
     expect(existsSync(join(directory, `${value.sessionId}.tmp`))).toBe(false)
     expect(existsSync(join(directory, 'result.json'))).toBe(false)
   })
+
+  it.each(['temporary-name', 'publication-lock'] as const)(
+    'returns committed immutable evidence when %s cleanup fails after finalization',
+    failure => {
+      const root = uiRunsRoot()
+      const value = result()
+      const expectedPath = join(root, pluginEvidenceKey(value.plugin), value.sessionId, 'result.json')
+      const cleanup = vi.fn(() => { throw new Error(`injected ${failure} cleanup failure`) })
+      const options = failure === 'temporary-name'
+        ? { removeTemporaryName: cleanup }
+        : { removePublicationLock: cleanup }
+
+      expect(publishUiResult({ uiRunsRoot: root, result: value, ...options })).toBe(expectedPath)
+      expect(cleanup).toHaveBeenCalledTimes(1)
+      expect(JSON.parse(readFileSync(expectedPath, 'utf8'))).toEqual(value)
+    },
+  )
 
   it('rejects a symlinked plugin evidence directory instead of escaping uiRunsRoot', () => {
     const root = uiRunsRoot()
