@@ -1,11 +1,5 @@
 import { spawn } from 'node:child_process'
-import {
-  constants,
-  lstatSync,
-  openSync,
-  closeSync,
-  writeFileSync,
-} from 'node:fs'
+import { lstatSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { isAbsolute, join, resolve } from 'node:path'
 import { inspectPlugin } from './inspect.js'
@@ -21,6 +15,7 @@ import {
   readUiControl,
   readUiSession,
   writeUiControl,
+  writeUiSessionRequest,
   writeUiSession,
   type UiSessionPhase,
   type UiSessionStateV1,
@@ -28,6 +23,7 @@ import {
 } from './ui-session.js'
 import { normalizeUiSummary, publishUiResult, type UiResultV1, type UiTargetIdentity } from './ui-evidence.js'
 import { computeContextDigest } from './status.js'
+import { resolveTsxLoader } from './run.js'
 
 export interface StartUiOptions {
   root: string
@@ -76,7 +72,7 @@ export interface UiServiceDependencies {
 
 export interface UiSupervisorSpawnPlan {
   command: string
-  args: [string, string]
+  args: string[]
   options: { detached: true; shell: false; stdio: 'ignore'; windowsHide: true }
 }
 
@@ -88,9 +84,12 @@ export function buildUiSupervisorSpawn(requestPath: string): UiSupervisorSpawnPl
   if (typeof requestPath !== 'string' || !isAbsolute(requestPath)) throw new Error('requestPath must be an absolute path')
   const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js'
   const supervisorBin = fileURLToPath(new URL(`./ui-supervisor-bin.${extension}`, import.meta.url))
+  const supervisorArgs = extension === 'ts'
+    ? ['--import', resolveTsxLoader(), supervisorBin, requestPath]
+    : [supervisorBin, requestPath]
   return {
     command: process.execPath,
-    args: [supervisorBin, requestPath],
+    args: supervisorArgs,
     options: { detached: true, shell: false, stdio: 'ignore', windowsHide: true },
   }
 }
@@ -99,11 +98,7 @@ export async function startUiSession(opts: StartUiOptions, deps: UiServiceDepend
   validateRootAndTarget(opts.root, opts.target)
   const timeoutMs = validateTimeout(opts.startupTimeoutMs, 'startupTimeoutMs')
   const identity = captureIdentity(opts.root, opts.plugin, opts.target)
-  // The session timestamp is captured at creation time. The injected clock is
-  // still used for every service deadline and subsequent lifecycle timestamp;
-  // using the wall clock here keeps a test/supervisor that publishes an
-  // earlier monotonic update from violating the session store's ordering rule.
-  const startedAt = new Date().toISOString()
+  const startedAt = deps.now()
   validateTimestamp(startedAt, 'now')
   const sessionId = createUiSessionId(new Date(startedAt))
   const runtimeRoot = rootPath(opts.root, ROOT_PATHS.runtime)
@@ -118,8 +113,7 @@ export async function startUiSession(opts: StartUiOptions, deps: UiServiceDepend
     updatedAt: startedAt,
   }
   const sessionDir = createUiSession({ runtimeRoot, state })
-  const requestPath = join(sessionDir, 'request.json')
-  writeRequest(requestPath, {
+  const requestPath = writeUiSessionRequest({ runtimeRoot, sessionId, request: {
     schemaVersion: 1,
     root: resolve(opts.root),
     sessionId,
@@ -130,12 +124,28 @@ export async function startUiSession(opts: StartUiOptions, deps: UiServiceDepend
     },
     target: opts.target,
     startedAt,
-  })
-  const supervisor = deps.spawnSupervisor(requestPath)
-  if (!supervisor || !Number.isInteger(supervisor.pid) || supervisor.pid <= 0 || typeof supervisor.unref !== 'function') {
-    throw new Error(`UI supervisor did not return a valid process for session ${sessionId}`)
+  } })
+  let supervisor: { pid: number; unref(): void }
+  try {
+    supervisor = deps.spawnSupervisor(requestPath)
+    if (!supervisor || !Number.isInteger(supervisor.pid) || supervisor.pid <= 0 || typeof supervisor.unref !== 'function') {
+      throw new Error('UI supervisor did not return a valid process')
+    }
+    supervisor.unref()
+  } catch (error) {
+    const message = sanitizeServiceError(error)
+    writeUiSession({
+      runtimeRoot,
+      state: {
+        ...state,
+        state: 'crashed',
+        error: message,
+        cleanup: 'fail',
+        updatedAt: safeNow(deps.now(), state.updatedAt),
+      },
+    })
+    throw error
   }
-  supervisor.unref()
 
   const deadline = Date.parse(startedAt) + timeoutMs
   while (true) {
@@ -146,6 +156,7 @@ export async function startUiSession(opts: StartUiOptions, deps: UiServiceDepend
   }
 
   const current = readUiSession({ runtimeRoot, sessionId })
+  if (current.state === 'ready' || current.state === 'crashed') return viewFromState(current)
   if (current.state === 'starting') {
     if (readUiControl({ runtimeRoot, sessionId }) === undefined) {
       writeUiControl({ runtimeRoot, sessionId, control: { schemaVersion: 1, action: 'abort', requestedAt: safeNow(deps.now(), current.updatedAt) } })
@@ -172,12 +183,15 @@ export function getUiSessionStatus(
       writeUiSession({ runtimeRoot, state })
     }
   }
-  if (state.state === 'ready' && state.supervisorPid !== undefined && !deps.processAlive(state.supervisorPid)) {
+  if (state.state === 'ready' && state.supervisorPid !== undefined && state.childPid !== undefined) {
+    const supervisorAlive = deps.processAlive(state.supervisorPid)
+    const childAlive = supervisorAlive && deps.processAlive(state.childPid)
+    if (supervisorAlive && childAlive) return viewFromState(state)
     const { url: _url, ...orphaned } = state
     return viewFromState({
       ...orphaned,
       state: 'crashed',
-      error: 'UI supervisor is not running; session is orphaned',
+      error: supervisorAlive ? 'UI child is not running; session is orphaned' : 'UI supervisor is not running; session is orphaned',
     })
   }
   return viewFromState(state)
@@ -204,24 +218,33 @@ export async function finishUiSession(opts: FinishUiOptions, deps: UiServiceDepe
     throw new Error(`UI session ${opts.sessionId} is stale: ${(state.staleReasons ?? reasons).join(', ')}`)
   }
   if (opts.verdict === 'pass' && state.state !== 'ready') throw new Error('pass requires a ready UI session')
-  if (opts.verdict === 'fail' && state.state !== 'ready' && state.state !== 'crashed' && state.state !== 'stopping') throw new Error('fail requires a ready or crashed UI session')
+  if (opts.verdict === 'fail' && state.state !== 'ready' && state.state !== 'crashed') throw new Error('fail requires a ready or crashed UI session')
+  if (state.state === 'stopping') throw new Error(`UI session ${opts.sessionId} is already stopping; finish ownership belongs to another caller`)
   if (state.state === 'crashed' && state.cleanup === 'fail') throw new Error('UI session cleanup failed')
 
-  if (state.state !== 'stopping') {
-    writeUiControl({ runtimeRoot, sessionId: opts.sessionId, control: { schemaVersion: 1, action: 'finish', requestedAt: safeNow(deps.now(), state.updatedAt) } })
-    state = await waitForState({ runtimeRoot, sessionId: opts.sessionId, deps, timeoutMs, accept: candidate => candidate.state === 'stopping' && candidate.cleanup === 'pass' })
-  }
+  writeUiControl({ runtimeRoot, sessionId: opts.sessionId, control: { schemaVersion: 1, action: 'finish', requestedAt: safeNow(deps.now(), state.updatedAt) } })
+  state = await waitForState({ runtimeRoot, sessionId: opts.sessionId, deps, timeoutMs, accept: candidate => candidate.state === 'stopping' && candidate.cleanup === 'pass' })
   if (state.state !== 'stopping' || state.cleanup !== 'pass') throw new Error(`UI session ${opts.sessionId} cleanup did not complete`)
   const finishedAt = deps.now()
   validateTimestamp(finishedAt, 'now')
+  const publicationIdentity = captureCurrentIdentity(opts.root, state)
+  const lateReasons = staleReasons(state, publicationIdentity)
+  if (lateReasons.length > 0 || (state.staleReasons?.length ?? 0) > 0) {
+    const newlyObserved = lateReasons.filter(reason => !(state.staleReasons ?? []).includes(reason))
+    if (newlyObserved.length > 0) {
+      state = latchUiStaleReasons(state, newlyObserved, safeNow(deps.now(), state.updatedAt))
+      writeUiSession({ runtimeRoot, state })
+    }
+    throw new Error(`UI session ${opts.sessionId} became stale during cleanup: ${(state.staleReasons ?? lateReasons).join(', ')}`)
+  }
   const result: UiResultV1 = {
     schemaVersion: 1,
     sessionId: state.sessionId,
     operation: 'ui',
     verdict: opts.verdict,
-    plugin: identity.plugin,
-    target: identity.target,
-    lab: { contextDigest: identity.contextDigest },
+    plugin: publicationIdentity.plugin,
+    target: publicationIdentity.target,
+    lab: { contextDigest: publicationIdentity.contextDigest },
     summary,
     cleanup: 'pass',
     startedAt: state.startedAt,
@@ -306,7 +329,7 @@ function staleReasons(state: UiSessionStateV1, current: CapturedIdentity): UiSta
   const reasons: UiStaleReason[] = []
   if (current.plugin.digest !== state.plugin.digest || current.plugin.packageName !== state.plugin.packageName || current.plugin.sourcePath !== state.plugin.sourcePath) reasons.push('plugin-changed')
   if (current.contextDigest !== state.contextDigest) reasons.push('context-changed')
-  if (JSON.stringify(current.target) !== JSON.stringify(state.target)) reasons.push('target-changed')
+  if (!sameTarget(current.target, state.target)) reasons.push('target-changed')
   return reasons.sort((left, right) => left.localeCompare(right))
 }
 
@@ -363,15 +386,9 @@ async function waitForTerminal(opts: {
   return waitForState(opts)
 }
 
-function writeRequest(path: string, value: unknown): void {
-  const descriptor = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag(), 0o600)
-  try { writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8') } finally { closeSync(descriptor) }
-}
-
 function isRegularFile(path: string): boolean {
   try { const stat = lstatSync(path); return stat.isFile() && !stat.isSymbolicLink() } catch { return false }
 }
-function noFollowFlag(): number { return (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0 }
 function validateRootAndTarget(root: string, target: 'next' | 'master'): void {
   if (typeof root !== 'string' || !root.trim()) throw new Error('root must be a non-empty path')
   if (target !== 'next' && target !== 'master') throw new Error('invalid target')
@@ -384,7 +401,17 @@ function validateTimeout(value: number | undefined, field: string): number {
 function validateSessionId(value: string): void { if (typeof value !== 'string' || !SESSION_ID.test(value)) throw new Error(`invalid or unsafe sessionId ${JSON.stringify(value)}`) }
 function validateTimestamp(value: string, field: string): void { if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) throw new Error(`${field} must be an ISO timestamp`) }
 function safeNow(candidate: string, previous: string): string { validateTimestamp(candidate, 'now'); return Date.parse(candidate) < Date.parse(previous) ? previous : candidate }
+function sanitizeServiceError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240) || 'UI supervisor spawn failed'
+}
 function isTerminal(state: UiSessionPhase): boolean { return state === 'finished' || state === 'aborted' }
+function sameTarget(left: UiTargetIdentity, right: UiTargetIdentity): boolean {
+  if (left.name !== right.name) return false
+  return left.name === 'next'
+    ? left.dsh === (right.name === 'next' ? right.dsh : undefined)
+    : left.commit === (right.name === 'master' ? right.commit : undefined)
+}
 function defaultStatusDependencies(): Pick<UiServiceDependencies, 'now' | 'processAlive'> { return { now: () => new Date().toISOString(), processAlive: pid => { try { process.kill(pid, 0); return true } catch { return false } } } }
 function defaultDependencies(): UiServiceDependencies {
   return {

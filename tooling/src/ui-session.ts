@@ -81,6 +81,18 @@ export function createUiSession(opts: { runtimeRoot: string; state: UiSessionSta
   return paths.sessionDir
 }
 
+export function writeUiSessionRequest(opts: { runtimeRoot: string; sessionId: string; request: unknown }): string {
+  assertSessionId(opts.sessionId)
+  const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
+  assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
+  assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
+  const requestPath = join(paths.sessionDir, 'request.json')
+  const serialized = JSON.stringify(opts.request, null, 2)
+  if (serialized === undefined) throw new Error('UI session request must be JSON-serializable')
+  writeExclusiveRegular(requestPath, serialized + '\n')
+  return requestPath
+}
+
 export function readUiSession(opts: { runtimeRoot: string; sessionId: string }): UiSessionStateV1 {
   assertSessionId(opts.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
@@ -284,9 +296,7 @@ function validateTimestamp(value: unknown, field: string): void {
 function canTransition(from: UiSessionPhase, to: UiSessionPhase): boolean {
   if (from === to) return true
   const allowed: Record<UiSessionPhase, readonly UiSessionPhase[]> = {
-    // A startup abort can be acknowledged directly by the public service when
-    // the detached supervisor has not materialized a child yet.
-    starting: ['ready', 'crashed', 'stopping', 'aborted'], ready: ['crashed', 'stopping', 'aborted'], crashed: ['stopping', 'aborted'],
+    starting: ['ready', 'crashed', 'stopping'], ready: ['crashed', 'stopping'], crashed: ['stopping'],
     stopping: ['finished', 'aborted'], finished: [], aborted: [],
   }
   return allowed[from].includes(to)
