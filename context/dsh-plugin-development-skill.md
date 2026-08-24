@@ -17,6 +17,8 @@ This is the agent-owned forge for creating, studying, debugging, and verifying i
 
 Before production code, read the relevant canonical contracts and the [lab author guide](../../../docs/using-the-lab.md). Use the smallest useful loop: `pnpm lab inspect <name> --target <target>`, then `pnpm lab dev <name> --target <target>` while iterating, `pnpm lab verify <name> --target <target>` before handoff, and `pnpm lab status <name>` to distinguish current, stale, and missing evidence and summarize repository state. Use `--path` for an external standalone plugin.
 
+`inspect` fails closed with typed diagnostics; fix them before proceeding.
+
 Treat source overlay and installable bundle as separate acceptance boundaries. Source mode proves live source behavior and HMR against a fixed checkout; bundle mode proves the packed package installs and boots. Test both when the change affects either boundary.
 
 Every registry, listener, adapter, and external resource must be HMR-safe: register through the contributing Fiber, acquire resources inside `ctx.effect()` with a disposer, and prove cleanup on unload. Keep order-dependent asynchronous teardown in one disposer that awaits each step. Declare mandatory services with `inject`; resolve optional services only at their point of use.
@@ -41,6 +43,8 @@ and browser artifacts are transient and not retained; finalized evidence is only
 a minimal verdict/result, short summary, and identities. SDD, TDD, planning,
 orchestration, and agent-browser are advisory recommendations, never required
 tools or workflows.
+
+An orphaned crash (`orphan: true`) leaves no consumer — remove the named session directory manually. A latched `stale` refuses `finish`; start a new session.
 
 Only explicit authoring commands may mutate plugin repositories. Never manufacture plugin state during inspection or synchronization. Keep credentials and secrets in ignored runtime environment only. Release a plugin as its own repository with its own versioning, package, tests, and publication decisions; the meta-repo does not publish it. Production code imports public npm APIs only, never files from an upstream Harness checkout.
 
