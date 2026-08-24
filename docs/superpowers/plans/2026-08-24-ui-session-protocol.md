@@ -649,6 +649,7 @@ Commit only tests with message `test: define UI CLI and guidance contract`.
 - Modify: `context/dsh-plugin-development-skill.md`
 - Modify: `docs/using-the-lab.md`
 - Modify: `README.md`
+- Modify: `AGENTS.md`
 - Generate: `.agents/skills/dsh-plugin-development/SKILL.md`
 - Test: `tooling/src/cli.spec.ts`
 - Test: `tooling/src/skill.spec.ts`
