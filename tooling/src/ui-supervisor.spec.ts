@@ -1,4 +1,19 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    renameSync: ((...args: Parameters<typeof actual.renameSync>) => {
+      if (transientFs.renameFrom !== undefined && args[0] === transientFs.renameFrom && transientFs.renameFail > 0) {
+        transientFs.renameFail -= 1
+        throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+      }
+      return actual.renameSync(...args)
+    }) as typeof actual.renameSync,
+  }
+})
+const transientFs = vi.hoisted(() => ({ renameFrom: undefined as string | undefined, renameFail: 0 }))
+
 import { existsSync, lstatSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,6 +43,11 @@ import {
 const roots: string[] = []
 const SESSION = 'ui-20260824T120000000Z-a1b2c3d4'
 const OTHER = 'ui-20260824T120000000Z-deadbeef'
+
+beforeEach(() => {
+  transientFs.renameFrom = undefined
+  transientFs.renameFail = 0
+})
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -1006,5 +1026,37 @@ describe('runUiSupervisor', () => {
     await Promise.all([left.running, right.running])
     expect(left.bundle.stopChildTree).toHaveBeenCalledWith(left.bundle.child.handle)
     expect(right.bundle.stopChildTree).toHaveBeenCalledWith(right.bundle.child.handle)
+  })
+
+  it('retries transient cleanup mutations through the injected sleep seam', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    const sleepDelays: number[] = []
+    const originalSleep = bundle.deps.sleep
+    bundle.deps.sleep = (ms: number) => {
+      sleepDelays.push(ms)
+      return originalSleep(ms)
+    }
+    const running = runUiSupervisor(current.request, bundle.deps)
+    bundle.child.stdout.write('dsh web: http://127.0.0.1:49152\n')
+    await waitFor(() => readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).state === 'ready', 'ready')
+    transientFs.renameFrom = current.plan.runtimeHome
+    transientFs.renameFail = 1
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).resolves.toBeUndefined()
+
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'aborted',
+      cleanup: 'pass',
+    })
+    expect(existsSync(current.plan.runtimeHome)).toBe(false)
+    expect(existsSync(join(current.sessionDir, 'control.json'))).toBe(false)
+    expect(readdirSync(current.sessionDir).filter(name => name.includes('.cleanup-'))).toEqual([])
+    expect(sleepDelays.some(delay => delay > 0)).toBe(true)
   })
 })

@@ -1,9 +1,31 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  const transient = (syscall: string) => Object.assign(new Error(`EPERM: operation not permitted, ${syscall}`), { code: 'EPERM' })
+  return {
+    ...actual,
+    renameSync: ((...args: Parameters<typeof actual.renameSync>) => {
+      if (transientFs.renameFail > 0) { transientFs.renameFail -= 1; throw transient('rename') }
+      return actual.renameSync(...args)
+    }) as typeof actual.renameSync,
+    rmSync: ((...args: Parameters<typeof actual.rmSync>) => {
+      if (transientFs.rmFail > 0) { transientFs.rmFail -= 1; throw transient('rm') }
+      return actual.rmSync(...args)
+    }) as typeof actual.rmSync,
+    unlinkSync: ((...args: Parameters<typeof actual.unlinkSync>) => {
+      if (transientFs.unlinkFail > 0) { transientFs.unlinkFail -= 1; throw transient('unlink') }
+      return actual.unlinkSync(...args)
+    }) as typeof actual.unlinkSync,
+  }
+})
+const transientFs = vi.hoisted(() => ({ renameFail: 0, rmFail: 0, unlinkFail: 0 }))
+
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -11,14 +33,16 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import { claimOwnedUiDirectory, type OwnedUiDirectoryHooks } from './ui-owned-directory.js'
+import { claimOwnedUiDirectory, type OwnedUiDirectoryHooks, type OwnedUiMutationRetry } from './ui-owned-directory.js'
 
 const roots: string[] = []
 
-afterEach(() => {
-  vi.restoreAllMocks()
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+beforeEach(() => {
+  transientFs.renameFail = 0
+  transientFs.rmFail = 0
+  transientFs.unlinkFail = 0
 })
+
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'dsh-lab-owned-ui-directory-'))
@@ -167,5 +191,98 @@ describe('claimOwnedUiDirectory', () => {
 
     expect(quarantines).toHaveLength(1)
     expect(existsSync(current.home)).toBe(false)
+  })
+})
+
+describe('owned UI mutation retry', () => {
+  function retryPolicy(attempts: number) {
+    return {
+      attempts,
+      delayMs: (attempt: number) => 50 + attempt * 10,
+      sleep: vi.fn(async () => undefined),
+    } satisfies OwnedUiMutationRetry
+  }
+
+  it('retries a transient quarantine rename and completes directory removal', async () => {
+    const current = fixture()
+    transientFs.renameFail = 2
+    const policy = retryPolicy(5)
+    const owned = claimOwnedUiDirectory({ root: current.root, directory: current.sessionDir })
+
+    await owned.removeDirectoryLeafRetrying('home', policy)
+
+    expect(existsSync(current.home)).toBe(false)
+    expect(policy.sleep).toHaveBeenCalledTimes(2)
+    expect(policy.sleep).toHaveBeenNthCalledWith(1, policy.delayMs(0))
+    expect(policy.sleep).toHaveBeenNthCalledWith(2, policy.delayMs(1))
+    expect(readdirSync(current.sessionDir).filter(name => name.startsWith('home.cleanup-'))).toEqual([])
+  })
+
+  it('retries the quarantine removal itself on a transient rm failure without leftovers', async () => {
+    const current = fixture()
+    transientFs.rmFail = 1
+    const policy = retryPolicy(3)
+    const owned = claimOwnedUiDirectory({ root: current.root, directory: current.sessionDir })
+
+    await owned.removeDirectoryLeafRetrying('home', policy)
+
+    expect(existsSync(current.home)).toBe(false)
+    expect(policy.sleep).toHaveBeenCalledTimes(1)
+    expect(readdirSync(current.sessionDir).filter(name => name.startsWith('home.cleanup-'))).toEqual([])
+  })
+
+  it('fails closed after exhausting transient rename retries', async () => {
+    const current = fixture()
+    transientFs.renameFail = 99
+    const policy = retryPolicy(3)
+    const owned = claimOwnedUiDirectory({ root: current.root, directory: current.sessionDir })
+
+    await expect(owned.removeDirectoryLeafRetrying('home', policy)).rejects.toThrow(/EPERM|rename|refus/i)
+
+    expect(existsSync(current.home)).toBe(true)
+    expect(readFileSync(join(current.home, 'owned.txt'), 'utf8')).toBe('owned runtime')
+    expect(policy.sleep).toHaveBeenCalledTimes(2)
+  })
+
+  it('revalidates leaf identity between retries and never retries an identity failure', async () => {
+    const current = fixture()
+    const parked = `${current.home}.parked`
+    transientFs.renameFail = 1
+    const policy = retryPolicy(5)
+    policy.sleep.mockImplementation(async () => {
+      renameSync(current.home, parked)
+      mkdirSync(current.home)
+      writeFileSync(join(current.home, 'replacement-canary.txt'), 'do not remove replacement')
+    })
+    const owned = claimOwnedUiDirectory({ root: current.root, directory: current.sessionDir })
+
+    await expect(owned.removeDirectoryLeafRetrying('home', policy)).rejects.toThrow(/identity|changed|swap|refus/i)
+
+    expect(policy.sleep).toHaveBeenCalledTimes(1)
+    expect(readFileSync(join(current.home, 'replacement-canary.txt'), 'utf8')).toBe('do not remove replacement')
+    expect(readFileSync(join(parked, 'owned.txt'), 'utf8')).toBe('owned runtime')
+  })
+
+  it('retries a transient file unlink and completes file removal', async () => {
+    const current = fixture()
+    const log = join(current.sessionDir, 'supervisor.log')
+    writeFileSync(log, 'owned log')
+    transientFs.unlinkFail = 1
+    const policy = retryPolicy(3)
+    const owned = claimOwnedUiDirectory({ root: current.root, directory: current.sessionDir })
+
+    await owned.removeFileLeafRetrying('supervisor.log', policy)
+
+    expect(existsSync(log)).toBe(false)
+    expect(policy.sleep).toHaveBeenCalledTimes(1)
+  })
+
+  it('never retries a validation failure that is not transient', async () => {
+    const current = fixture()
+    const policy = retryPolicy(3)
+    const owned = claimOwnedUiDirectory({ root: current.root, directory: current.sessionDir })
+
+    await expect(owned.removeDirectoryLeafRetrying('../escape', policy)).rejects.toThrow(/unsafe|leaf/i)
+    expect(policy.sleep).not.toHaveBeenCalled()
   })
 })
