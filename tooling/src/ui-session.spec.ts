@@ -553,6 +553,31 @@ describe('UI session store', () => {
     expect(readUiControl({ runtimeRoot: root, sessionId: SESSION })).toBeUndefined()
   })
 
+  it('surfaces non-ENOENT temporary-control cleanup failure after linking the control', () => {
+    const root = runtimeRoot()
+    const created = (sessionStore as unknown as {
+      createOwnedUiSession(opts: { runtimeRoot: string; state: UiSessionStateV1 }): { sessionDir: string; ownedSession: OwnedUiDirectory }
+    }).createOwnedUiSession({ runtimeRoot: root, state: state() })
+    const denied = Object.assign(new Error('injected control temp cleanup EACCES'), { code: 'EACCES' })
+
+    expect(() => writeUiControl({
+      runtimeRoot: root,
+      sessionId: SESSION,
+      ownedSession: created.ownedSession,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+      removeTemporaryControl() { throw denied },
+    } as Parameters<typeof writeUiControl>[0] & {
+      ownedSession: OwnedUiDirectory
+      removeTemporaryControl(path: string): void
+    })).toThrow(/EACCES|temporary|cleanup|control/i)
+
+    expect(readUiControl({ runtimeRoot: root, sessionId: SESSION })).toEqual({
+      schemaVersion: 1,
+      action: 'abort',
+      requestedAt: '2026-08-24T12:01:00.000Z',
+    })
+  })
+
   it('refuses an ordinary session-directory swap immediately before control publication', () => {
     const root = runtimeRoot()
     const directory = createUiSession({ runtimeRoot: root, state: state() })
