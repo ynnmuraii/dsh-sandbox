@@ -234,6 +234,27 @@ describe('UI session store', () => {
     expect(existsSync(join(outside, 'request.json'))).toBe(false)
   })
 
+  it('rejects an ordinary same-name session-directory swap at the final state mutation', () => {
+    const root = runtimeRoot()
+    const sessionDir = createUiSession({ runtimeRoot: root, state: state() })
+    const parked = `${sessionDir}-parked`
+    const replacementState = join(sessionDir, 'state.json')
+    const replacement = '{"owner":"replacement"}\n'
+
+    expect(() => writeUiSession({
+      runtimeRoot: root,
+      state: state({ updatedAt: '2026-08-24T12:00:01.000Z' }),
+      beforeStateReplace() {
+        renameSync(sessionDir, parked)
+        mkdirSync(sessionDir)
+        writeFileSync(replacementState, replacement)
+      },
+    })).toThrow(/identity|changed|swap|refus/i)
+
+    expect(readFileSync(replacementState, 'utf8')).toBe(replacement)
+    expect(JSON.parse(readFileSync(join(parked, 'state.json'), 'utf8'))).toEqual(state())
+  })
+
   it('latches, deduplicates, and sorts stale reasons irreversibly', () => {
     const current = state()
     const stale = latchUiStaleReasons(

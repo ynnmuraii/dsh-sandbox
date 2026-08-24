@@ -268,6 +268,28 @@ describe('publishUiResult', () => {
     expect(existsSync(join(outside, `${value.sessionId}.tmp`))).toBe(false)
     expect(existsSync(join(outside, 'result.json'))).toBe(false)
   })
+
+  it('rejects an ordinary same-name session-directory swap at finalization', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const sessionDirectory = join(root, pluginEvidenceKey(value.plugin), value.sessionId)
+    const parked = `${sessionDirectory}.parked`
+    const replacementResult = join(sessionDirectory, 'result.json')
+
+    expect(() => publishUiResult({
+      uiRunsRoot: root,
+      result: value,
+      beforeFinalize() {
+        renameSync(sessionDirectory, parked)
+        mkdirSync(sessionDirectory)
+        writeFileSync(join(sessionDirectory, `${value.sessionId}.tmp`), '{"owner":"replacement"}\n')
+      },
+    })).toThrow(/identity|changed|swap|refus/i)
+
+    expect(existsSync(replacementResult)).toBe(false)
+    expect(readFileSync(join(sessionDirectory, `${value.sessionId}.tmp`), 'utf8')).toBe('{"owner":"replacement"}\n')
+    expect(existsSync(join(parked, 'result.json'))).toBe(false)
+  })
 })
 
 describe('loadUiResults', () => {
