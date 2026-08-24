@@ -126,10 +126,13 @@ export async function prepareUiRuntime(
   }
   if (opts.target === 'next') {
     opts.ownedSession?.assertCurrent()
+    assertMutationTarget(profileDir, 'profile-install')
     deps.beforeRuntimeMutation?.('profile-install', profileDir)
     opts.ownedSession?.assertCurrent()
+    assertMutationTarget(profileDir, 'profile-install')
     await deps.installNextProfile(profileDir, buildUiRuntimeEnvironment(plan), signal)
     opts.ownedSession?.assertCurrent()
+    assertMutationTarget(profileDir, 'profile-install')
   }
   return plan
 }
