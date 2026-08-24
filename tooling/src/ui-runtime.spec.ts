@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { computePluginDigest } from './plugin-snapshot.js'
@@ -99,6 +99,11 @@ function dependencies(compatibility: Compatibility) {
     installNextProfile,
   }
   return { deps, installNextProfile, resolveLauncher }
+}
+
+function identityOf(path: string): { dev: number; ino: number } {
+  const stat = lstatSync(path)
+  return { dev: stat.dev, ino: stat.ino }
 }
 
 describe('prepareUiRuntime', () => {
@@ -239,6 +244,24 @@ describe('prepareUiRuntime', () => {
     expect(installNextProfile.mock.calls[0]![1].DSH_HOME).toBe(plan.runtimeHome)
     expect(installNextProfile.mock.calls[0]![2]).toBeInstanceOf(AbortSignal)
     expect(computePluginDigest(current.plugin.sourcePath)).toEqual(before)
+  })
+
+  it('returns retained identities for every spawn-boundary runtime path', async () => {
+    const current = fixture()
+    const { deps } = dependencies(current.compatibility)
+
+    const plan = await prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+    }, deps)
+
+    const sessionDir = join(current.root, '.lab', 'runtime', 'ui-sessions', SESSION)
+    expect(plan.retained.runtimeHome).toEqual(identityOf(join(sessionDir, 'home')))
+    expect(plan.retained.profileDir).toEqual(identityOf(plan.profileDir))
+    expect(plan.retained.overlayDir).toEqual(identityOf(join(sessionDir, 'overlay')))
+    expect(plan.retained.overlayFile).toEqual(identityOf(plan.overlayPath))
   })
 
   it('forwards cancellation to launcher resolution and profile installation', async () => {

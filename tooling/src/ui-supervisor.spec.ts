@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -71,6 +71,12 @@ function fixture(sessionId = SESSION, existingRoot?: string) {
   mkdirSync(plan.profileDir, { recursive: true })
   mkdirSync(join(plan.overlayPath, '..'), { recursive: true })
   writeFileSync(plan.overlayPath, 'overlay')
+  plan.retained = {
+    runtimeHome: identityOf(plan.runtimeHome),
+    profileDir: identityOf(plan.profileDir),
+    overlayDir: identityOf(join(sessionDir, 'overlay')),
+    overlayFile: identityOf(plan.overlayPath),
+  }
   const request: UiSupervisorRequestV1 = {
     schemaVersion: 1,
     root,
@@ -117,6 +123,11 @@ function dependencies(plan: UiRuntimePlan, child = fakeChild()) {
     maxLogBytes: 64 * 1024,
   }
   return { deps, child, stopChildTree }
+}
+
+function identityOf(path: string): { dev: number; ino: number } {
+  const stat = lstatSync(path)
+  return { dev: stat.dev, ino: stat.ino }
 }
 
 async function waitFor(check: () => boolean, label: string): Promise<void> {
@@ -589,6 +600,172 @@ describe('runUiSupervisor', () => {
       cleanup: 'pass',
     })
     expect(existsSync(current.plan.runtimeHome)).toBe(false)
+  })
+
+  it('refuses to spawn after the prepared profile directory is replaced by name', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.openLog = vi.fn((sessionDir: string, maxBytes: number) => {
+      const log = openBoundedSupervisorLog(sessionDir, maxBytes)
+      renameSync(current.plan.profileDir, `${current.plan.profileDir}.parked`)
+      mkdirSync(current.plan.profileDir)
+      return log
+    })
+
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+    await waitFor(() => {
+      const state = readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })
+      return state.state === 'crashed' && state.supervisorPid === process.pid
+    }, 'pre-spawn profile-directory replacement refusal')
+    expect(bundle.deps.spawnChild).not.toHaveBeenCalled()
+
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).resolves.toBeUndefined()
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'aborted',
+      cleanup: 'pass',
+    })
+    expect(existsSync(join(current.sessionDir, 'control.json'))).toBe(false)
+    expect(existsSync(current.plan.profileDir)).toBe(false)
+  })
+
+  it('refuses to spawn after the prepared runtime home is replaced by name', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.openLog = vi.fn((sessionDir: string, maxBytes: number) => {
+      const log = openBoundedSupervisorLog(sessionDir, maxBytes)
+      renameSync(current.plan.runtimeHome, `${current.plan.runtimeHome}.parked`)
+      mkdirSync(current.plan.runtimeHome)
+      return log
+    })
+
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+    await waitFor(() => {
+      const state = readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })
+      return state.state === 'crashed' && state.supervisorPid === process.pid
+    }, 'pre-spawn runtime-home replacement refusal')
+    expect(bundle.deps.spawnChild).not.toHaveBeenCalled()
+
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).resolves.toBeUndefined()
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'aborted',
+      cleanup: 'pass',
+    })
+    expect(existsSync(current.plan.runtimeHome)).toBe(false)
+  })
+
+  it('refuses to spawn after the overlay file is replaced by name', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.openLog = vi.fn((sessionDir: string, maxBytes: number) => {
+      const log = openBoundedSupervisorLog(sessionDir, maxBytes)
+      renameSync(current.plan.overlayPath, `${current.plan.overlayPath}.parked`)
+      writeFileSync(current.plan.overlayPath, 'forged overlay')
+      return log
+    })
+
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+    await waitFor(() => {
+      const state = readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })
+      return state.state === 'crashed' && state.supervisorPid === process.pid
+    }, 'pre-spawn overlay-file replacement refusal')
+    expect(bundle.deps.spawnChild).not.toHaveBeenCalled()
+
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).resolves.toBeUndefined()
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'aborted',
+      cleanup: 'pass',
+    })
+    expect(existsSync(current.plan.overlayPath)).toBe(false)
+  })
+
+  it('refuses to spawn after the profile directory becomes a junction outside the session', async () => {
+    const current = fixture()
+    const outside = mkdtempSync(join(tmpdir(), 'dsh-lab-ui-supervisor-profile-outside-'))
+    roots.push(outside)
+    const bundle = dependencies(current.plan)
+    bundle.deps.openLog = vi.fn((sessionDir: string, maxBytes: number) => {
+      const log = openBoundedSupervisorLog(sessionDir, maxBytes)
+      rmSync(current.plan.profileDir, { recursive: true, force: true })
+      symlinkSync(outside, current.plan.profileDir, process.platform === 'win32' ? 'junction' : 'dir')
+      return log
+    })
+
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+    await waitFor(() => {
+      const state = readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })
+      return state.state === 'crashed' && state.supervisorPid === process.pid
+    }, 'pre-spawn profile-directory junction refusal')
+    expect(bundle.deps.spawnChild).not.toHaveBeenCalled()
+
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).resolves.toBeUndefined()
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'aborted',
+      cleanup: 'pass',
+    })
+    expect(readdirSync(outside)).toEqual([])
+  })
+
+  it('refuses to spawn after the overlay directory becomes a junction outside the session', async () => {
+    const current = fixture()
+    const outside = mkdtempSync(join(tmpdir(), 'dsh-lab-ui-supervisor-overlay-outside-'))
+    roots.push(outside)
+    const bundle = dependencies(current.plan)
+    bundle.deps.openLog = vi.fn((sessionDir: string, maxBytes: number) => {
+      const log = openBoundedSupervisorLog(sessionDir, maxBytes)
+      rmSync(join(current.sessionDir, 'overlay'), { recursive: true, force: true })
+      symlinkSync(outside, join(current.sessionDir, 'overlay'), process.platform === 'win32' ? 'junction' : 'dir')
+      return log
+    })
+
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+    await waitFor(() => {
+      const state = readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })
+      return state.state === 'crashed' && state.supervisorPid === process.pid
+    }, 'pre-spawn overlay-directory junction refusal')
+    expect(bundle.deps.spawnChild).not.toHaveBeenCalled()
+
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).rejects.toThrow(/cleanup|symlink|junction|refus/i)
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'crashed',
+      cleanup: 'fail',
+    })
+    expect(existsSync(join(current.sessionDir, 'control.json'))).toBe(true)
+    expect(readdirSync(outside)).toEqual([])
   })
 
   it('bounds the live diagnostic log to the newest configured bytes', async () => {
