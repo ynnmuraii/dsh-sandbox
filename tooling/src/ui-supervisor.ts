@@ -154,6 +154,11 @@ export async function runUiSupervisor(
       if (control === undefined) continue
       preparationController.abort()
       await preparation
+      if (preparationError !== undefined && !isAbortError(preparationError)) {
+        const message = `UI preparation cancellation failed: ${preparationError instanceof Error ? preparationError.message : String(preparationError)}`
+        markCrashed(runtimeRoot, request.sessionId, message, deps, 'fail')
+        throw new Error(message, { cause: preparationError })
+      }
       await handleControl(control, {
         deps,
         runtimeRoot,
@@ -480,6 +485,10 @@ function markCrashed(runtimeRoot: string, sessionId: string, error: string, deps
     ...(cleanup === undefined ? {} : { cleanup }),
     updatedAt: nextTimestamp(deps.now(), state.updatedAt),
   }, deps)
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
 }
 
 function writeState(runtimeRoot: string, state: UiSessionStateV1, deps: UiSupervisorDependencies): void {

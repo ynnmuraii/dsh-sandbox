@@ -128,6 +128,7 @@ export function pnpmAsync(args: string[], opts: AsyncRunOpts): Promise<Buffer | 
     )
   }
   signal.addEventListener('abort', onAbort, { once: true })
+  if (signal.aborted) onAbort()
   return result
 }
 
