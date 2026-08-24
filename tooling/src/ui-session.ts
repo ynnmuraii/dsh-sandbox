@@ -169,6 +169,7 @@ export function writeUiControl(opts: {
   control: UiControlV1
   beforeControlLink?: (controlPath: string) => void
   ownedSession?: OwnedUiDirectory
+  removeTemporaryControl?: (temporaryPath: string) => void
 }): void {
   validateControl(opts.control)
   assertSessionId(opts.sessionId)
@@ -205,9 +206,10 @@ export function writeUiControl(opts: {
   } finally {
     try {
       opts.ownedSession?.assertCurrent()
-      unlinkSync(temporaryPath)
+      if (opts.removeTemporaryControl) opts.removeTemporaryControl(temporaryPath)
+      else unlinkSync(temporaryPath)
     } catch (error) {
-      if (!isNotFoundError(error) && opts.ownedSession === undefined) throw error
+      if (!isNotFoundError(error)) throw error
     }
   }
 }
