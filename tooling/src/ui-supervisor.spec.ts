@@ -305,7 +305,11 @@ describe('runUiSupervisor', () => {
     bundle.deps.prepareRuntime = vi.fn(async (opts: Parameters<UiSupervisorDependencies['prepareRuntime']>[0] & { signal?: AbortSignal }): Promise<UiRuntimePlan> => {
       expect(opts.signal).toBeInstanceOf(AbortSignal)
       return await new Promise<UiRuntimePlan>((_resolve, reject) => {
-        opts.signal!.addEventListener('abort', () => reject(new Error('preparation aborted')), { once: true })
+        opts.signal!.addEventListener('abort', () => {
+          const error = new Error('preparation aborted')
+          error.name = 'AbortError'
+          reject(error)
+        }, { once: true })
       })
     })
     const running = runUiSupervisor(current.request, bundle.deps)
@@ -326,6 +330,33 @@ describe('runUiSupervisor', () => {
     })
     expect(existsSync(join(current.sessionDir, 'control.json'))).toBe(false)
     expect(existsSync(current.plan.runtimeHome)).toBe(false)
+  })
+
+  it('never reports abort success when preparation tree cancellation itself fails', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.prepareRuntime = vi.fn(async (opts: Parameters<UiSupervisorDependencies['prepareRuntime']>[0] & { signal?: AbortSignal }): Promise<UiRuntimePlan> => {
+      return await new Promise<UiRuntimePlan>((_resolve, reject) => {
+        opts.signal!.addEventListener('abort', () => reject(new Error('owned preparation process group remained alive')), { once: true })
+      })
+    })
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+    await waitFor(() => readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).supervisorPid === process.pid, 'starting supervisor ownership')
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).rejects.toThrow(/process group|cleanup|cancel|alive/i)
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'crashed',
+      cleanup: 'fail',
+      error: expect.stringMatching(/process group|cleanup|cancel|alive/i),
+    })
+    expect(existsSync(join(current.sessionDir, 'control.json'))).toBe(true)
+    expect(existsSync(current.plan.runtimeHome)).toBe(true)
   })
 
   it('keeps a recovery owner after preparation failure until explicit abort cleans partial runtime', async () => {
