@@ -24,6 +24,7 @@ import {
 } from './ui-session.js'
 import { loadUiResults, publishUiResult } from './ui-evidence.js'
 import { computeContextDigest } from './status.js'
+import { resolveTsxLoader } from './run.js'
 import {
   abortUiSession,
   buildUiSupervisorSpawn,
@@ -233,7 +234,7 @@ describe('UI supervisor spawn plan', () => {
     expect(binIndex).toBeGreaterThanOrEqual(0)
     expect(plan.args.at(-1)).toBe(requestPath)
     if (plan.args[binIndex]!.endsWith('.ts')) {
-      expect(plan.args.slice(0, binIndex)).toEqual(['--import', expect.stringMatching(/tsx[\\/]esm|tsx\/esm/i)])
+      expect(plan.args.slice(0, binIndex)).toEqual(['--import', resolveTsxLoader()])
     } else {
       expect(plan.args).toHaveLength(2)
     }
