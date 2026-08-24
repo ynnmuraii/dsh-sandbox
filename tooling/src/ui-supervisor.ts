@@ -298,6 +298,8 @@ export async function runUiSupervisor(
   } catch (error) {
     done = true
     const message = error instanceof Error ? error.message : String(error)
+    let recoveryMessage = message
+    let cleanupError: unknown
     try { diagnosticLog?.close() } catch { /* preserve the primary lifecycle error */ }
     if (child !== undefined && !treeCleanupConfirmed && !stopIssued) {
       stopIssued = true
@@ -306,29 +308,32 @@ export async function runUiSupervisor(
         await child.exited
         treeCleanupConfirmed = true
         exitSettled = true
-      } catch {
-        // Preserve the original setup/publication failure as the primary error.
+      } catch (failure) {
+        cleanupError = failure
+        recoveryMessage = `${message}; child tree cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`
       }
     }
     try {
       const state = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
-      if (child === undefined && state.state === 'starting') {
+      if (cleanupError !== undefined) {
+        markCrashed(runtimeRoot, request.sessionId, recoveryMessage, deps, ownedSession, 'fail', true)
+      } else if (child === undefined && state.state === 'starting') {
         writeState(runtimeRoot, {
           ...state,
           state: 'crashed',
           supervisorPid: process.pid,
-          error: message,
+          error: recoveryMessage,
           updatedAt: nextTimestamp(deps.now(), state.updatedAt),
         }, deps, ownedSession)
         await waitForRecoveryControl({ runtimeRoot, sessionDir, request, deps, ownedSession })
         return
-      }
-      if (state.cleanup !== 'fail' && (state.state === 'starting' || state.state === 'ready' || state.state === 'crashed')) {
-        markCrashed(runtimeRoot, request.sessionId, message, deps, ownedSession)
+      } else if (state.cleanup !== 'fail' && (state.state === 'starting' || state.state === 'ready' || state.state === 'crashed')) {
+        markCrashed(runtimeRoot, request.sessionId, recoveryMessage, deps, ownedSession)
       }
     } catch {
       // The bin reports the failure when the lease cannot be safely updated.
     }
+    if (cleanupError !== undefined) throw new AggregateError([error, cleanupError], recoveryMessage)
     throw error
   }
 }
@@ -526,9 +531,9 @@ function markCrashed(runtimeRoot: string, sessionId: string, error: string, deps
   const state = readOwnedSession(runtimeRoot, sessionId, ownedSession)
   if (state.state !== 'starting' && state.state !== 'ready' && state.state !== 'crashed') return
   const crashedBase = compactState(state, cleanup === undefined)
-  if (preserveSupervisor && cleanup === undefined) {
+  if (preserveSupervisor) {
     crashedBase.supervisorPid = process.pid
-    delete crashedBase.childPid
+    if (cleanup === undefined) delete crashedBase.childPid
   }
   writeState(runtimeRoot, {
     ...crashedBase,
