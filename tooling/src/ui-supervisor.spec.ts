@@ -96,7 +96,7 @@ function dependencies(plan: UiRuntimePlan, child = fakeChild()) {
   const stopChildTree = vi.fn(async () => {
     child.exit({ code: 0, signal: 'SIGTERM' })
   })
-  const deps = {
+  const deps: UiSupervisorDependencies = {
     prepareRuntime: vi.fn(async () => plan),
     spawnChild: vi.fn(() => child.handle),
     stopChildTree,
@@ -105,14 +105,6 @@ function dependencies(plan: UiRuntimePlan, child = fakeChild()) {
     sleep: ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 2))),
     pollIntervalMs: 1,
     maxLogBytes: 64 * 1024,
-  } as UiSupervisorDependencies & { writeLog(sessionDir: string, text: string, maxBytes: number): void }
-  // RED compatibility only: the reviewed implementation still calls the old
-  // chunk writer. The replacement implementation ignores this extra seam and
-  // owns one descriptor returned by openLog.
-  deps.writeLog = (sessionDir, value, maxBytes) => {
-    const path = join(sessionDir, 'supervisor.log')
-    const previous = existsSync(path) ? readFileSync(path) : Buffer.alloc(0)
-    writeFileSync(path, Buffer.concat([previous, Buffer.from(value)]).subarray(-maxBytes))
   }
   return { deps, child, stopChildTree }
 }
@@ -315,7 +307,6 @@ describe('runUiSupervisor', () => {
       close: vi.fn(),
     }
     bundle.deps.openLog = vi.fn(() => log)
-    bundle.deps.writeLog = log.write
     const running = runUiSupervisor(current.request, bundle.deps)
     const fallback = setTimeout(() => {
       try {
@@ -350,7 +341,6 @@ describe('runUiSupervisor', () => {
     })
     const log: UiDiagnosticLog = { write: vi.fn(), close: vi.fn() }
     bundle.deps.openLog = vi.fn(() => log)
-    bundle.deps.writeLog = vi.fn(() => { throw new Error('late output log failure') })
     const running = runUiSupervisor(current.request, bundle.deps)
     await waitFor(() => vi.mocked(bundle.deps.spawnChild).mock.calls.length === 1, 'child spawn')
     writeUiControl({
