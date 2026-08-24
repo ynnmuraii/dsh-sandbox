@@ -1,3 +1,6 @@
 [submodule "upstream/deepseek-harness"]
 	path = upstream/deepseek-harness
 	url = https://github.com/deepseek-ai/deepseek-harness.git
+[submodule "plugins/chat-annotations"]
+	path = plugins/chat-annotations
+	url = https://github.com/ynnmuraii/dsh-plugin-chat-annotations.git

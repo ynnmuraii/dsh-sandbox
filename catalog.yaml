@@ -5,6 +5,6 @@ plugins:
     maturity: experiment
   chat-annotations:
     path: plugins/chat-annotations
-    tracking: local
+    tracking: submodule
+    repository: https://github.com/ynnmuraii/dsh-plugin-chat-annotations.git
     maturity: experiment
-
