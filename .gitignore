@@ -13,4 +13,13 @@ coverage/
 # force-record the gitlink because this path is ignored:
 #   git submodule add -f <url> plugins/<name>   (see docs/using-the-lab.md)
 plugins/*
+debug.log
+docs/dsh-agent-teams-sandbox-assessment-2026-08-23.md
+docs/lab-issues-2026-08-23.md
+docs/superpowers/plans/2026-08-21-lightweight-example.md
+docs/superpowers/plans/2026-08-21-oauth-providers-plugin.md
+docs/superpowers/plans/2026-08-21-upstream-update-workflow.md
+docs/superpowers/plans/2026-08-22-ux-plus-selection-toolbar.md
+docs/superpowers/specs/2026-08-21-upstream-update-workflow-design.md
+research/dsh-oauth-plugin-patterns.md
 
