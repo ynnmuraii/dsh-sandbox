@@ -600,6 +600,41 @@ describe('getUiSessionStatus', () => {
     expect(readFileSync(statePath)).toEqual(before)
   })
 
+  it('keeps plugin inspection failures distinct from ordinary plugin disappearance', () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    const parked = `${current.sourcePath}.parked`
+    const statePath = join(runtimeRoot(current.root), 'ui-sessions', SESSION, 'state.json')
+    const before = readFileSync(statePath)
+    renameSync(current.sourcePath, parked)
+    writeFileSync(current.sourcePath, 'not a plugin directory')
+
+    expect(() => getUiSessionStatus({ root: current.root, sessionId: SESSION }, serviceDependencies().deps)).toThrow(
+      /plugin|directory|inspect|notdir|invalid|unsafe/i,
+    )
+    expect(readFileSync(statePath)).toEqual(before)
+  })
+
+  it('does not stale a next session when only the unselected master target is absent', () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    writeFileSync(join(current.root, 'workbench', 'compatibility.yaml'), [
+      'targets:',
+      '  next:',
+      `    dsh: ${NEXT}`,
+      '    cordis: 4.0.1',
+      '    node: 22.20.0',
+      '    pnpm: 11.7.0',
+      '',
+    ].join('\n'))
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, serviceDependencies().deps)
+
+    expect(view).toMatchObject({ state: 'ready', stale: false, staleReasons: [] })
+    expect(view.url).toBe('http://127.0.0.1:49152')
+    expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION }).staleReasons).toBeUndefined()
+  })
+
   it('derives an orphaned crash without killing or rewriting a recorded PID', () => {
     const current = fixture()
     createState(current, SESSION, 'ready')

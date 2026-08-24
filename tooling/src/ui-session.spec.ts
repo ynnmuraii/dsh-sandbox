@@ -156,6 +156,38 @@ describe('UI session store', () => {
     expect(() => createUiSession({ runtimeRoot: root, state: value })).toThrow(/exist|already|session/i)
   })
 
+  it('rejects a regular state-file replacement between inspection and descriptor open', () => {
+    const root = runtimeRoot()
+    const directory = createUiSession({ runtimeRoot: root, state: state() })
+    const statePath = join(directory, 'state.json')
+    const parked = `${statePath}.parked`
+    const forged = state({
+      state: 'crashed',
+      error: 'forged lifecycle state',
+      updatedAt: '2026-08-24T12:00:01.000Z',
+    })
+    let seamCalled = false
+    const readPinnedUiSession = readUiSession as unknown as (opts: {
+      runtimeRoot: string
+      sessionId: string
+      beforeStateOpen?(statePath: string): void
+    }) => UiSessionStateV1
+
+    expect(() => readPinnedUiSession({
+      runtimeRoot: root,
+      sessionId: SESSION,
+      beforeStateOpen(path) {
+        seamCalled = true
+        expect(path).toBe(statePath)
+        renameSync(statePath, parked)
+        writeFileSync(statePath, `${JSON.stringify(forged, null, 2)}\n`)
+      },
+    })).toThrow(/identity|changed|replaced|regular file|refus/i)
+
+    expect(seamCalled).toBe(true)
+    expect(JSON.parse(readFileSync(statePath, 'utf8'))).toEqual(forged)
+  })
+
   it('rejects unknown and invalid fields at every lease level', () => {
     const root = runtimeRoot()
     const cases: unknown[] = [
@@ -551,6 +583,44 @@ describe('UI session store', () => {
     })).toThrow(/exist|control|pending/i)
     clearUiControl({ runtimeRoot: root, sessionId: SESSION })
     expect(readUiControl({ runtimeRoot: root, sessionId: SESSION })).toBeUndefined()
+  })
+
+  it('rejects a regular control-file replacement between inspection and descriptor open', () => {
+    const root = runtimeRoot()
+    const directory = createUiSession({ runtimeRoot: root, state: state() })
+    const controlPath = join(directory, 'control.json')
+    const parked = `${controlPath}.parked`
+    const control: UiControlV1 = {
+      schemaVersion: 1,
+      action: 'abort',
+      requestedAt: '2026-08-24T12:01:00.000Z',
+    }
+    const forged: UiControlV1 = {
+      schemaVersion: 1,
+      action: 'finish',
+      requestedAt: '2026-08-24T12:01:01.000Z',
+    }
+    writeUiControl({ runtimeRoot: root, sessionId: SESSION, control })
+    let seamCalled = false
+    const readPinnedUiControl = readUiControl as unknown as (opts: {
+      runtimeRoot: string
+      sessionId: string
+      beforeControlOpen?(controlPath: string): void
+    }) => UiControlV1 | undefined
+
+    expect(() => readPinnedUiControl({
+      runtimeRoot: root,
+      sessionId: SESSION,
+      beforeControlOpen(path) {
+        seamCalled = true
+        expect(path).toBe(controlPath)
+        renameSync(controlPath, parked)
+        writeFileSync(controlPath, `${JSON.stringify(forged, null, 2)}\n`)
+      },
+    })).toThrow(/identity|changed|replaced|regular file|refus/i)
+
+    expect(seamCalled).toBe(true)
+    expect(JSON.parse(readFileSync(controlPath, 'utf8'))).toEqual(forged)
   })
 
   it('surfaces non-ENOENT temporary-control cleanup failure after linking the control', () => {

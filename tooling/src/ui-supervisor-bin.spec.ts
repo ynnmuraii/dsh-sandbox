@@ -82,6 +82,56 @@ describe('runSupervisorBin', () => {
     expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).state).toBe('starting')
   })
 
+  it('rejects a regular request-file replacement between inspection and descriptor open', async () => {
+    const current = fixture()
+    const parked = `${current.requestPath}.parked`
+    const forged = {
+      ...current.request,
+      plugin: { ...current.request.plugin, sourcePath: join(current.root, 'forged-plugin') },
+    }
+    let seamCalled = false
+    const deps = {
+      ...dependencies(),
+      beforeRequestOpen(path: string) {
+        seamCalled = true
+        expect(path).toBe(current.requestPath)
+        renameSync(current.requestPath, parked)
+        writeFileSync(current.requestPath, JSON.stringify(forged))
+      },
+    } as UiSupervisorBinDependencies & { beforeRequestOpen(path: string): void }
+
+    await expect(runSupervisorBin([current.requestPath], deps)).resolves.toBe(1)
+    expect(seamCalled).toBe(true)
+    expect(deps.runSupervisor).not.toHaveBeenCalled()
+    expect(deps.stderr).toHaveBeenCalledWith(expect.stringMatching(/identity|changed|replaced|request|refus/i))
+  })
+
+  it('retains the request parent identity from reading through session-owner claim', async () => {
+    const current = fixture()
+    const sessionDir = join(current.runtimeRoot, 'ui-sessions', SESSION)
+    const parked = `${sessionDir}.request-read-parked`
+    const replacementState = readFileSync(join(sessionDir, 'state.json'))
+    let seamCalled = false
+    const deps = {
+      ...dependencies(),
+      afterRequestRead(path: string) {
+        seamCalled = true
+        expect(path).toBe(current.requestPath)
+        renameSync(sessionDir, parked)
+        mkdirSync(sessionDir)
+        writeFileSync(join(sessionDir, 'state.json'), replacementState)
+        writeFileSync(join(sessionDir, 'request.json'), JSON.stringify(current.request))
+        writeFileSync(join(sessionDir, 'replacement-canary.txt'), 'replacement')
+      },
+    } as UiSupervisorBinDependencies & { afterRequestRead(path: string): void }
+
+    await expect(runSupervisorBin([current.requestPath], deps)).resolves.toBe(1)
+    expect(seamCalled).toBe(true)
+    expect(deps.runSupervisor).not.toHaveBeenCalled()
+    expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(deps.stderr).toHaveBeenCalledWith(expect.stringMatching(/identity|changed|replacement|request|session|refus/i))
+  })
+
   it('reports an execution failure into only the safely matched lease', async () => {
     const current = fixture()
     const deps = dependencies(vi.fn(async () => { throw new Error('injected supervisor failure\nSECRET') }))
