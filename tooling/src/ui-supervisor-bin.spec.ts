@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createUiSession, readUiSession, type UiSessionStateV1 } from './ui-session.js'
@@ -110,5 +110,29 @@ describe('runSupervisorBin', () => {
     expect(readFileSync(join(sessionDir, 'state.json'))).toEqual(replacementState)
     expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
     expect(deps.stderr).toHaveBeenCalledWith(expect.stringMatching(/identity|changed|supervisor/i))
+  })
+
+  it('does not reacquire a replacement between the retained bin guard and failure-state write', async () => {
+    const current = fixture()
+    const sessionDir = join(current.runtimeRoot, 'ui-sessions', SESSION)
+    const parked = `${sessionDir}.failure-write-parked`
+    const replacementState = readFileSync(join(sessionDir, 'state.json'))
+    const beforeFailureWrite = vi.fn(() => {
+      renameSync(sessionDir, parked)
+      mkdirSync(sessionDir)
+      writeFileSync(join(sessionDir, 'state.json'), replacementState)
+      writeFileSync(join(sessionDir, 'replacement-canary.txt'), 'replacement')
+    })
+    const deps = {
+      ...dependencies(vi.fn(async () => { throw new Error('injected supervisor failure') })),
+      beforeFailureWrite,
+    } as UiSupervisorBinDependencies & { beforeFailureWrite(): void }
+
+    await expect(runSupervisorBin([current.requestPath], deps)).resolves.toBe(1)
+
+    expect(beforeFailureWrite).toHaveBeenCalledTimes(1)
+    expect(readFileSync(join(sessionDir, 'state.json'))).toEqual(replacementState)
+    expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(join(sessionDir, '.state.lock'))).toBe(false)
   })
 })

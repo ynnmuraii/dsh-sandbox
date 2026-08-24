@@ -108,6 +108,42 @@ describe('UI session store', () => {
     expect(() => created.ownedSession.assertCurrent()).toThrow(/identity|changed|ownership|replacement/i)
   })
 
+  it('does not write initial state into a replacement installed after owner capture', () => {
+    const root = runtimeRoot()
+    const sessionDir = join(root, 'ui-sessions', SESSION)
+    const parked = `${sessionDir}.owner-captured-parked`
+    let seamCalled = false
+    let observed: unknown
+    const createOwnedUiSession = (sessionStore as unknown as {
+      createOwnedUiSession(opts: {
+        runtimeRoot: string
+        state: UiSessionStateV1
+        afterOwnerCapture?(sessionDir: string): void
+      }): { sessionDir: string; ownedSession: OwnedUiDirectory }
+    }).createOwnedUiSession
+
+    try {
+      createOwnedUiSession({
+        runtimeRoot: root,
+        state: state(),
+        afterOwnerCapture(directory) {
+          seamCalled = true
+          renameSync(directory, parked)
+          mkdirSync(directory)
+          writeFileSync(join(directory, 'replacement-canary.txt'), 'replacement')
+        },
+      })
+    } catch (error) {
+      observed = error
+    }
+
+    expect(seamCalled).toBe(true)
+    expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(join(sessionDir, 'state.json'))).toBe(false)
+    expect(observed).toBeInstanceOf(Error)
+    expect((observed as Error).message).toMatch(/identity|changed|ownership|replacement|refus/i)
+  })
+
   it('exclusively creates and round-trips an exact starting lease', () => {
     const root = runtimeRoot()
     const value = state()
@@ -287,6 +323,57 @@ describe('UI session store', () => {
     expect(observed).toBeInstanceOf(Error)
     expect((observed as Error).message).toMatch(/identity|changed|swap|ownership|refus/i)
   })
+
+  it.each(['request', 'state', 'control'] as const)(
+    'does not reacquire a replacement as mutation authority for an owned %s write',
+    operation => {
+      const root = runtimeRoot()
+      const created = (sessionStore as unknown as {
+        createOwnedUiSession(opts: { runtimeRoot: string; state: UiSessionStateV1 }): { sessionDir: string; ownedSession: OwnedUiDirectory }
+      }).createOwnedUiSession({ runtimeRoot: root, state: state() })
+      const parked = `${created.sessionDir}.${operation}-parked`
+      const replacementState = readFileSync(join(created.sessionDir, 'state.json'))
+      renameSync(created.sessionDir, parked)
+      mkdirSync(created.sessionDir)
+      writeFileSync(join(created.sessionDir, 'state.json'), replacementState)
+      writeFileSync(join(created.sessionDir, 'replacement-canary.txt'), 'replacement')
+      let observed: unknown
+
+      try {
+        if (operation === 'request') {
+          writeUiSessionRequest({
+            runtimeRoot: root,
+            sessionId: SESSION,
+            request: { schemaVersion: 1, sessionId: SESSION },
+            ownedSession: created.ownedSession,
+          } as Parameters<typeof writeUiSessionRequest>[0] & { ownedSession: OwnedUiDirectory })
+        } else if (operation === 'state') {
+          writeUiSession({
+            runtimeRoot: root,
+            state: state({ updatedAt: '2026-08-24T12:00:01.000Z' }),
+            ownedSession: created.ownedSession,
+          } as Parameters<typeof writeUiSession>[0] & { ownedSession: OwnedUiDirectory })
+        } else {
+          writeUiControl({
+            runtimeRoot: root,
+            sessionId: SESSION,
+            control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+            ownedSession: created.ownedSession,
+          } as Parameters<typeof writeUiControl>[0] & { ownedSession: OwnedUiDirectory })
+        }
+      } catch (error) {
+        observed = error
+      }
+
+      expect(readFileSync(join(created.sessionDir, 'state.json'))).toEqual(replacementState)
+      expect(readFileSync(join(created.sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+      expect(existsSync(join(created.sessionDir, 'request.json'))).toBe(false)
+      expect(existsSync(join(created.sessionDir, 'control.json'))).toBe(false)
+      expect(existsSync(join(created.sessionDir, '.state.lock'))).toBe(false)
+      expect(observed).toBeInstanceOf(Error)
+      expect((observed as Error).message).toMatch(/identity|changed|swap|ownership|replacement|refus/i)
+    },
+  )
 
   it('rejects an ordinary same-name session-directory swap at the final state mutation', () => {
     const root = runtimeRoot()
