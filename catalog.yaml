@@ -3,3 +3,8 @@ plugins:
     path: plugins/example
     tracking: local
     maturity: experiment
+  chat-annotations:
+    path: plugins/chat-annotations
+    tracking: local
+    maturity: experiment
+
