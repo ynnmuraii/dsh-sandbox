@@ -556,6 +556,35 @@ describe('loadUiResults', () => {
     expect(JSON.parse(readFileSync(join(parked, value.sessionId, 'result.json'), 'utf8'))).toEqual(value)
   })
 
+  it('revalidates the retained plugin root before capturing each enumerated session', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    publishUiResult({ uiRunsRoot: root, result: value })
+    const key = pluginEvidenceKey(value.plugin)
+    const pluginRoot = join(root, key)
+    const parked = `${pluginRoot}.before-session-capture-parked`
+    const replacementSession = join(pluginRoot, value.sessionId)
+    const forged = { ...value, verdict: 'fail' as const, summary: 'forged session after enumeration' }
+    let seamCalled = false
+
+    expect(() => loadUiResults({
+      uiRunsRoot: root,
+      pluginKey: key,
+      beforeSessionEvidenceCapture(path: string) {
+        seamCalled = true
+        expect(path).toBe(replacementSession)
+        renameSync(pluginRoot, parked)
+        mkdirSync(replacementSession, { recursive: true })
+        writeFileSync(join(replacementSession, 'result.json'), `${JSON.stringify(forged, null, 2)}\n`)
+      },
+    } as Parameters<typeof loadUiResults>[0] & { beforeSessionEvidenceCapture(path: string): void })).toThrow(
+      /identity|changed|replacement|ownership|corrupt|refus/i,
+    )
+
+    expect(seamCalled).toBe(true)
+    expect(JSON.parse(readFileSync(join(parked, value.sessionId, 'result.json'), 'utf8'))).toEqual(value)
+  })
+
   it('revalidates a finalized result immediately before reading it', () => {
     const root = uiRunsRoot()
     const value = result()
