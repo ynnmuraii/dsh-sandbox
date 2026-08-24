@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -20,6 +21,7 @@ import {
   readUiSession,
   writeUiControl,
   writeUiSession,
+  writeUiSessionRequest,
   type UiControlV1,
   type UiSessionStateV1,
 } from './ui-session.js'
@@ -172,6 +174,10 @@ describe('UI session store', () => {
     expect(() => writeUiSession({ runtimeRoot: root, state: state({ updatedAt: '2026-08-24T12:00:02.000Z' }) })).toThrow(
       /transition|ready.*starting/i,
     )
+    expect(() => writeUiSession({
+      runtimeRoot: root,
+      state: state({ state: 'aborted', cleanup: 'pass', updatedAt: '2026-08-24T12:00:02.000Z' }),
+    })).toThrow(/transition|ready.*aborted/i)
     const stopping = state({
       state: 'stopping',
       cleanup: 'pass',
@@ -188,6 +194,23 @@ describe('UI session store', () => {
       /terminal|immutable|transition/i,
     )
     expect(() => writeUiSession({ runtimeRoot: root, state: finished })).not.toThrow()
+  })
+
+  it('writes request.json only through the validated session directory', () => {
+    expect(writeUiSessionRequest).toBeTypeOf('function')
+    const root = runtimeRoot()
+    const sessionDir = createUiSession({ runtimeRoot: root, state: state() })
+    const parked = `${sessionDir}-parked`
+    const outside = join(root, 'outside-plugin')
+    renameSync(sessionDir, parked)
+    mkdirSync(outside)
+    symlinkSync(outside, sessionDir, process.platform === 'win32' ? 'junction' : 'dir')
+    expect(() => writeUiSessionRequest({
+      runtimeRoot: root,
+      sessionId: SESSION,
+      request: { schemaVersion: 1, sessionId: SESSION },
+    })).toThrow(/symlink|junction|session|unsafe/i)
+    expect(existsSync(join(outside, 'request.json'))).toBe(false)
   })
 
   it('latches, deduplicates, and sorts stale reasons irreversibly', () => {
