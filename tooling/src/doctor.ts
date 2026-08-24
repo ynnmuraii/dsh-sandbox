@@ -5,12 +5,6 @@ import { load as loadYaml } from 'js-yaml'
 import { loadCompatibility, loadCompatibilityFromFile, loadCatalogFromFile } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
 import { contextDocuments, snapshotContext } from './sync.js'
-import {
-  AGENT_SKILL_PATH,
-  normalizeGeneratedText,
-  renderAgentSkill,
-  SKILL_SOURCE_PATH,
-} from './skill.js'
 import { verifyUpstreamCommit } from './upstream.js'
 import { pnpm } from './proc.js'
 
@@ -43,9 +37,6 @@ function workingTreeDirty(dir: string): boolean {
 
 export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[]> {
   const out: DiagnosticResult[] = []
-  // Run the isolated, read-only skill gate first so diagnostics survive any
-  // unrelated compatibility, catalog, or toolchain failure below.
-  out.push(...portableSkillDiagnostics(root))
   const compatPath = rootPath(root, ROOT_PATHS.compatibility)
   let compat: ReturnType<typeof loadCompatibilityFromFile> | undefined
   if (!existsSync(compatPath)) {
@@ -226,71 +217,6 @@ export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[
   }
 
   return out
-}
-
-function portableSkillDiagnostics(root: string): DiagnosticResult[] {
-  const out: DiagnosticResult[] = []
-  const sourcePath = rootPath(root, SKILL_SOURCE_PATH)
-  const projectionPath = rootPath(root, AGENT_SKILL_PATH)
-
-  let body: string
-  try {
-    body = readFileSync(sourcePath, 'utf8')
-  } catch (error) {
-    const kind = errorCode(error) === 'ENOENT' ? 'missing' : 'unreadable'
-    out.push({
-      level: 'error',
-      message: `agent skill source ${kind}: ${sourcePath}${formatError(error)}`,
-    })
-    return out
-  }
-
-  let expected: string
-  try {
-    expected = renderAgentSkill({ body, documents: contextDocuments(root) })
-  } catch (error) {
-    out.push({
-      level: 'error',
-      message: `agent skill source invalid: ${sourcePath}${formatError(error)}`,
-    })
-    return out
-  }
-
-  let actual: string
-  try {
-    actual = readFileSync(projectionPath, 'utf8')
-  } catch (error) {
-    if (errorCode(error) !== 'ENOENT') {
-      out.push({
-        level: 'error',
-        message: `agent skill projection unreadable: ${projectionPath}${formatError(error)}`,
-      })
-      return out
-    }
-    out.push({
-      level: 'error',
-      message: `stale agent skill: ${projectionPath} (run \`lab sync-context\`)`,
-    })
-    return out
-  }
-
-  if (normalizeGeneratedText(actual) !== normalizeGeneratedText(expected)) {
-    out.push({
-      level: 'error',
-      message: `stale agent skill: ${projectionPath} (run \`lab sync-context\`)`,
-    })
-  }
-  return out
-}
-
-function errorCode(error: unknown): string | undefined {
-  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined
-  const code = (error as { code?: unknown }).code
-  return typeof code === 'string' ? code : undefined
-}
-
-function formatError(error: unknown): string {
-  return ` (${error instanceof Error ? error.message : String(error)})`
 }
 
 // Diagnostics for a cataloged `tracking: submodule` plugin repo, without

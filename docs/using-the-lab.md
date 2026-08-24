@@ -26,12 +26,11 @@ Current uncommitted and untracked files are included in verification. `verify`
 uses a temporary workspace and always removes it, while finalized evidence is
 minimal forge memory rather than a second working tree. Catalog lookup is
 optional; `init`/initialization is optional as well. Only explicit authoring
-commands mutate plugin repositories. The portable agent entrypoint is the generated
-`.agents/skills/dsh-plugin-development/SKILL.md`, whose canonical body lives in
-`context/dsh-plugin-development-skill.md`. It is advisory guidance for the
-agent, not workflow-state or UI enforcement. Regenerate it with
-`pnpm lab sync-context`; `pnpm lab doctor` reports missing or stale generated
-content without writing it.
+commands mutate plugin repositories. The portable agent entrypoint is the
+hand-authored `.agents/skills/dsh-plugin-development/SKILL.md`. It is advisory
+guidance for the agent, not workflow-state or UI enforcement. `pnpm lab
+sync-context` regenerates only the plugin shared-context snapshots; `pnpm lab
+doctor` reports missing or stale snapshots without writing them.
 
 The `lab ui start/status/finish/abort` family is separate from `verify`: it owns
 only a temporary isolated runtime and factual lifecycle/evidence. An external
@@ -68,7 +67,7 @@ the only mode today); only `catalog.yaml` is committed in the parent.
 | `pnpm lab new <name>` | Scaffold a standalone plugin repo from `templates/plugin`, write `.dsh-lab/plugin.yaml`, append a `catalog.yaml` entry. |
 | `pnpm lab dev <name>\|--path P --target next\|master` | Read live source, emit a **source overlay** (`cordis.patch.yml`), materialize a pinned profile, and boot `dsh` against it watching source for HMR. |
 | `pnpm lab verify <name>\|--path P --target next\|master\|all` | Copy the current source, build + pack the bundle in a temporary workspace, install the tarball via the real `dsh plugin add`, and assert the composed `--dump-config` contains the plugin. |
-| `pnpm lab sync-context [name\|--all]` | Regenerate `.dsh-lab/shared-context.md` snapshots inside each plugin repo and the root `.agents/skills/dsh-plugin-development/SKILL.md` from `context/`, embedding a content hash. |
+| `pnpm lab sync-context [name\|--all]` | Regenerate `.dsh-lab/shared-context.md` snapshots inside each plugin repo from `context/`, embedding a content hash. The agent skill is hand-authored and not regenerated. |
 | `pnpm lab doctor` | Validate toolchain, catalog, target pins, context-snapshot freshness, and the upstream submodule (present + pinned to `master.commit` + clean). Exit 0 only when green. |
 | `pnpm lab upstream check\|update [--verify]` | Read-only compare the pinned `master` SHA, or explicitly adopt it with clean-tree gates, detached checkout, doctor, and optional full plugin verification. |
 
@@ -140,11 +139,10 @@ pnpm lab sync-context my-plugin    # just one
 Each run embeds a `context version: <12-hex>` hash of `context/*.md` into a
 plugin's `.dsh-lab/shared-context.md`. If the root context changes, re-sync so
 plugins see current guidance; the hash lets you notice staleness at a glance.
-The same command regenerates the portable agent skill from
-`context/dsh-plugin-development-skill.md` and all context documents. Doctor
-renders that projection in memory and reports its fixed path when it is missing
-or differs; it never repairs the file. Run `pnpm lab sync-context` to resolve
-that drift.
+The portable agent skill `.agents/skills/dsh-plugin-development/SKILL.md` is
+hand-authored and outside this command's scope. Doctor reports missing or stale
+snapshots without repairing them; run `pnpm lab sync-context` to resolve that
+drift.
 
 ## Recipe: elevate a plugin from local to submodule
 

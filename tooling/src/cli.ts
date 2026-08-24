@@ -30,7 +30,7 @@ Commands:
   status <name>|--path P [--json]      derive current verification status
     exit 0 all applicable claims current/pass; exit 2 any applicable stale/not-run/failed;
     exit 1 selector/tooling error
-  sync-context [name|--all] regenerate shared-context projections and the agent skill
+  sync-context [name|--all] regenerate shared-context snapshots inside plugin repos
   ui start <name>|--path P --target T [--json]  start an isolated UI session
   ui status <session-id> [--json]              inspect a UI session
   ui finish <session-id> --verdict pass|fail --summary S [--json]  finalize a UI session

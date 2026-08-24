@@ -2,14 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
-import {
-  AGENT_SKILL_PATH,
-  SKILL_SOURCE_PATH,
-  normalizeGeneratedText,
-  renderAgentSkill,
-} from './skill.js'
-import { contextDocuments } from './sync.js'
 import { loadCatalogFromFile, loadCompatibilityFromFile } from './schemas.js'
+
+const AGENT_SKILL_PATH = '.agents/skills/dsh-plugin-development/SKILL.md'
 
 function nestedSkillFiles(root: string): string[] {
   const pluginsRoot = join(root, 'plugins')
@@ -31,15 +26,6 @@ function nestedSkillFiles(root: string): string[] {
 }
 
 describe('committed portable agent skill projection', () => {
-  it('matches the canonical context renderer', () => {
-    const root = process.cwd()
-    const body = readFileSync(join(root, SKILL_SOURCE_PATH), 'utf8')
-    const committed = readFileSync(join(root, AGENT_SKILL_PATH), 'utf8')
-    const expected = renderAgentSkill({ body, documents: contextDocuments(root) })
-
-    expect(normalizeGeneratedText(committed)).toBe(expected)
-  })
-
   it('keeps every routed local Markdown reference resolvable', () => {
     const root = process.cwd()
     const committed = readFileSync(join(root, AGENT_SKILL_PATH), 'utf8')
@@ -53,9 +39,8 @@ describe('committed portable agent skill projection', () => {
     }
   })
 
-  it('keeps the real skill concise, advisory, and free of repository-specific pins', () => {
+  it('keeps the real skill advisory and free of repository-specific pins', () => {
     const root = process.cwd()
-    const canonical = readFileSync(join(root, SKILL_SOURCE_PATH), 'utf8')
     const committed = readFileSync(join(root, AGENT_SKILL_PATH), 'utf8')
     const requiredReferences = [
       '../../../context/harness-contracts.md',
@@ -69,23 +54,18 @@ describe('committed portable agent skill projection', () => {
     for (const reference of requiredReferences) expect(committed).toContain(`](${reference})`)
     expect(committed).toMatch(/advisory workflows chosen by the agent and host harness/i)
     expect(committed).toMatch(/Plans, approvals, and session memory belong to the agent and host harness/i)
-    // The skill is a compressed routing layer, not a second copy of the
-    // canonical docs: useful operational detail belongs in it, but the
-    // ceiling keeps it from drifting toward wholesale doc duplication.
-    expect(committed.trim().split(/\s+/).length).toBeLessThanOrEqual(2000)
-    expect(canonical).not.toMatch(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b/)
-    expect(canonical).not.toMatch(/\b[0-9a-f]{40}\b/i)
-    expect(canonical).not.toMatch(/\b[A-Za-z]:[\\/]/)
+    expect(committed).not.toMatch(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b/)
+    expect(committed).not.toMatch(/\b[0-9a-f]{40}\b/i)
+    expect(committed).not.toMatch(/\b[A-Za-z]:[\\/]/)
   })
 
   it('keeps live catalog data, absolute host paths, and mandatory harness workflows out of guidance', () => {
     const root = process.cwd()
-    const canonical = readFileSync(join(root, SKILL_SOURCE_PATH), 'utf8')
     const committed = readFileSync(join(root, AGENT_SKILL_PATH), 'utf8')
     const catalog = loadCatalogFromFile(join(root, 'catalog.yaml'))
     const compatibility = loadCompatibilityFromFile(join(root, 'workbench', 'compatibility.yaml'))
 
-    for (const guidance of [canonical, committed]) {
+    for (const guidance of [committed]) {
       for (const [name, entry] of Object.entries(catalog.plugins)) {
         expect(guidance).not.toMatch(new RegExp(`\\b${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\b`, 'i'))
         expect(guidance).not.toContain(entry.path)

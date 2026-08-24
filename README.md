@@ -23,11 +23,11 @@ overlays stay under the forge's `.lab/runtime`. `verify` copies that current
 source into a temporary workspace and always removes the temporary workspace;
 the forge keeps only minimal evidence as memory of the result. Catalog lookup
 is convenient and `init`/initialization is optional; only explicit authoring commands mutate plugin repositories. The portable agent entrypoint is
-`.agents/skills/dsh-plugin-development/SKILL.md`, generated from the canonical
-body at `context/dsh-plugin-development-skill.md` and all context documents.
-It provides advisory methodology for the agent; `pnpm lab sync-context`
-regenerates it, while `pnpm lab doctor` reports missing or stale content without
-writing files.
+`.agents/skills/dsh-plugin-development/SKILL.md`; it is hand-authored advisory
+methodology for the agent. `pnpm lab sync-context` regenerates the
+`.dsh-lab/shared-context.md` snapshots inside each plugin repo from
+`context/*.md`, while `pnpm lab doctor` reports missing or stale snapshots
+without writing files.
 
 The `lab ui start/status/finish/abort` family is a separate protocol for a
 temporary isolated runtime and minimal factual UI verdict. An external browser
@@ -35,7 +35,7 @@ or vision agent/harness owns navigation and visual decisions; screenshots and
 browser artifacts are transient and not retained by the lab.
 
 - **Author guide & recipes** — [docs/using-the-lab.md](docs/using-the-lab.md)
-- **Root context library** — [context/](context/) (shared snapshots derive from it)
+- **Root context library** — [context/](context/) (plugin shared-context snapshots derive from it)
 - **Portable agent skill** — [.agents/skills/dsh-plugin-development/SKILL.md](.agents/skills/dsh-plugin-development/SKILL.md)
 - **Compatibility pins** — [workbench/compatibility.yaml](workbench/compatibility.yaml)
 - **Plugin index** — [catalog.yaml](catalog.yaml)

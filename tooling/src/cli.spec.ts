@@ -72,18 +72,18 @@ function captureConsole() {
   return { logs, errors }
 }
 
-describe('portable agent skill CLI surface', () => {
-  it('documents skill regeneration under sync-context without adding a skill command', async () => {
+describe('shared-context CLI surface', () => {
+  it('documents snapshot regeneration under sync-context without adding a skill command', async () => {
     const output = captureConsole()
 
     expect(await runCli(['--help'])).toBe(0)
 
     const help = output.logs.join('\n')
-    expect(help).toMatch(/sync-context.*(?:context projections|shared-context).*agent skill/i)
+    expect(help).toMatch(/sync-context.*(?:context projections|shared-context)/i)
     expect(help).not.toMatch(/^\s+skill(?:\s|$)/m)
   })
 
-  it('reports plugin and agent-skill projections with existing synced/current words', async () => {
+  it('reports plugin snapshot projections with existing synced/current words', async () => {
     const output = captureConsole()
     vi.mocked(syncContext).mockResolvedValue([
       {
@@ -91,12 +91,6 @@ describe('portable agent skill CLI surface', () => {
         name: 'demo',
         changed: true,
         path: 'A:/lab/plugins/demo/.dsh-lab/shared-context.md',
-      },
-      {
-        kind: 'agent-skill',
-        name: 'dsh-plugin-development',
-        changed: false,
-        path: 'A:/lab/.agents/skills/dsh-plugin-development/SKILL.md',
       },
     ])
 
@@ -108,7 +102,6 @@ describe('portable agent skill CLI surface', () => {
     })
     expect(output.logs).toEqual([
       'synced  A:/lab/plugins/demo/.dsh-lab/shared-context.md',
-      'current A:/lab/.agents/skills/dsh-plugin-development/SKILL.md',
     ])
   })
 })
