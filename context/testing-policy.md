@@ -13,7 +13,14 @@ Required test levels for plugin repos. Grounded in design spec §12 and `researc
 5. **Packed bundle smoke** — install the tarball and run the built entry under plain Node.
 6. **Real-API smoke** — only when the observable contract depends on a real model/provider API; skip explicitly without a key.
 
+`lab verify` then runs **target checks** against the packed tarball (`dsh plugin add` + `dsh.profile.bundles` composition): see `harness-contracts.md` patch/profile notes. For dual-face plugins this includes the lab-owned **client-smoke** gate (`tooling/src/client-smoke.ts`): on every pack, if `package.json` declares `dsh.client`, the gate extracts the `exports["./client"]` entry from the tarball and asserts it registers in a VM via a capturing `window.__ModuleLoader__.load` facade — one synchronous `{ id, factory }` row with `id === package name`; otherwise the step is skipped. A missing `lib/client.js` or an ESM output therefore fails `verify` with `loaded without registering …` even though the host `pack-smoke` stays green.
+
 The meta-repo does not copy package tests; `lab verify` orchestrates the plugin's own commands and adds target checks.
+
+## pnpm 11 notes
+
+- `pnpm pack --json` emits a **single object** `{ name, version, filename, files }`, not an array (`tooling/src/package-verify.ts:resolvePackedTarball`); the lab parses it once as object-or-singleton-array.
+- `--ignore-workspace` is an anti-pattern under pnpm 11: it discards the workspace `allowBuilds` policy that gates lifecycle scripts. `lab verify` already fixed this upstream — the lab no longer uses it; plugin repos and docs must not reintroduce it.
 
 ## UI session protocol
 

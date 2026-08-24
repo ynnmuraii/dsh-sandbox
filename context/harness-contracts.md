@@ -24,8 +24,25 @@ Treat the two as independent acceptance evidence: source-mode success does not p
 
 - Eff tree builds over an empty list: bundle patches in order, then profile patch, then home-level patch, then `--patch` overlays. Later layer wins per line.
 - A patch replaces the whole `config` — never deep-merges.
+- `dsh.bundle.patch` (bundle manifest) declares the bundle's patch file; `dsh.profile.bundles` (profile manifest `package.json`) is the ordered layer list — `apps/cli/README.md:Profiles`, `docs/user/develop/basic/publish.md:Two concepts`.
+- `dsh.profile.bundles` names are two-anchored: resolved from the dsh installation first, then the profile's `node_modules` (`apps/cli/README.md:Bundles named … resolve from the dsh installation first`).
 - Use `--dump-config` to inspect the final tree.
 - Keep loader entry `id` stable.
+## Client face (`dsh.client`)
+
+Dual-face = host entry (`src/index.ts` → `lib/index.js`) + browser bundle (`src/client/**` → `lib/client.js`). Enabled by `package.json` (upstream `packages/client/modules/src/index.ts:parseDshClient`, `clientExportOf`):
+
+```json
+{ "dsh": { "client": { "platform": "web" } }, "exports": { "./client": "./lib/client.js" } }
+```
+
+- `dsh.client.platform` must be `"web"`; otherwise the package is not a client row.
+- `dsh.client.inject` / `external` if present must be string arrays; `immediately` if present must be boolean (`index.ts:parseDshClient` → `client/manifest.ts:optionalStringArray`).
+- `exports["./client"]` is required — string or `{ default: string }` — and resolves to `clientPath` (`clientExportOf`). Missing export throws `dsh.client but exports no "./client" bundle` and the composition fails (`MissingClientBundleError`).
+- **Wire:** host composes `window.__DSH_BOOT__` (`WebBootGraph` `{ rev, entries: [{ id, url, rev, inject?, immediately?, external? }] }`) and injects a `window.__ModuleLoader__` queue (`index.ts:bootInjections`). The browser bundle must be a classic script that **synchronously** calls `window.__ModuleLoader__.load({ id, factory })` (`client/system.ts:arrive` asserts `factories.has(id)` else `loaded without registering "id" via __ModuleLoader__.load`).
+- **Serving:** each entry at `/plugins/<id>/client.js?rev=<hash>` and source map at `/plugins/<id>/client.js.map` (`index.ts:graphRow`, `serveBundle`); `rev = sha1(bundle).slice(0,12)` (`shortHash`); both served `cache-control: no-cache`.
+- `package.json` `files` must include the built client artifact (`lib/client.js` + map); the tarball is the browser boundary — see `plugin-anatomy.md`.
+- Browser acceptance of a dual-face plugin is proved only by a real boot: `lab ui start --target next` in bundle-mode (the lab installs the built plugin package as a `file:` profile dependency and boots the extended `dsh.profile.bundles` layer). Source overlay (`--patch`) does not prove the client bundle ships or registers.
 
 ## Boundaries
 

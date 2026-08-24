@@ -54,6 +54,14 @@ Before production code, read the relevant canonical contracts and the [lab autho
 
 Treat source overlay and installable bundle as separate acceptance boundaries. Source mode proves live source behavior and HMR against a fixed checkout; bundle mode proves the packed package installs and boots. Test both when the change affects either boundary. A source-mode pass never substitutes for bundle proof, and vice versa.
 
+## Dual-face (browser) plugins
+
+A plugin with `dsh.client` adds a browser face — `exports["./client"] → lib/client.js` (§ contracts). Detect it by `package.json: dsh.client.platform === "web"`; if present the tarball must contain the built `lib/client.js`.
+
+- **Build before boot:** `lab ui start` bundle-mode installs the plugin package as a `file:` dependency into the boot profile, so `pnpm run build` must have produced `lib/client.js` as a classic script that synchronously calls `window.__ModuleLoader__.load({ id, factory })` (an ESM output fails the client-smoke gate with `loaded without registering`).
+- **Prove the browser face:** after `pnpm lab ui start … --target next` and the browser loads the loopback URL, read `window.__DSH_BOOT__.entries` (injected by the host, `rev` is the content hash) and assert an entry with `id === package name` exists and its fetch → registration succeeds; the source overlay does not prove this.
+- **Keyless headless onboarding:** the browser-host RPC envelope is `POST` to `api/<method>` with JSON body `{ type: "client-request", rpcId, method, payload }` (upstream `packages/host/apiproxy/src/api/rpc.ts:ClientRequest`, `rpc-map.ts` keys `workspace.create` / `session.create`). For automation without credentials, `fetch` that envelope from the booted host to create a workspace/session; `rpcId` is client-minted and echoed in the `server-response`.
+
 ## HMR safety
 
 Every registry, listener, adapter, and external resource must be HMR-safe: register through the contributing Fiber, acquire resources inside `ctx.effect()` with a disposer, and prove cleanup on unload. Keep order-dependent asynchronous teardown in one disposer that awaits each step. Declare mandatory services with `inject`; resolve optional services only at their point of use. A manual `ctx.plugin()` unit test never replaces a Loader/app/process smoke for a product-visible plugin.
