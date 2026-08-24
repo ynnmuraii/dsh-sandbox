@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createUiSession, readUiSession, type UiSessionStateV1 } from './ui-session.js'
@@ -90,5 +90,25 @@ describe('runSupervisorBin', () => {
     expect(failed).toMatchObject({ state: 'crashed', error: 'injected supervisor failure SECRET' })
     expect(failed).not.toHaveProperty('cleanup')
     expect(deps.stderr).toHaveBeenCalledWith('ui supervisor: injected supervisor failure SECRET')
+  })
+
+  it('does not report a supervisor failure into a same-name replacement lease', async () => {
+    const current = fixture()
+    const sessionDir = join(current.runtimeRoot, 'ui-sessions', SESSION)
+    const parked = `${sessionDir}.parked`
+    const replacementState = readFileSync(join(sessionDir, 'state.json'))
+    const deps = dependencies(vi.fn(async () => {
+      renameSync(sessionDir, parked)
+      mkdirSync(sessionDir)
+      writeFileSync(join(sessionDir, 'state.json'), replacementState)
+      writeFileSync(join(sessionDir, 'replacement-canary.txt'), 'replacement')
+      throw new Error('supervisor rejected changed session identity')
+    }))
+
+    await expect(runSupervisorBin([current.requestPath], deps)).resolves.toBe(1)
+
+    expect(readFileSync(join(sessionDir, 'state.json'))).toEqual(replacementState)
+    expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(deps.stderr).toHaveBeenCalledWith(expect.stringMatching(/identity|changed|supervisor/i))
   })
 })

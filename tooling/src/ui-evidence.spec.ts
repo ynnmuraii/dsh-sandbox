@@ -321,6 +321,39 @@ describe('publishUiResult', () => {
     expect(existsSync(join(parked, `${value.sessionId}.tmp`))).toBe(true)
   })
 
+  it.each(['beforeLockRemove', 'afterLockRemove'] as const)(
+    'fails closed and preserves replacement bookkeeping at the %s seam',
+    seam => {
+      const root = uiRunsRoot()
+      const value = result()
+      const directory = join(root, pluginEvidenceKey(value.plugin), value.sessionId)
+      const parked = `${directory}.${seam}.parked`
+      let seamCalled = false
+      let observed: unknown
+      const hooks = {
+        [seam]() {
+          seamCalled = true
+          renameSync(directory, parked)
+          mkdirSync(join(directory, '.publication.lock'), { recursive: true })
+          writeFileSync(join(directory, '.publication.lock', 'replacement-canary.txt'), 'replacement lock')
+          writeFileSync(join(directory, 'result.json'), '{"owner":"replacement"}\n')
+        },
+      }
+
+      try {
+        publishUiResult({ uiRunsRoot: root, result: value, ...hooks } as Parameters<typeof publishUiResult>[0] & Record<typeof seam, () => void>)
+      } catch (error) {
+        observed = error
+      }
+
+      expect(seamCalled).toBe(true)
+      expect(readFileSync(join(directory, '.publication.lock', 'replacement-canary.txt'), 'utf8')).toBe('replacement lock')
+      expect(readFileSync(join(directory, 'result.json'), 'utf8')).toBe('{"owner":"replacement"}\n')
+      expect(observed).toBeInstanceOf(Error)
+      expect((observed as Error).message).toMatch(/identity|changed|swap|ownership|lock|refus/i)
+    },
+  )
+
   it('rejects a symlinked plugin evidence directory instead of escaping uiRunsRoot', () => {
     const root = uiRunsRoot()
     const outside = uiRunsRoot()
@@ -434,6 +467,30 @@ describe('loadUiResults', () => {
       },
     })).toThrow(/symlink|junction|changed|containment|regular file|escape/i)
     expect(seamCalled).toBe(true)
+  })
+
+  it('rejects a valid forged result from an ordinary same-name replacement directory', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const path = publishUiResult({ uiRunsRoot: root, result: value })
+    const sessionDirectory = dirname(path)
+    const parked = `${sessionDirectory}.parked`
+    const forged = { ...value, verdict: 'fail' as const, summary: 'forged replacement evidence' }
+
+    expect(() => loadUiResults({
+      uiRunsRoot: root,
+      pluginKey: pluginEvidenceKey(value.plugin),
+      beforeResultRead(resultPath) {
+        expect(resultPath).toBe(path)
+        renameSync(sessionDirectory, parked)
+        mkdirSync(sessionDirectory)
+        writeFileSync(resultPath, `${JSON.stringify(forged, null, 2)}\n`)
+        writeFileSync(join(sessionDirectory, 'replacement-canary.txt'), 'replacement')
+      },
+    })).toThrow(/identity|changed|swap|ownership|corrupt|refus/i)
+
+    expect(JSON.parse(readFileSync(join(parked, 'result.json'), 'utf8'))).toEqual(value)
+    expect(readFileSync(join(sessionDirectory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
   })
 })
 

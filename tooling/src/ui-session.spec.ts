@@ -234,6 +234,38 @@ describe('UI session store', () => {
     expect(existsSync(join(outside, 'request.json'))).toBe(false)
   })
 
+  it('does not write request.json after an ordinary same-name swap at the final open seam', () => {
+    const root = runtimeRoot()
+    const sessionDir = createUiSession({ runtimeRoot: root, state: state() })
+    const parked = `${sessionDir}-parked`
+    const replacementState = readFileSync(join(sessionDir, 'state.json'))
+    let seamCalled = false
+    let observed: unknown
+
+    try {
+      writeUiSessionRequest({
+        runtimeRoot: root,
+        sessionId: SESSION,
+        request: { schemaVersion: 1, sessionId: SESSION },
+        beforeRequestOpen() {
+          seamCalled = true
+          renameSync(sessionDir, parked)
+          mkdirSync(sessionDir)
+          writeFileSync(join(sessionDir, 'state.json'), replacementState)
+          writeFileSync(join(sessionDir, 'replacement-canary.txt'), 'replacement')
+        },
+      } as Parameters<typeof writeUiSessionRequest>[0] & { beforeRequestOpen(): void })
+    } catch (error) {
+      observed = error
+    }
+
+    expect(seamCalled).toBe(true)
+    expect(existsSync(join(sessionDir, 'request.json'))).toBe(false)
+    expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(observed).toBeInstanceOf(Error)
+    expect((observed as Error).message).toMatch(/identity|changed|swap|ownership|refus/i)
+  })
+
   it('rejects an ordinary same-name session-directory swap at the final state mutation', () => {
     const root = runtimeRoot()
     const sessionDir = createUiSession({ runtimeRoot: root, state: state() })
@@ -281,6 +313,82 @@ describe('UI session store', () => {
     expect(readUiSession({ runtimeRoot: root, sessionId: SESSION })).toEqual(competing)
     expect(readFileSync(stalePath, 'utf8')).toContain('plugin-changed')
   })
+
+  it.each(['beforeStateTemporaryWrite', 'beforeStateRename'] as const)(
+    'does not mutate a replacement session at the %s syscall seam',
+    seam => {
+      const root = runtimeRoot()
+      const sessionDir = createUiSession({ runtimeRoot: root, state: state() })
+      const parked = `${sessionDir}-${seam}-parked`
+      const replacementState = readFileSync(join(sessionDir, 'state.json'))
+      let seamCalled = false
+      let observed: unknown
+      const hooks = {
+        [seam]() {
+          seamCalled = true
+          renameSync(sessionDir, parked)
+          mkdirSync(sessionDir)
+          writeFileSync(join(sessionDir, 'state.json'), replacementState)
+          writeFileSync(join(sessionDir, 'replacement-canary.txt'), 'replacement')
+        },
+      }
+
+      try {
+        writeUiSession({
+          runtimeRoot: root,
+          state: state({ updatedAt: '2026-08-24T12:00:01.000Z' }),
+          ...hooks,
+        } as Parameters<typeof writeUiSession>[0] & Record<typeof seam, () => void>)
+      } catch (error) {
+        observed = error
+      }
+
+      expect(seamCalled).toBe(true)
+      expect(readFileSync(join(sessionDir, 'state.json'))).toEqual(replacementState)
+      expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+      expect(observed).toBeInstanceOf(Error)
+      expect((observed as Error).message).toMatch(/identity|changed|swap|ownership|refus/i)
+    },
+  )
+
+  it.each(['afterStateLockCreate', 'beforeStateLockRemove', 'afterStateLockRemove'] as const)(
+    'never adopts or removes replacement lock bookkeeping at the %s seam',
+    seam => {
+      const root = runtimeRoot()
+      const sessionDir = createUiSession({ runtimeRoot: root, state: state() })
+      const parked = `${sessionDir}-${seam}-parked`
+      const replacementState = readFileSync(join(sessionDir, 'state.json'))
+      let seamCalled = false
+      let observed: unknown
+      const hooks = {
+        [seam]() {
+          seamCalled = true
+          renameSync(sessionDir, parked)
+          mkdirSync(sessionDir)
+          writeFileSync(join(sessionDir, 'state.json'), replacementState)
+          writeFileSync(join(sessionDir, 'replacement-canary.txt'), 'replacement')
+          if (seam !== 'afterStateLockRemove') mkdirSync(join(sessionDir, '.state.lock'))
+        },
+      }
+
+      try {
+        writeUiSession({
+          runtimeRoot: root,
+          state: state({ updatedAt: '2026-08-24T12:00:01.000Z' }),
+          ...hooks,
+        } as Parameters<typeof writeUiSession>[0] & Record<typeof seam, () => void>)
+      } catch (error) {
+        observed = error
+      }
+
+      expect(seamCalled).toBe(true)
+      expect(readFileSync(join(sessionDir, 'state.json'))).toEqual(replacementState)
+      expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+      if (seam !== 'afterStateLockRemove') expect(existsSync(join(sessionDir, '.state.lock'))).toBe(true)
+      expect(observed).toBeInstanceOf(Error)
+      expect((observed as Error).message).toMatch(/identity|changed|swap|ownership|lock|refus/i)
+    },
+  )
 
   it('latches, deduplicates, and sorts stale reasons irreversibly', () => {
     const current = state()

@@ -664,6 +664,39 @@ describe('runUiSupervisor', () => {
     expect(existsSync(current.plan.runtimeHome)).toBe(true)
   })
 
+  it('retains durable child ownership when diagnostic failure joins rejected natural-exit cleanup', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    let rejectCleanup!: (error: Error) => void
+    const stopChildTree = vi.fn(async () => {
+      await new Promise<void>((_resolve, reject) => { rejectCleanup = reject })
+    })
+    bundle.deps.stopChildTree = stopChildTree
+    const log: UiDiagnosticLog = {
+      write: vi.fn(() => { throw new Error('diagnostic write failed after leader exit') }),
+      close: vi.fn(),
+    }
+    bundle.deps.openLog = vi.fn(() => log)
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+    await waitFor(() => vi.mocked(bundle.deps.spawnChild).mock.calls.length === 1, 'child spawn')
+
+    bundle.child.exit({ code: 7, signal: null })
+    await waitFor(() => stopChildTree.mock.calls.length === 1, 'natural-exit cleanup')
+    bundle.child.stderr.write('trigger diagnostic failure\n')
+    rejectCleanup(new Error('owned process group still alive'))
+
+    await expect(running).rejects.toThrow(/diagnostic|process group|cleanup|alive/i)
+    expect(stopChildTree).toHaveBeenCalledTimes(1)
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'crashed',
+      cleanup: 'fail',
+      supervisorPid: process.pid,
+      childPid: bundle.child.handle.pid,
+      error: expect.stringMatching(/diagnostic|process group|cleanup|alive/i),
+    })
+  })
+
   it('ignores output arriving after control cleanup has taken ownership', async () => {
     const current = fixture()
     const bundle = dependencies(current.plan)

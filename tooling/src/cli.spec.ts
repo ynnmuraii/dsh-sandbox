@@ -245,6 +245,8 @@ describe('agent-first command and documentation contract', () => {
     expect(help).toMatch(/ui status\s+<session-id>[\s\S]*\[--json]/i)
     expect(help).toMatch(/ui finish\s+<session-id>[\s\S]*--verdict\s+pass\|fail[\s\S]*--summary/i)
     expect(help).toMatch(/ui abort\s+<session-id>[\s\S]*\[--json]/i)
+    expect(help).toMatch(/external[\s\S]{0,160}(?:browser|vision)[\s\S]{0,200}(?:agent|harness)/i)
+    expect(help).toMatch(/screenshots?[\s\S]{0,120}(?:transient|not retained|not stored)/i)
     expect(help).not.toMatch(/^\s*(?:publish|init|generate-skills?)\b/im)
   })
 

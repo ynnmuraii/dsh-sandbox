@@ -245,6 +245,40 @@ describe('UI supervisor spawn plan', () => {
 })
 
 describe('startUiSession', () => {
+  it('retains the directory created exclusively before any service-side claim can adopt a replacement', async () => {
+    const current = fixture()
+    const bundle = readyStartDependencies(current)
+    let replacementDirectory = ''
+    let parked = ''
+    let replacementState = ''
+    const afterSessionCreate = vi.fn((sessionDirectory: string) => {
+      replacementDirectory = sessionDirectory
+      parked = `${sessionDirectory}.parked`
+      replacementState = readFileSync(join(sessionDirectory, 'state.json'), 'utf8')
+      renameSync(sessionDirectory, parked)
+      mkdirSync(sessionDirectory)
+      writeFileSync(join(sessionDirectory, 'state.json'), replacementState)
+      writeFileSync(join(sessionDirectory, 'replacement-canary.txt'), 'replacement')
+    })
+    ;(bundle.deps as UiServiceDependencies & { afterSessionCreate(sessionDirectory: string): void }).afterSessionCreate = afterSessionCreate
+
+    let observed: unknown
+    try {
+      await startUiSession({ root: current.root, plugin: current.plugin, target: 'next' }, bundle.deps)
+    } catch (error) {
+      observed = error
+    }
+
+    expect(afterSessionCreate).toHaveBeenCalledTimes(1)
+    expect(bundle.deps.spawnSupervisor).not.toHaveBeenCalled()
+    expect(readFileSync(join(replacementDirectory, 'state.json'), 'utf8')).toBe(replacementState)
+    expect(readFileSync(join(replacementDirectory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(join(replacementDirectory, 'request.json'))).toBe(false)
+    expect(existsSync(join(parked, 'request.json'))).toBe(false)
+    expect(observed).toBeInstanceOf(Error)
+    expect((observed as Error).message).toMatch(/identity|changed|swap|ownership|refus/i)
+  })
+
   it('retains the new session identity before publishing request.json', async () => {
     const current = fixture()
     let replacementState = ''
@@ -522,6 +556,34 @@ describe('getUiSessionStatus', () => {
     expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
     expect(observed).toBeInstanceOf(Error)
     expect((observed as Error).message).toMatch(/identity|changed|swap|refus/i)
+  })
+
+  it.each([
+    ['plugin-changed', (current: ReturnType<typeof fixture>) => rmSync(current.sourcePath, { recursive: true, force: true })],
+    ['target-changed', (current: ReturnType<typeof fixture>) => writeFileSync(
+      join(current.root, 'workbench', 'compatibility.yaml'),
+      `targets:\n  master:\n    repository: deepseek-ai/deepseek-harness\n    commit: ${MASTER}\n    pnpm: 11.7.0\n    node: ^22.19.0\n`,
+    )],
+  ] as const)('classifies missing current identity input as typed %s drift', (reason, removeCurrentInput) => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    removeCurrentInput(current)
+
+    const view = getUiSessionStatus({ root: current.root, sessionId: SESSION }, serviceDependencies().deps)
+
+    expect(view).toMatchObject({ stale: true, staleReasons: [reason] })
+    expect(view).not.toHaveProperty('url')
+    expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION }).staleReasons).toContain(reason)
+  })
+
+  it('does not classify EPERM from the default process probe as a dead owner', () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    const denied = Object.assign(new Error('operation not permitted'), { code: 'EPERM' })
+    vi.spyOn(process, 'kill').mockImplementation(() => { throw denied })
+
+    expect(() => getUiSessionStatus({ root: current.root, sessionId: SESSION })).toThrow(/EPERM|permitted|inspect|process/i)
+    expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION }).state).toBe('ready')
   })
 
   it('derives an orphaned crash without killing or rewriting a recorded PID', () => {
@@ -858,6 +920,66 @@ describe('finishUiSession', () => {
       state: 'stopping',
       cleanup: 'pass',
     })
+  })
+
+  it('returns committed evidence and leaves a post-publication replacement lease untouched', async () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    const directory = join(runtimeRoot(current.root), 'ui-sessions', SESSION)
+    const parked = `${directory}.published-parked`
+    let replacementState = ''
+    const bundle = serviceDependencies({ sleep: cleanupResponder(current, SESSION, 'finish') })
+    bundle.deps.publishResult = vi.fn(opts => {
+      const path = publishUiResult(opts)
+      replacementState = readFileSync(join(directory, 'state.json'), 'utf8')
+      renameSync(directory, parked)
+      mkdirSync(directory)
+      writeFileSync(join(directory, 'state.json'), replacementState)
+      writeFileSync(join(directory, 'replacement-canary.txt'), 'replacement')
+      return path
+    })
+
+    const result = await finishUiSession({
+      root: current.root,
+      sessionId: SESSION,
+      verdict: 'pass',
+      summary: 'immutable evidence already committed',
+    }, bundle.deps)
+
+    expect(result).toMatchObject({ verdict: 'pass', summary: 'immutable evidence already committed' })
+    expect(loadUiResults({
+      uiRunsRoot: join(current.root, '.lab', 'ui-runs'),
+      pluginKey: pluginEvidenceKey(current.plugin),
+    })).toEqual([result])
+    expect(readFileSync(join(directory, 'state.json'), 'utf8')).toBe(replacementState)
+    expect(readFileSync(join(directory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+  })
+
+  it.each([
+    ['plugin-changed', (current: ReturnType<typeof fixture>) => rmSync(current.sourcePath, { recursive: true, force: true })],
+    ['target-changed', (current: ReturnType<typeof fixture>) => writeFileSync(
+      join(current.root, 'workbench', 'compatibility.yaml'),
+      `targets:\n  master:\n    repository: deepseek-ai/deepseek-harness\n    commit: ${MASTER}\n    pnpm: 11.7.0\n    node: ^22.19.0\n`,
+    )],
+  ] as const)('returns typed stale outcome before finish when current %s input is missing', async (reason, removeCurrentInput) => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    removeCurrentInput(current)
+    const bundle = serviceDependencies()
+
+    await expect(finishUiSession({
+      root: current.root,
+      sessionId: SESSION,
+      verdict: 'pass',
+      summary: 'missing current input',
+    }, bundle.deps)).rejects.toMatchObject({
+      name: 'UiProtocolOutcomeError',
+      outcome: 'stale',
+      exitCode: 2,
+    })
+    expect(readUiSession({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION }).staleReasons).toContain(reason)
+    expect(readUiControl({ runtimeRoot: runtimeRoot(current.root), sessionId: SESSION })).toBeUndefined()
+    expect(bundle.deps.publishResult).not.toHaveBeenCalled()
   })
 
   it('rechecks identity after cleanup and before immutable publication', async () => {
