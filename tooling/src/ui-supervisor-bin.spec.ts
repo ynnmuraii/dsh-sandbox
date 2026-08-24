@@ -132,6 +132,32 @@ describe('runSupervisorBin', () => {
     expect(deps.stderr).toHaveBeenCalledWith(expect.stringMatching(/identity|changed|replacement|request|session|refus/i))
   })
 
+  it('does not reacquire a replacement after the pinned request reader returns', async () => {
+    const current = fixture()
+    const sessionDir = join(current.runtimeRoot, 'ui-sessions', SESSION)
+    const parked = `${sessionDir}.before-owner-claim-parked`
+    const replacementState = readFileSync(join(sessionDir, 'state.json'))
+    let seamCalled = false
+    const deps = {
+      ...dependencies(),
+      beforeSessionOwnerClaim(path: string) {
+        seamCalled = true
+        expect(path).toBe(sessionDir)
+        renameSync(sessionDir, parked)
+        mkdirSync(sessionDir)
+        writeFileSync(join(sessionDir, 'state.json'), replacementState)
+        writeFileSync(join(sessionDir, 'request.json'), JSON.stringify(current.request))
+        writeFileSync(join(sessionDir, 'replacement-canary.txt'), 'replacement')
+      },
+    } as UiSupervisorBinDependencies & { beforeSessionOwnerClaim(path: string): void }
+
+    await expect(runSupervisorBin([current.requestPath], deps)).resolves.toBe(1)
+    expect(seamCalled).toBe(true)
+    expect(deps.runSupervisor).not.toHaveBeenCalled()
+    expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(deps.stderr).toHaveBeenCalledWith(expect.stringMatching(/identity|changed|replacement|request|session|refus/i))
+  })
+
   it('reports an execution failure into only the safely matched lease', async () => {
     const current = fixture()
     const deps = dependencies(vi.fn(async () => { throw new Error('injected supervisor failure\nSECRET') }))

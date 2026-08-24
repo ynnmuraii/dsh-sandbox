@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { loadCompatibility, loadCatalog } from './schemas.js'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { CompatibilityError, loadCompatibility, loadCatalog, loadTargetPinFromFile } from './schemas.js'
 
 const fixture = `
 targets:
@@ -71,6 +74,20 @@ targets:
   it('rejects a next target missing pnpm', () => {
     const bad = fixture.replace('    node: 22.20.0\n    pnpm: 11.7.0', '    node: 22.20.0')
     expect(() => loadCompatibility(bad)).toThrow(/next.*requires a mandatory pin field 'pnpm'/)
+  })
+
+  it('reports a missing selected target with a structured compatibility code', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-lab-selected-target-'))
+    const path = join(root, 'compatibility.yaml')
+    writeFileSync(path, `targets:\n  master:\n    repository: deepseek-ai/deepseek-harness\n    commit: ${'0'.repeat(40)}\n    pnpm: 11.7.0\n    node: ^22.19.0\n`)
+    try {
+      let observed: unknown
+      try { loadTargetPinFromFile(path, 'next') } catch (error) { observed = error }
+      expect(observed).toBeInstanceOf(CompatibilityError)
+      expect(observed).toMatchObject({ code: 'missing-target', target: 'next' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 

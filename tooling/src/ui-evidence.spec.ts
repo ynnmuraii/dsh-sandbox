@@ -135,6 +135,33 @@ describe('publishUiResult', () => {
     expect(existsSync(join(directory, 'result.json'))).toBe(false)
   })
 
+  it('retains the exclusively created temporary leaf before any pathname replacement', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    const directory = join(root, pluginEvidenceKey(value.plugin), value.sessionId)
+    const temporaryPath = join(directory, `${value.sessionId}.tmp`)
+    const parked = `${temporaryPath}.owned-parked`
+    const replacement = '{"owner":"replacement after create"}\n'
+    let seamCalled = false
+
+    expect(() => publishUiResult({
+      uiRunsRoot: root,
+      result: value,
+      afterTemporaryCreate(path: string) {
+        seamCalled = true
+        expect(path).toBe(temporaryPath)
+        renameSync(temporaryPath, parked)
+        writeFileSync(temporaryPath, replacement, { flag: 'wx' })
+      },
+    } as Parameters<typeof publishUiResult>[0] & { afterTemporaryCreate(path: string): void })).toThrow(
+      /identity|changed|replaced|temporary|ownership|refus/i,
+    )
+
+    expect(seamCalled).toBe(true)
+    expect(readFileSync(temporaryPath, 'utf8')).toBe(replacement)
+    expect(existsSync(join(directory, 'result.json'))).toBe(false)
+  })
+
   it('round-trips the exact minimal schema with a final newline at the stable path', () => {
     const root = uiRunsRoot()
     const value = result()
@@ -497,6 +524,35 @@ describe('loadUiResults', () => {
 
     expect(seamCalled).toBe(true)
     expect(readFileSync(join(pluginRoot, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(JSON.parse(readFileSync(join(parked, value.sessionId, 'result.json'), 'utf8'))).toEqual(value)
+  })
+
+  it('captures the plugin evidence directory before enumeration begins', () => {
+    const root = uiRunsRoot()
+    const value = result()
+    publishUiResult({ uiRunsRoot: root, result: value })
+    const key = pluginEvidenceKey(value.plugin)
+    const pluginRoot = join(root, key)
+    const parked = `${pluginRoot}.pre-enumeration-parked`
+    const replacementSession = join(pluginRoot, value.sessionId)
+    const forged = { ...value, verdict: 'fail' as const, summary: 'forged pre-enumeration replacement evidence' }
+    let seamCalled = false
+
+    expect(() => loadUiResults({
+      uiRunsRoot: root,
+      pluginKey: key,
+      beforePluginEnumeration(path: string) {
+        seamCalled = true
+        expect(path).toBe(pluginRoot)
+        renameSync(pluginRoot, parked)
+        mkdirSync(replacementSession, { recursive: true })
+        writeFileSync(join(replacementSession, 'result.json'), `${JSON.stringify(forged, null, 2)}\n`)
+      },
+    } as Parameters<typeof loadUiResults>[0] & { beforePluginEnumeration(path: string): void })).toThrow(
+      /identity|changed|replacement|ownership|corrupt|refus/i,
+    )
+
+    expect(seamCalled).toBe(true)
     expect(JSON.parse(readFileSync(join(parked, value.sessionId, 'result.json'), 'utf8'))).toEqual(value)
   })
 
