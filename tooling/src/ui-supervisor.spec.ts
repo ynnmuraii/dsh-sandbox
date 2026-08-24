@@ -691,6 +691,24 @@ describe('runUiSupervisor', () => {
     expect(existsSync(current.plan.runtimeHome)).toBe(true)
   })
 
+  it('records cleanup failure when recovery cannot stop a child after a post-spawn setup error', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.spawnChild = vi.fn(() => ({ ...bundle.child.handle, pid: 0 }))
+    bundle.deps.stopChildTree = vi.fn(async () => { throw new Error('post-spawn tree cleanup failed') })
+
+    await expect(runUiSupervisor(current.request, bundle.deps)).rejects.toThrow(/pid|cleanup|tree/i)
+
+    expect(bundle.deps.stopChildTree).toHaveBeenCalledTimes(1)
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'crashed',
+      supervisorPid: process.pid,
+      cleanup: 'fail',
+      error: expect.stringMatching(/post-spawn|tree|cleanup|stop/i),
+    })
+    expect(existsSync(current.plan.runtimeHome)).toBe(true)
+  })
+
   it('keeps concurrent supervisors and controls session-local', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-lab-ui-supervisor-pair-'))
     roots.push(root)
