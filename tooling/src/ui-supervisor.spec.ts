@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -252,6 +252,45 @@ describe('parseDshReadyUrl', () => {
 })
 
 describe('runUiSupervisor', () => {
+  it('retains its startup session identity before opening the diagnostic log', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    const parked = `${current.sessionDir}.parked`
+    let replacementState = ''
+    bundle.deps.prepareRuntime = vi.fn(async () => {
+      const ownedState = readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })
+      const terminal: UiSessionStateV1 = {
+        ...ownedState,
+        state: 'finished',
+        cleanup: 'pass',
+        updatedAt: '2026-08-24T12:00:59.000Z',
+      }
+      delete terminal.supervisorPid
+      delete terminal.childPid
+      delete terminal.url
+      delete terminal.error
+      replacementState = JSON.stringify(terminal, null, 2) + '\n'
+      renameSync(current.sessionDir, parked)
+      mkdirSync(current.sessionDir)
+      writeFileSync(join(current.sessionDir, 'state.json'), replacementState)
+      writeFileSync(join(current.sessionDir, 'replacement-canary.txt'), 'replacement')
+      return current.plan
+    })
+    bundle.deps.openLog = vi.fn((sessionDir, maxBytes) => {
+      const log = openBoundedSupervisorLog(sessionDir, maxBytes)
+      log.close()
+      throw new Error('replacement diagnostic log was opened')
+    })
+
+    await expect(runUiSupervisor(current.request, bundle.deps)).rejects.toThrow(/identity|changed|swap|refus/i)
+
+    expect(bundle.deps.openLog).not.toHaveBeenCalled()
+    expect(existsSync(join(current.sessionDir, 'supervisor.log'))).toBe(false)
+    expect(readFileSync(join(current.sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(readFileSync(join(current.sessionDir, 'state.json'), 'utf8')).toBe(replacementState)
+    expect(existsSync(join(parked, 'home'))).toBe(true)
+  })
+
   it('reconstructs fragmented readiness, ignores stderr lookalikes, and finishes after cleanup', async () => {
     const current = fixture()
     const { deps, child, stopChildTree } = dependencies(current.plan)
@@ -279,6 +318,41 @@ describe('runUiSupervisor', () => {
     expect(existsSync(join(current.sessionDir, 'overlay'))).toBe(false)
     expect(existsSync(join(current.sessionDir, 'control.json'))).toBe(false)
     expect(existsSync(join(current.sessionDir, 'supervisor.log'))).toBe(false)
+  })
+
+  it('retains its startup session identity through child stop and descendant cleanup', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    const parked = `${current.sessionDir}.parked`
+    let replacementState = ''
+    bundle.deps.stopChildTree = vi.fn(async () => {
+      bundle.child.exit({ code: 0, signal: 'SIGTERM' })
+      replacementState = readFileSync(join(current.sessionDir, 'state.json'), 'utf8')
+      renameSync(current.sessionDir, parked)
+      mkdirSync(join(current.sessionDir, 'home'), { recursive: true })
+      mkdirSync(join(current.sessionDir, 'overlay'), { recursive: true })
+      writeFileSync(join(current.sessionDir, 'home', 'replacement-canary.txt'), 'replacement home')
+      writeFileSync(join(current.sessionDir, 'overlay', 'replacement-canary.txt'), 'replacement overlay')
+      writeFileSync(join(current.sessionDir, 'supervisor.log'), 'replacement log')
+      writeFileSync(join(current.sessionDir, 'state.json'), replacementState)
+    })
+    const running = runUiSupervisor(current.request, bundle.deps)
+    bundle.child.stdout.write('dsh web: http://127.0.0.1:49152\n')
+    await waitFor(() => readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).state === 'ready', 'ready')
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+
+    await expect(running).rejects.toThrow(/identity|changed|swap|refus|cleanup/i)
+
+    expect(readFileSync(join(current.sessionDir, 'home', 'replacement-canary.txt'), 'utf8')).toBe('replacement home')
+    expect(readFileSync(join(current.sessionDir, 'overlay', 'replacement-canary.txt'), 'utf8')).toBe('replacement overlay')
+    expect(readFileSync(join(current.sessionDir, 'supervisor.log'), 'utf8')).toBe('replacement log')
+    expect(readFileSync(join(current.sessionDir, 'state.json'), 'utf8')).toBe(replacementState)
+    expect(existsSync(join(parked, 'home'))).toBe(true)
+    expect(existsSync(join(parked, 'control.json'))).toBe(true)
   })
 
   it('aborts without publishing evidence and is isolated to its own session', async () => {
