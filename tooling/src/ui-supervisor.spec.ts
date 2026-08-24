@@ -360,6 +360,57 @@ describe('runUiSupervisor', () => {
     })
   })
 
+  it('lets an active diagnostic failure own cleanup ahead of a pending control', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    let releasePoll!: () => void
+    let releaseStop!: () => void
+    const pollGate = new Promise<void>(resolve => { releasePoll = resolve })
+    const stopGate = new Promise<void>(resolve => { releaseStop = resolve })
+    bundle.deps.sleep = vi.fn(() => pollGate)
+    bundle.deps.stopChildTree = vi.fn(async () => {
+      await stopGate
+      bundle.child.exit({ code: 0, signal: 'SIGTERM' })
+    })
+    const log: UiDiagnosticLog = {
+      write: vi.fn(() => { throw new Error('active log failure') }),
+      close: vi.fn(),
+    }
+    bundle.deps.openLog = vi.fn(() => log)
+    const running = runUiSupervisor(current.request, bundle.deps)
+    await waitFor(() => vi.mocked(bundle.deps.sleep).mock.calls.length === 1, 'poll wait')
+    bundle.child.stderr.write('trigger active failure\n')
+    await waitFor(() => vi.mocked(bundle.deps.stopChildTree).mock.calls.length === 1, 'diagnostic cleanup')
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'finish', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+    releasePoll()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    releaseStop()
+    await expect(running).rejects.toThrow(/active log failure|diagnostic/i)
+    expect(bundle.deps.stopChildTree).toHaveBeenCalledTimes(1)
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'crashed',
+      cleanup: 'fail',
+    })
+    expect(existsSync(current.plan.runtimeHome)).toBe(true)
+  })
+
+  it('stops an owned child when lease publication fails immediately after spawn', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.spawnChild = vi.fn(() => {
+      writeFileSync(join(current.sessionDir, 'state.json'), '{corrupt')
+      return bundle.child.handle
+    })
+    await expect(runUiSupervisor(current.request, bundle.deps)).rejects.toThrow(/state|json|corrupt/i)
+    expect(bundle.deps.stopChildTree).toHaveBeenCalledWith(bundle.child.handle)
+    expect(bundle.deps.stopChildTree).toHaveBeenCalledTimes(1)
+    expect(existsSync(current.plan.runtimeHome)).toBe(true)
+  })
+
   it('keeps concurrent supervisors and controls session-local', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-lab-ui-supervisor-pair-'))
     roots.push(root)
