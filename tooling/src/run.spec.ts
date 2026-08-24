@@ -17,9 +17,10 @@ import {
   resolveTsxLoader,
   verifyPackedTarget,
   buildUpstream,
+  resolveUiLauncher,
   devPlugin,
 } from './run.js'
-import { pnpm, pnpmCommand } from './proc.js'
+import { pnpm, pnpmAsync, pnpmCommand } from './proc.js'
 import type { PluginRef } from './plugin-ref.js'
 
 vi.mock('./proc.js', async importOriginal => {
@@ -27,6 +28,7 @@ vi.mock('./proc.js', async importOriginal => {
   return {
     ...actual,
     pnpm: vi.fn(),
+    pnpmAsync: vi.fn(),
     pnpmCommand: vi.fn(actual.pnpmCommand),
   }
 })
@@ -178,6 +180,43 @@ describe('master launcher build output', () => {
 
       expect(pnpm).toHaveBeenCalledTimes(2)
       expect(vi.mocked(pnpm).mock.calls.every(([, opts]) => opts?.stdio !== 'inherit')).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('lets an abort signal stop the real UI master preparation path', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-master-ui-cancel-'))
+    const upstream = join(root, 'upstream', 'deepseek-harness')
+    const controller = new AbortController()
+    try {
+      mkdirSync(upstream, { recursive: true })
+      execFileSync('git', ['init', '-q'], { cwd: upstream })
+      writeFileSync(join(upstream, 'package.json'), '{}')
+      execFileSync('git', ['add', '.'], { cwd: upstream })
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], { cwd: upstream })
+      const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: upstream, encoding: 'utf8' }).trim()
+      const compatibility = {
+        targets: {
+          next: { dsh: '0.1.1-rc.2', cordis: '4.0.1', node: '22.20.0', pnpm: '11.7.0' },
+          master: { repository: 'deepseek-ai/deepseek-harness', commit, node: '^22.19.0', pnpm: '11.7.0' },
+        },
+      }
+      vi.mocked(pnpmAsync).mockImplementation(async (_args, opts) => {
+        expect(opts.signal).toBe(controller.signal)
+        return await new Promise<never>((_resolve, reject) => {
+          opts.signal.addEventListener('abort', () => reject(new Error('master preparation aborted')), { once: true })
+        })
+      })
+      const resolving = resolveUiLauncher(root, 'master', compatibility, controller.signal)
+      void resolving.catch(() => undefined)
+
+      await vi.waitFor(() => expect(pnpmAsync).toHaveBeenCalledTimes(1))
+      expect(vi.mocked(pnpmAsync).mock.calls[0]![0]).toEqual(['install', '--config.strictDepBuilds=false'])
+      expect(vi.mocked(pnpmAsync).mock.calls[0]![1]).toMatchObject({ cwd: upstream, signal: controller.signal, stdio: 'pipe' })
+      controller.abort()
+
+      await expect(resolving).rejects.toThrow(/abort/i)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

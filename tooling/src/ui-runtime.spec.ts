@@ -4,12 +4,28 @@ import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { computePluginDigest } from './plugin-snapshot.js'
 import type { Compatibility } from './schemas.js'
+import { resolveUiLauncher } from './run.js'
+import { pnpmAsync } from './proc.js'
 import {
   buildUiRuntimeEnvironment,
   prepareUiRuntime,
   type UiRuntimeDependencies,
   type UiRuntimePlugin,
 } from './ui-runtime.js'
+
+vi.mock('./run.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('./run.js')>()
+  return { ...actual, resolveUiLauncher: vi.fn(actual.resolveUiLauncher) }
+})
+
+vi.mock('./proc.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('./proc.js')>()
+  return {
+    ...actual,
+    pnpm: vi.fn(() => { throw new Error('legacy synchronous pnpm runner used') }),
+    pnpmAsync: vi.fn(),
+  }
+})
 
 const roots: string[] = []
 const SESSION = 'ui-20260824T120000000Z-a1b2c3d4'
@@ -27,6 +43,7 @@ function fixture(): { root: string; plugin: UiRuntimePlugin; compatibility: Comp
   const sourcePath = join(root, 'external-plugin')
   mkdirSync(join(sourcePath, 'src'), { recursive: true })
   mkdirSync(join(root, 'upstream', 'deepseek-harness'), { recursive: true })
+  mkdirSync(join(root, 'workbench'), { recursive: true })
   writeFileSync(join(sourcePath, 'src', 'index.ts'), 'export const plugin = true\n')
   writeFileSync(join(sourcePath, 'package.json'), JSON.stringify({ name: '@fixture/example' }))
   const compatibility = {
@@ -47,6 +64,20 @@ function fixture(): { root: string; plugin: UiRuntimePlugin; compatibility: Comp
       },
     },
   } as Compatibility
+  writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+    'targets:',
+    '  next:',
+    `    dsh: ${NEXT}`,
+    '    cordis: 4.0.1',
+    '    node: 22.20.0',
+    '    pnpm: 11.7.0',
+    '  master:',
+    '    repository: deepseek-ai/deepseek-harness',
+    `    commit: ${MASTER}`,
+    '    node: ^22.19.0',
+    '    pnpm: 11.7.0',
+    '',
+  ].join('\n'))
   return {
     root,
     plugin: { packageName: '@fixture/example', sourcePath, runtimeName: 'example' },
@@ -162,6 +193,37 @@ describe('prepareUiRuntime', () => {
 
     await expect(preparing).rejects.toThrow(/abort/i)
     expect(installNextProfile).not.toHaveBeenCalled()
+  })
+
+  it('uses the cancellable package runner in the real next-runtime dependency path', async () => {
+    const current = fixture()
+    const controller = new AbortController()
+    vi.mocked(resolveUiLauncher).mockResolvedValue({ cmd: process.execPath, args: ['C:/tools/pnpm.cjs', 'exec', 'dsh'] })
+    vi.mocked(pnpmAsync).mockImplementation(async (_args, opts) => {
+      expect(opts.signal).toBe(controller.signal)
+      return await new Promise<never>((_resolve, reject) => {
+        opts.signal.addEventListener('abort', () => reject(new Error('owned pnpm tree aborted')), { once: true })
+      })
+    })
+    const preparing = prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+      signal: controller.signal,
+    })
+    void preparing.catch(() => undefined)
+
+    await vi.waitFor(() => expect(pnpmAsync).toHaveBeenCalledTimes(1))
+    expect(resolveUiLauncher).toHaveBeenCalledWith(current.root, 'next', expect.any(Object), controller.signal)
+    expect(vi.mocked(pnpmAsync).mock.calls[0]![0]).toEqual(['install', '--config.strictDepBuilds=false'])
+    expect(vi.mocked(pnpmAsync).mock.calls[0]![1]).toMatchObject({
+      cwd: expect.stringContaining(SESSION),
+      signal: controller.signal,
+    })
+    controller.abort()
+
+    await expect(preparing).rejects.toThrow(/abort/i)
   })
 
   it('keeps inherited environment in memory and out of the serializable plan', async () => {
