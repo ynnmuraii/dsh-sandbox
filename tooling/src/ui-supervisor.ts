@@ -27,7 +27,7 @@ import {
   type UiRuntimePlugin,
 } from './ui-runtime.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
-import { claimOwnedUiDirectory, type OwnedUiDirectory } from './ui-owned-directory.js'
+import { claimOwnedUiDirectory, type OwnedUiDirectory, type OwnedUiMutationRetry } from './ui-owned-directory.js'
 import {
   defaultProcessTreeDependencies,
   stopOwnedProcessTree,
@@ -434,7 +434,7 @@ async function handleControl(control: UiControlV1, context: ControlContext): Pro
       context.markTreeCleanupConfirmed()
     }
     if (child !== undefined && !context.treeCleanupConfirmed()) throw new Error('owned child tree cleanup was not confirmed')
-    cleanupSessionDescendants(sessionDir, ownedSession)
+    await cleanupSessionDescendants(sessionDir, ownedSession, deps)
     const cleaned = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
     const compact = compactState(cleaned, true)
     writeState(runtimeRoot, {
@@ -601,15 +601,24 @@ function nextTimestamp(candidate: string, previous: string): string {
   return Date.parse(candidate) < Date.parse(previous) ? previous : candidate
 }
 
-function cleanupSessionDescendants(sessionDir: string, owned: OwnedUiDirectory): void {
+function mutationRetryPolicy(deps: UiSupervisorDependencies): OwnedUiMutationRetry {
+  return {
+    attempts: 10,
+    delayMs: attempt => Math.min(100 * 2 ** attempt, 1000),
+    sleep: ms => deps.sleep(ms),
+  }
+}
+
+async function cleanupSessionDescendants(sessionDir: string, owned: OwnedUiDirectory, deps: UiSupervisorDependencies): Promise<void> {
   const home = join(sessionDir, 'home')
   const overlay = join(sessionDir, 'overlay')
+  const policy = mutationRetryPolicy(deps)
   owned.assertCurrent()
-  if (existsSync(home)) owned.removeDirectoryLeaf('home')
+  if (existsSync(home)) await owned.removeDirectoryLeafRetrying('home', policy)
   owned.assertCurrent()
-  if (existsSync(overlay)) owned.removeDirectoryLeaf('overlay')
+  if (existsSync(overlay)) await owned.removeDirectoryLeafRetrying('overlay', policy)
   owned.assertCurrent()
-  owned.removeFileLeaf('supervisor.log')
+  await owned.removeFileLeafRetrying('supervisor.log', policy)
   owned.assertCurrent()
 }
 
