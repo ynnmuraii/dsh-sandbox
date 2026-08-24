@@ -8,6 +8,14 @@ import { parsePluginSelector, resolvePluginRef } from './plugin-ref.js'
 import { inspectPlugin } from './inspect.js'
 import { verifyPlugin } from './verify.js'
 import { derivePluginStatus, type PluginStatus, type StatusClaim } from './status.js'
+import {
+  abortUiSession,
+  finishUiSession,
+  getUiSessionStatus,
+  startUiSession,
+  type UiSessionViewV1,
+} from './ui.js'
+import type { UiResultV1 } from './ui-evidence.js'
 
 export { parsePluginSelector } from './plugin-ref.js'
 
@@ -23,6 +31,10 @@ Commands:
     exit 0 all applicable claims current/pass; exit 2 any applicable stale/not-run/failed;
     exit 1 selector/tooling error
   sync-context [name|--all] regenerate shared-context projections and the agent skill
+  ui start <name>|--path P --target T [--json]  start an isolated UI session
+  ui status <session-id> [--json]              inspect a UI session
+  ui finish <session-id> --verdict pass|fail --summary S [--json]  finalize a UI session
+  ui abort <session-id> [--json]               abort a UI session
   doctor                   validate toolchain, catalog, and target pins
   upstream check           compare the pinned master commit with the remote
   upstream update [--verify] explicitly adopt the fetched master commit
@@ -158,6 +170,8 @@ export async function runCli(argv: string[]): Promise<number> {
         return 1
       }
     }
+    case 'ui':
+      return runUi(rest)
     case 'upstream':
       return runUpstream(rest)
     case '--help':
@@ -276,7 +290,184 @@ function validateMetadataTargets(plugin: { metadata?: { targets?: string[] } }):
   )
 }
 
-async function suppressConsoleProgress<T>(operation: () => Promise<T>): Promise<T> {
+async function runUi(rest: string[]): Promise<number> {
+  const [subcommand, ...args] = rest
+  try {
+    if (subcommand === 'start') {
+      const parsed = parseUiStart(args)
+      const plugin = resolvePluginRef({ root: process.cwd(), selector: parsed.selector })
+      const operation = () => startUiSession({ root: process.cwd(), plugin, target: parsed.target })
+      const view = parsed.json ? await suppressConsoleProgress(operation) : await operation()
+      if (parsed.json) console.log(JSON.stringify(view))
+      else printUiStart(view)
+      return uiStartExitCode(view)
+    }
+    if (subcommand === 'status') {
+      const parsed = parseUiStatus(args)
+      const operation = () => getUiSessionStatus({ root: process.cwd(), sessionId: parsed.sessionId })
+      const view = parsed.json ? await suppressConsoleProgress(operation) : operation()
+      if (parsed.json) console.log(JSON.stringify(view))
+      else printUiStatus(view)
+      return uiStatusExitCode(view)
+    }
+    if (subcommand === 'finish') {
+      const parsed = parseUiFinish(args)
+      const operation = () => finishUiSession({
+        root: process.cwd(),
+        sessionId: parsed.sessionId,
+        verdict: parsed.verdict,
+        summary: parsed.summary,
+      })
+      const result = parsed.json ? await suppressConsoleProgress(operation) : await operation()
+      if (parsed.json) console.log(JSON.stringify(result))
+      else printUiFinish(result)
+      return result.verdict === 'pass' ? 0 : 2
+    }
+    if (subcommand === 'abort') {
+      const parsed = parseUiAbort(args)
+      const operation = () => abortUiSession({ root: process.cwd(), sessionId: parsed.sessionId })
+      const view = parsed.json ? await suppressConsoleProgress(operation) : await operation()
+      if (parsed.json) console.log(JSON.stringify(view))
+      else printUiAbort(view)
+      return view.state === 'aborted' ? 0 : 2
+    }
+    throw new Error('usage: lab ui start|status|finish|abort')
+  } catch (error) {
+    console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    return 1
+  }
+}
+
+interface UiSelectorParse {
+  selector: { name?: string; path?: string }
+  target: 'next' | 'master'
+  json: boolean
+}
+
+interface UiSessionParse { sessionId: string; json: boolean }
+interface UiFinishParse extends UiSessionParse { verdict: 'pass' | 'fail'; summary: string }
+
+const UI_SESSION_ID_PATTERN = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
+
+function parseUiStart(args: string[]): UiSelectorParse {
+  let name: string | undefined
+  let path: string | undefined
+  let target: 'next' | 'master' | undefined
+  let json = false
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!
+    if (arg === '--path') {
+      if (path !== undefined || name !== undefined) throw new Error('--path may not be combined with a positional plugin name')
+      const value = args[++i]
+      if (value === undefined || value.length === 0 || value.startsWith('--')) throw new Error('--path requires a value')
+      path = value
+    } else if (arg === '--target') {
+      if (target !== undefined) throw new Error('--target may be specified only once')
+      const value = args[++i]
+      if (value !== 'next' && value !== 'master') throw new Error(`invalid --target '${value ?? ''}' (expected next|master)`)
+      target = value
+    } else if (arg === '--json') {
+      if (json) throw new Error('--json may be specified only once')
+      json = true
+    } else if (arg.startsWith('--')) {
+      throw new Error(`unknown ui start flag '${arg}'`)
+    } else if (name === undefined && path === undefined) {
+      name = arg
+    } else {
+      throw new Error('ui start accepts exactly one plugin selector')
+    }
+  }
+  if (name === undefined && path === undefined) throw new Error('ui start requires a plugin name or --path')
+  if (target === undefined) throw new Error('ui start requires --target next|master')
+  return { selector: path === undefined ? { name: name! } : { path }, target, json }
+}
+
+function parseUiStatus(args: string[]): UiSessionParse {
+  const parsed = parseUiSessionFlags(args, 'status')
+  return parsed
+}
+
+function parseUiAbort(args: string[]): UiSessionParse {
+  return parseUiSessionFlags(args, 'abort')
+}
+
+function parseUiSessionFlags(args: string[], command: string): UiSessionParse {
+  let sessionId: string | undefined
+  let json = false
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!
+    if (arg === '--json') {
+      if (json) throw new Error('--json may be specified only once')
+      json = true
+    } else if (arg.startsWith('--')) {
+      throw new Error(`unknown ui ${command} flag '${arg}'`)
+    } else if (sessionId === undefined) {
+      sessionId = arg
+    } else {
+      throw new Error(`ui ${command} accepts exactly one session ID`)
+    }
+  }
+  if (sessionId === undefined || !UI_SESSION_ID_PATTERN.test(sessionId)) throw new Error('invalid or unsafe session ID')
+  return { sessionId, json }
+}
+
+function parseUiFinish(args: string[]): UiFinishParse {
+  let sessionId: string | undefined
+  let verdict: 'pass' | 'fail' | undefined
+  let summary: string | undefined
+  let json = false
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!
+    if (arg === '--verdict') {
+      if (verdict !== undefined) throw new Error('--verdict may be specified only once')
+      const value = args[++i]
+      if (value !== 'pass' && value !== 'fail') throw new Error(`invalid --verdict '${value ?? ''}' (expected pass|fail)`)
+      verdict = value
+    } else if (arg === '--summary') {
+      if (summary !== undefined) throw new Error('--summary may be specified only once')
+      const value = args[++i]
+      if (value === undefined) throw new Error('--summary requires a value')
+      summary = value
+    } else if (arg === '--json') {
+      if (json) throw new Error('--json may be specified only once')
+      json = true
+    } else if (arg.startsWith('--')) {
+      throw new Error(`unknown ui finish flag '${arg}'`)
+    } else if (sessionId === undefined) {
+      sessionId = arg
+    } else {
+      throw new Error('ui finish accepts exactly one session ID')
+    }
+  }
+  if (sessionId === undefined || !UI_SESSION_ID_PATTERN.test(sessionId)) throw new Error('invalid or unsafe session ID')
+  if (verdict === undefined) throw new Error('ui finish requires --verdict pass|fail')
+  if (summary === undefined) throw new Error('ui finish requires --summary')
+  return { sessionId, verdict, summary, json }
+}
+
+function printUiStart(view: UiSessionViewV1): void {
+  console.log(`UI session ${view.sessionId}: ${view.state}${view.url === undefined ? '' : ` ${view.url}`}`)
+}
+
+function printUiStatus(view: UiSessionViewV1): void {
+  console.log(`UI session ${view.sessionId}: ${view.state}`)
+  if (view.url !== undefined) console.log(`url: ${view.url}`)
+  if (view.stale) console.log(`stale: ${view.staleReasons.join(', ')}; abort this session and start a new one`)
+  if (view.error !== undefined) console.log(`error: ${view.error}; inspect the runtime or abort the session`)
+}
+
+function printUiFinish(result: UiResultV1): void {
+  console.log(`UI finish: ${result.verdict}; evidence: ${result.sessionId} (${result.operation})`)
+}
+
+function printUiAbort(view: UiSessionViewV1): void {
+  console.log(`UI abort: ${view.state} (${view.sessionId})`)
+}
+
+function uiStartExitCode(view: UiSessionViewV1): number { return view.state === 'ready' && !view.stale ? 0 : 2 }
+function uiStatusExitCode(view: UiSessionViewV1): number { return view.state === 'ready' && !view.stale ? 0 : 2 }
+
+async function suppressConsoleProgress<T>(operation: () => T | Promise<T>): Promise<T> {
   const originalLog = console.log
   console.log = () => undefined
   try {

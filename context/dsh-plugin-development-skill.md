@@ -23,6 +23,25 @@ Every registry, listener, adapter, and external resource must be HMR-safe: regis
 
 SDD, TDD, planning, review, and orchestration are advisory workflows chosen by the agent and host harness: use them to clarify seams, risks, evidence, and ownership, but let the canonical contracts and tests decide behavior. Prefer a narrow red-green cycle and review the resulting diff independently.
 
+## UI session protocol
+
+For browser-facing checks, use the separate protocol:
+
+```text
+pnpm lab ui start <name>|--path P --target next|master [--json]
+pnpm lab ui status <session-id> [--json]
+pnpm lab ui finish <session-id> --verdict pass|fail --summary "..." [--json]
+pnpm lab ui abort <session-id> [--json]
+```
+
+The lab owns only the temporary isolated session runtime and its factual
+cleanup/evidence boundary. An external browser or vision agent/harness chooses
+navigation and interactions and decides what the visual result means. Screenshots
+and browser artifacts are transient and not retained; finalized evidence is only
+a minimal verdict/result, short summary, and identities. SDD, TDD, planning,
+orchestration, and agent-browser are advisory recommendations, never required
+tools or workflows.
+
 Only explicit authoring commands may mutate plugin repositories. Never manufacture plugin state during inspection or synchronization. Keep credentials and secrets in ignored runtime environment only. Release a plugin as its own repository with its own versioning, package, tests, and publication decisions; the meta-repo does not publish it. Production code imports public npm APIs only, never files from an upstream Harness checkout.
 
 Plans, approvals, and session memory belong to the agent and host harness, never to `.lab/runtime`; the lab keeps runtime descendants and factual verification evidence only.

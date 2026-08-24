@@ -15,6 +15,15 @@ Required test levels for plugin repos. Grounded in design spec §12 and `researc
 
 The meta-repo does not copy package tests; `lab verify` orchestrates the plugin's own commands and adds target checks.
 
+## UI session protocol
+
+The separate `lab ui start`, `lab ui status`, `lab ui finish`, and `lab ui abort`
+commands provide a temporary isolated runtime for factual UI lifecycle checks.
+An external browser or vision agent/harness owns navigation, interaction, and
+the visual meaning of a check. The lab retains only a minimal immutable verdict,
+short summary, and captured identities; screenshots and browser artifacts remain
+transient and are never retained by the lab.
+
 ## Rules
 
 - **HMR-safety** is required for every registry: dispose the contributing Fiber and verify cleanup; source-plane tests must not accidentally pick up stale `lib/`.

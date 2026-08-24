@@ -11,6 +11,10 @@ pnpm lab inspect <name>|--path P [--json]
 pnpm lab dev <name>|--path P --target T
 pnpm lab verify <name>|--path P --target T [--json]
 pnpm lab status <name>|--path P [--json]
+pnpm lab ui start <name>|--path P --target T [--json]
+pnpm lab ui status <session-id> [--json]
+pnpm lab ui finish <session-id> --verdict pass|fail --summary "..." [--json]
+pnpm lab ui abort <session-id> [--json]
 ```
 
 `dev` is live/in-place and read-only with respect to the plugin: it reads the
@@ -23,7 +27,12 @@ is convenient and `init`/initialization is optional; only explicit authoring com
 body at `context/dsh-plugin-development-skill.md` and all context documents.
 It provides advisory methodology for the agent; `pnpm lab sync-context`
 regenerates it, while `pnpm lab doctor` reports missing or stale content without
-writing files. UI review sessions are not provided by this slice.
+writing files.
+
+The `lab ui start/status/finish/abort` family is a separate protocol for a
+temporary isolated runtime and minimal factual UI verdict. An external browser
+or vision agent/harness owns navigation and visual decisions; screenshots and
+browser artifacts are transient and not retained by the lab.
 
 - **Author guide & recipes** — [docs/using-the-lab.md](docs/using-the-lab.md)
 - **Root context library** — [context/](context/) (shared snapshots derive from it)

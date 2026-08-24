@@ -14,6 +14,10 @@ lab inspect <name>|--path P [--json]
 lab dev <name>|--path P --target T
 lab verify <name>|--path P --target T [--json]
 lab status <name>|--path P [--json]
+lab ui start <name>|--path P --target T [--json]
+lab ui status <session-id> [--json]
+lab ui finish <session-id> --verdict pass|fail --summary "..." [--json]
+lab ui abort <session-id> [--json]
 ```
 
 `dev` is live/in-place read-only: it reads the plugin's current source and puts
@@ -27,7 +31,13 @@ commands mutate plugin repositories. The portable agent entrypoint is the genera
 `context/dsh-plugin-development-skill.md`. It is advisory guidance for the
 agent, not workflow-state or UI enforcement. Regenerate it with
 `pnpm lab sync-context`; `pnpm lab doctor` reports missing or stale generated
-content without writing it. UI sessions are not implemented.
+content without writing it.
+
+The `lab ui start/status/finish/abort` family is separate from `verify`: it owns
+only a temporary isolated runtime and factual lifecycle/evidence. An external
+browser or vision agent/harness owns navigation, interaction, and visual meaning.
+Screenshots and browser artifacts are transient and not retained by the lab; the
+final record is a minimal verdict, short summary, and captured identities.
 
 > Scope note. Everything here is against the **pinned** revision of upstream
 > DeepSeek Harness recorded in `workbench/compatibility.yaml`. DeepSeek Harness

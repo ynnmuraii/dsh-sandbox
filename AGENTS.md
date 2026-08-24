@@ -10,12 +10,22 @@ pnpm lab inspect <name>|--path P [--json]
 pnpm lab dev <name>|--path P --target T
 pnpm lab verify <name>|--path P --target T [--json]
 pnpm lab status <name>|--path P [--json]
+pnpm lab ui start <name>|--path P --target T [--json]
+pnpm lab ui status <session-id> [--json]
+pnpm lab ui finish <session-id> --verdict pass|fail --summary "..." [--json]
+pnpm lab ui abort <session-id> [--json]
 ```
 
 `dev` is live/in-place read-only for the plugin and keeps profiles/overlays in
 `.lab/runtime`. `verify` includes current uncommitted and untracked files in a
 temporary workspace and always removes that workspace; only minimal evidence is
-kept as forge memory. Catalog lookup and init/initialization are optional. Only explicit authoring commands mutate plugin repositories. The portable agent entrypoint is `.agents/skills/dsh-plugin-development/SKILL.md`; it provides advisory methodology and does not enforce workflow state or UI behavior. Regenerate it with `pnpm lab sync-context`. UI sessions are not provided here.
+kept as forge memory. Catalog lookup and init/initialization are optional. Only explicit authoring commands mutate plugin repositories. The portable agent entrypoint is `.agents/skills/dsh-plugin-development/SKILL.md`; it provides advisory methodology and does not enforce workflow state or UI behavior. Regenerate it with `pnpm lab sync-context`.
+
+The separate `lab ui start/status/finish/abort` protocol owns a temporary
+isolated runtime and factual lifecycle/evidence only. An external browser or
+vision agent/harness owns browser workflow and visual decisions. Screenshots and
+browser artifacts are transient and not retained by the lab; finalized evidence
+is a minimal verdict, short summary, and identities.
 
 ## Source of truth
 
