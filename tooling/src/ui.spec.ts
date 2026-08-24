@@ -490,6 +490,40 @@ describe('getUiSessionStatus', () => {
     )
   })
 
+  it('does not latch status drift into a same-name replacement session directory', () => {
+    const current = fixture()
+    createState(current, SESSION, 'ready')
+    writeFileSync(join(current.sourcePath, 'src', 'index.ts'), 'export const uiService = "changed"\n')
+    const sessionDir = join(runtimeRoot(current.root), 'ui-sessions', SESSION)
+    const parked = `${sessionDir}.parked`
+    const replacementState = readFileSync(join(sessionDir, 'state.json'))
+    let swapped = false
+    let observed: unknown
+
+    try {
+      getUiSessionStatus({ root: current.root, sessionId: SESSION }, {
+        now: () => {
+          if (!swapped) {
+            swapped = true
+            renameSync(sessionDir, parked)
+            mkdirSync(sessionDir)
+            writeFileSync(join(sessionDir, 'state.json'), replacementState)
+            writeFileSync(join(sessionDir, 'replacement-canary.txt'), 'replacement')
+          }
+          return '2026-08-24T12:00:04.000Z'
+        },
+        processAlive: vi.fn(() => true),
+      })
+    } catch (error) {
+      observed = error
+    }
+
+    expect(readFileSync(join(sessionDir, 'state.json'))).toEqual(replacementState)
+    expect(readFileSync(join(sessionDir, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(observed).toBeInstanceOf(Error)
+    expect((observed as Error).message).toMatch(/identity|changed|swap|refus/i)
+  })
+
   it('derives an orphaned crash without killing or rewriting a recorded PID', () => {
     const current = fixture()
     createState(current, SESSION, 'ready')

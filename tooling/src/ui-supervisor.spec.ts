@@ -398,6 +398,67 @@ describe('runUiSupervisor', () => {
     expect(stopChildTree).toHaveBeenCalledTimes(1)
   })
 
+  it('joins natural-exit tree cleanup before applying a concurrent abort', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    let releaseCleanup!: () => void
+    const stopChildTree = vi.fn(async () => {
+      await new Promise<void>(resolve => { releaseCleanup = resolve })
+    })
+    bundle.deps.stopChildTree = stopChildTree
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+    bundle.child.stdout.write('dsh web: http://127.0.0.1:49152\n')
+    await waitFor(() => readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).state === 'ready', 'ready')
+
+    bundle.child.exit({ code: 0, signal: null })
+    await waitFor(() => stopChildTree.mock.calls.length === 1, 'natural-exit tree cleanup')
+    writeUiControl({
+      runtimeRoot: current.runtimeRoot,
+      sessionId: SESSION,
+      control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+    })
+    await waitFor(() => readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION }).state !== 'ready', 'control ownership')
+    releaseCleanup()
+
+    await expect(running).resolves.toBeUndefined()
+    expect(stopChildTree).toHaveBeenCalledTimes(1)
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'aborted',
+      cleanup: 'pass',
+    })
+  })
+
+  it('terminates with recovery ownership when natural-exit tree cleanup rejects', async () => {
+    const current = fixture()
+    const bundle = dependencies(current.plan)
+    bundle.deps.stopChildTree = vi.fn(async () => { throw new Error('descendant cleanup rejected') })
+    const running = runUiSupervisor(current.request, bundle.deps)
+    void running.catch(() => undefined)
+    bundle.child.exit({ code: 7, signal: null })
+
+    const outcome = await Promise.race([
+      running.then(() => 'resolved', () => 'rejected'),
+      new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 50)),
+    ])
+    if (outcome === 'timed-out') {
+      writeUiControl({
+        runtimeRoot: current.runtimeRoot,
+        sessionId: SESSION,
+        control: { schemaVersion: 1, action: 'abort', requestedAt: '2026-08-24T12:01:00.000Z' },
+      })
+      await running.catch(() => undefined)
+    }
+
+    expect(outcome).toBe('rejected')
+    expect(readUiSession({ runtimeRoot: current.runtimeRoot, sessionId: SESSION })).toMatchObject({
+      state: 'crashed',
+      supervisorPid: process.pid,
+      cleanup: 'fail',
+      error: expect.stringMatching(/descendant|cleanup|tree/i),
+    })
+  })
+
   it('records cleanup failure when a later supervisor error cannot prove a naturally exited tree absent', async () => {
     const current = fixture()
     const bundle = dependencies(current.plan)
