@@ -115,4 +115,22 @@ describe('claimOwnedUiDirectory', () => {
     expect(() => owned.removeDirectoryLeaf('home')).toThrow(/junction|symlink|identity|refus/i)
     expect(readFileSync(canary, 'utf8')).toBe('outside')
   })
+
+  it('allows only one cleanup claimant to quarantine a captured leaf', () => {
+    const current = fixture()
+    const quarantines: string[] = []
+    const options = {
+      root: current.root,
+      directory: current.sessionDir,
+      hooks: { afterQuarantine: (path: string) => quarantines.push(path) },
+    }
+    const first = claimOwnedUiDirectory(options)
+    const second = claimOwnedUiDirectory(options)
+
+    first.removeDirectoryLeaf('home')
+    second.removeDirectoryLeaf('home')
+
+    expect(quarantines).toHaveLength(1)
+    expect(existsSync(current.home)).toBe(false)
+  })
 })

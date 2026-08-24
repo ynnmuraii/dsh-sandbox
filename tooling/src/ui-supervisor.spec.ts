@@ -196,6 +196,25 @@ describe('parseDshReadyUrl', () => {
     expect(signalGroup).toHaveBeenCalledWith(-child.handle.pid, 'SIGTERM')
   })
 
+  it('fails Windows cleanup when leader exit cannot prove descendants are absent', async () => {
+    const child = fakeChild()
+    child.exit({ code: 0, signal: null })
+    const treeAlive = vi.fn(() => true)
+    const deps = {
+      platform: 'windows' as const,
+      taskkill: vi.fn(async () => undefined),
+      signalGroup: vi.fn(),
+      waitForExit: vi.fn(async () => true),
+      treeAlive,
+      termGraceMs: 5,
+      killGraceMs: 5,
+    } as UiProcessTreeDependencies & { treeAlive(pid: number): boolean }
+
+    await expect(stopOwnedChildTree(child.handle, deps)).rejects.toThrow(/tree|descendant|absence|prove|cleanup/i)
+    expect(deps.taskkill).toHaveBeenCalledWith(['/PID', String(child.handle.pid), '/T', '/F'])
+    expect(treeAlive).toHaveBeenCalledWith(child.handle.pid)
+  })
+
   it('refuses to open a bounded log through an externally linked file', () => {
     const current = fixture()
     const canary = join(current.root, 'outside.log')
