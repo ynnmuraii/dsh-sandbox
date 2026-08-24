@@ -309,6 +309,59 @@ describe('UI session store', () => {
     expect(readUiControl({ runtimeRoot: root, sessionId: SESSION })).toBeUndefined()
   })
 
+  it('refuses an ordinary session-directory swap immediately before control publication', () => {
+    const root = runtimeRoot()
+    const directory = createUiSession({ runtimeRoot: root, state: state() })
+    const parked = `${directory}.parked`
+    const control: UiControlV1 = {
+      schemaVersion: 1,
+      action: 'finish',
+      requestedAt: '2026-08-24T12:01:00.000Z',
+    }
+
+    expect(() => writeUiControl({
+      runtimeRoot: root,
+      sessionId: SESSION,
+      control,
+      beforeControlLink() {
+        renameSync(directory, parked)
+        mkdirSync(directory)
+        writeFileSync(join(directory, 'replacement-canary.txt'), 'replacement')
+      },
+    })).toThrow(/identity|changed|swap|refus/i)
+
+    expect(readFileSync(join(directory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(existsSync(join(directory, 'control.json'))).toBe(false)
+    expect(existsSync(join(parked, 'control.json'))).toBe(false)
+  })
+
+  it('refuses an ordinary session-directory swap immediately before control removal', () => {
+    const root = runtimeRoot()
+    const directory = createUiSession({ runtimeRoot: root, state: state() })
+    const parked = `${directory}.parked`
+    const control: UiControlV1 = {
+      schemaVersion: 1,
+      action: 'abort',
+      requestedAt: '2026-08-24T12:01:00.000Z',
+    }
+    writeUiControl({ runtimeRoot: root, sessionId: SESSION, control })
+
+    expect(() => clearUiControl({
+      runtimeRoot: root,
+      sessionId: SESSION,
+      beforeControlUnlink() {
+        renameSync(directory, parked)
+        mkdirSync(directory)
+        writeFileSync(join(directory, 'control.json'), JSON.stringify(control))
+        writeFileSync(join(directory, 'replacement-canary.txt'), 'replacement')
+      },
+    })).toThrow(/identity|changed|swap|refus/i)
+
+    expect(readFileSync(join(directory, 'replacement-canary.txt'), 'utf8')).toBe('replacement')
+    expect(readFileSync(join(directory, 'control.json'), 'utf8')).toBe(JSON.stringify(control))
+    expect(readFileSync(join(parked, 'control.json'), 'utf8')).toContain('"action": "abort"')
+  })
+
   it('refuses to clear corrupt control content and preserves it for diagnosis', () => {
     const root = runtimeRoot()
     const directory = createUiSession({ runtimeRoot: root, state: state() })

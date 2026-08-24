@@ -31,6 +31,41 @@ function fixture() {
 }
 
 describe('claimOwnedUiDirectory', () => {
+  it('removes a captured regular file leaf', () => {
+    const current = fixture()
+    const log = join(current.sessionDir, 'supervisor.log')
+    writeFileSync(log, 'owned log')
+    const owned = claimOwnedUiDirectory({ root: current.root, directory: current.sessionDir })
+
+    owned.removeFileLeaf('supervisor.log')
+
+    expect(existsSync(log)).toBe(false)
+  })
+
+  it('refuses an ordinary session-directory swap immediately before file removal', () => {
+    const current = fixture()
+    const log = join(current.sessionDir, 'supervisor.log')
+    const parked = `${current.sessionDir}.parked`
+    const parkedLog = join(parked, 'supervisor.log')
+    writeFileSync(log, 'original owned log')
+    const owned = claimOwnedUiDirectory({
+      root: current.root,
+      directory: current.sessionDir,
+      hooks: {
+        beforeMutation(operation, path) {
+          if (operation !== 'remove-file' || path !== log) return
+          renameSync(current.sessionDir, parked)
+          mkdirSync(current.sessionDir)
+          writeFileSync(log, 'replacement canary')
+        },
+      },
+    })
+
+    expect(() => owned.removeFileLeaf('supervisor.log')).toThrow(/identity|changed|swap|refus/i)
+    expect(readFileSync(log, 'utf8')).toBe('replacement canary')
+    expect(readFileSync(parkedLog, 'utf8')).toBe('original owned log')
+  })
+
   it('quarantines a captured directory leaf before recursively deleting it', () => {
     const current = fixture()
     const quarantines: string[] = []

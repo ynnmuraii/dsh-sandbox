@@ -85,10 +85,20 @@ function fixture(sessionId = SESSION, existingRoot?: string) {
 function fakeChild(pid = 4242) {
   const stdout = new PassThrough()
   const stderr = new PassThrough()
+  let leaderExited = false
   let resolveExit!: (value: UiChildExit) => void
   const exited = new Promise<UiChildExit>(resolve => { resolveExit = resolve })
-  const handle: UiChildHandle = { pid, stdout, stderr, exited }
-  return { handle, stdout, stderr, exit: resolveExit }
+  const handle: UiChildHandle = { pid, stdout, stderr, exited, leaderExited: () => leaderExited }
+  return {
+    handle,
+    stdout,
+    stderr,
+    exit(value: UiChildExit) {
+      if (leaderExited) return
+      leaderExited = true
+      resolveExit(value)
+    },
+  }
 }
 
 function dependencies(plan: UiRuntimePlan, child = fakeChild()) {
@@ -196,23 +206,38 @@ describe('parseDshReadyUrl', () => {
     expect(signalGroup).toHaveBeenCalledWith(-child.handle.pid, 'SIGTERM')
   })
 
-  it('fails Windows cleanup when leader exit cannot prove descendants are absent', async () => {
+  it('fails Windows cleanup without targeting a potentially reused PID after leader exit', async () => {
     const child = fakeChild()
     child.exit({ code: 0, signal: null })
-    const treeAlive = vi.fn(() => true)
     const deps = {
       platform: 'windows' as const,
       taskkill: vi.fn(async () => undefined),
       signalGroup: vi.fn(),
       waitForExit: vi.fn(async () => true),
-      treeAlive,
+      treeAlive: vi.fn(() => false),
       termGraceMs: 5,
       killGraceMs: 5,
     } as UiProcessTreeDependencies & { treeAlive(pid: number): boolean }
 
     await expect(stopOwnedChildTree(child.handle, deps)).rejects.toThrow(/tree|descendant|absence|prove|cleanup/i)
+    expect(deps.taskkill).not.toHaveBeenCalled()
+  })
+
+  it('terminates a Windows tree while its owned leader is still live', async () => {
+    const child = fakeChild()
+    const deps = {
+      platform: 'windows' as const,
+      taskkill: vi.fn(async () => { child.exit({ code: 1, signal: null }) }),
+      signalGroup: vi.fn(),
+      waitForExit: vi.fn(async () => true),
+      treeAlive: vi.fn(() => false),
+      termGraceMs: 5,
+      killGraceMs: 5,
+    } as UiProcessTreeDependencies & { treeAlive(pid: number): boolean }
+
+    await stopOwnedChildTree(child.handle, deps)
+
     expect(deps.taskkill).toHaveBeenCalledWith(['/PID', String(child.handle.pid), '/T', '/F'])
-    expect(treeAlive).toHaveBeenCalledWith(child.handle.pid)
   })
 
   it('refuses to open a bounded log through an externally linked file', () => {
