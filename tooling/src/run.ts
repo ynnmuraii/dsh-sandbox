@@ -10,7 +10,7 @@ import {
 } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
 import { verifyUpstreamCommit } from './upstream.js'
-import { pnpm, pnpmCommand } from './proc.js'
+import { pnpm, pnpmAsync, pnpmCommand } from './proc.js'
 import { resolvePluginRef, type PluginRef } from './plugin-ref.js'
 import { verifyPlugin } from './verify.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
@@ -245,9 +245,35 @@ async function resolveLauncher(root: string, compat: Compatibility, target: Targ
   return { cmd: pc.cmd, args: [...pc.args, 'exec', 'dsh'] }
 }
 
+async function buildUpstreamCancellable(root: string, compat: Compatibility, signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted()
+  const masterPin = compat.targets.master
+  const upstreamDir = rootPath(root, ROOT_PATHS.upstream)
+  if (!masterPin.commit || !(await verifyUpstreamCommit(root, masterPin.commit))) {
+    throw new CompatibilityError(
+      `master target requires upstream/deepseek-harness HEAD pinned to ${masterPin.commit} ` +
+        `(refresh the Task 8 submodule); refusing to report a master pass on a mismatched checkout`,
+    )
+  }
+  signal.throwIfAborted()
+  if (upstreamWorkingTreeDirty(upstreamDir)) {
+    throw new CompatibilityError(
+      `master target requires a clean upstream/deepseek-harness working tree ` +
+        `(git -C ${upstreamDir} status); refusing to report a master pass on modified tracked files`,
+    )
+  }
+  await pnpmAsync(['install', '--config.strictDepBuilds=false'], { cwd: upstreamDir, stdio: 'pipe', signal })
+  await pnpmAsync(['run', 'build'], { cwd: upstreamDir, stdio: 'pipe', signal })
+  return rootPath(root, ROOT_PATHS.upstream + '/apps/cli/lib/bin.js').replace(/\\/g, '/')
+}
+
 // UI sessions use the same target launcher resolution as dev/verify while
 // keeping their session-specific argument and environment boundaries separate.
-export async function resolveUiLauncher(root: string, target: Target, compat: Compatibility): Promise<Command> {
+export async function resolveUiLauncher(root: string, target: Target, compat: Compatibility, signal?: AbortSignal): Promise<Command> {
+  if (signal !== undefined && target === 'master') {
+    const binPath = await buildUpstreamCancellable(root, compat, signal)
+    return { cmd: process.execPath, args: [binPath] }
+  }
   return resolveLauncher(root, compat, target)
 }
 

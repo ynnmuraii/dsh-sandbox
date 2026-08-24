@@ -11,7 +11,7 @@ import {
 import { ROOT_PATHS, rootPath } from './context.js'
 import { loadCompatibilityFromFile, type Compatibility } from './schemas.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
-import { pnpm } from './proc.js'
+import { pnpmAsync } from './proc.js'
 
 export interface UiRuntimePlan {
   sessionDir: string
@@ -126,8 +126,11 @@ export function buildUiRuntimeEnvironment(plan: UiRuntimePlan, inherited: NodeJS
 function defaultDependencies(): UiRuntimeDependencies {
   return {
     loadCompatibility: loadCompatibilityFromFile,
-    resolveLauncher: (root, target, compatibility) => resolveUiLauncher(root, target, compatibility),
-    installNextProfile: (profileDir, env) => { pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env }) },
+    resolveLauncher: (root, target, compatibility, signal) => resolveUiLauncher(root, target, compatibility, signal),
+    installNextProfile: async (profileDir, env, signal) => {
+      if (signal === undefined) throw new Error('UI profile installation requires an AbortSignal')
+      await pnpmAsync(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env, signal })
+    },
   }
 }
 

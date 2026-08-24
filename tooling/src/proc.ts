@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { readFileSync, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
@@ -7,6 +7,11 @@ export interface RunOpts {
   env?: NodeJS.ProcessEnv
   encoding?: 'utf8' | BufferEncoding | null
   stdio?: 'pipe' | 'ignore' | 'inherit'
+}
+
+export interface AsyncRunOpts extends Omit<RunOpts, 'stdio'> {
+  signal: AbortSignal
+  stdio?: 'pipe'
 }
 
 interface Command {
@@ -60,6 +65,115 @@ export function pnpmCommand(): Command {
 export function pnpm(args: string[], opts: RunOpts = {}): Buffer | string {
   const { cmd, args: pre } = pnpmCommand()
   return execFileSync(cmd, [...pre, ...args], opts as never)
+}
+
+/**
+ * Run pnpm as an owned process tree. This is reserved for cancellable UI
+ * preparation; the synchronous runner above remains the dev/verify path.
+ */
+export function pnpmAsync(args: string[], opts: AsyncRunOpts): Promise<Buffer | string> {
+  if (!(opts.signal instanceof AbortSignal)) throw new Error('pnpmAsync requires an AbortSignal')
+  if (opts.signal.aborted) return Promise.reject(abortError())
+  const { cmd, args: pre } = pnpmCommand()
+  const child = spawn(cmd, [...pre, ...args], {
+    cwd: opts.cwd,
+    env: opts.env,
+    shell: false,
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const stdout: Buffer[] = []
+  const stderr: Buffer[] = []
+  child.stdout?.on('data', chunk => stdout.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))))
+  child.stderr?.on('data', chunk => stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))))
+
+  let settled = false
+  let aborting = false
+  let rejectRun!: (error: unknown) => void
+  let resolveRun!: (value: Buffer | string) => void
+  const result = new Promise<Buffer | string>((resolvePromise, rejectPromise) => {
+    resolveRun = resolvePromise
+    rejectRun = rejectPromise
+  })
+  const signal = opts.signal
+  const finish = (error: unknown, value?: Buffer | string): void => {
+    if (settled) return
+    settled = true
+    signal.removeEventListener('abort', onAbort)
+    if (error !== undefined) rejectRun(error)
+    else resolveRun(value ?? Buffer.alloc(0))
+  }
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolveClosed => {
+    child.once('close', (code, closeSignal) => resolveClosed({ code, signal: closeSignal }))
+  })
+  child.once('error', error => {
+    if (!aborting) finish(error)
+  })
+  child.once('close', (code, closeSignal) => {
+    if (aborting) return
+    if (code !== 0) {
+      const detail = Buffer.concat(stderr).toString('utf8').trim()
+      finish(new Error(`pnpm exited with ${closeSignal ?? `code ${String(code)}`}${detail ? `: ${detail}` : ''}`))
+      return
+    }
+    finish(undefined, opts.encoding === null ? Buffer.concat(stdout) : Buffer.concat(stdout).toString(opts.encoding ?? 'utf8'))
+  })
+  const onAbort = (): void => {
+    if (settled || aborting) return
+    aborting = true
+    void stopProcessTree(child, closed).then(
+      () => finish(abortError()),
+      error => finish(error),
+    )
+  }
+  signal.addEventListener('abort', onAbort, { once: true })
+  return result
+}
+
+async function stopProcessTree(child: ChildProcess, closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>): Promise<void> {
+  const pid = child.pid
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) throw new Error('pnpm process did not provide a valid PID')
+  const ownedPid = pid
+  if (process.platform === 'win32') {
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      execFile('taskkill.exe', ['/PID', String(ownedPid), '/T', '/F'], { windowsHide: true }, error => error ? rejectPromise(error) : resolvePromise())
+    })
+    await waitForChildClose(closed, 5_000)
+    if (processAlive(ownedPid)) throw new Error('pnpm Windows process tree remained alive after abort')
+    return
+  }
+  signalProcessGroup(ownedPid, 'SIGTERM')
+  if (await waitForChildClose(closed, 5_000) && !processGroupAlive(ownedPid)) return
+  signalProcessGroup(ownedPid, 'SIGKILL')
+  if (!await waitForChildClose(closed, 5_000) || processGroupAlive(ownedPid)) throw new Error('pnpm POSIX process group remained alive after abort')
+}
+
+function waitForChildClose(closed: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return Promise.race([
+    closed.then(() => true),
+    new Promise<boolean>(resolvePromise => setTimeout(() => resolvePromise(false), timeoutMs)),
+  ])
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try { process.kill(-pid, signal) } catch (error) {
+    if (!(error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ESRCH')) throw error
+  }
+}
+
+function processGroupAlive(pid: number): boolean {
+  try { process.kill(-pid, 0); return true } catch { return false }
+}
+
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+function abortError(): Error {
+  const error = new Error('pnpm process tree aborted')
+  error.name = 'AbortError'
+  return error
 }
 
 // Invoke the current node interpreter with a script path (e.g. the built
