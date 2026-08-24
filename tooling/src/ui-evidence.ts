@@ -28,6 +28,7 @@ export interface PublishUiResultOptions {
   beforePublishWrite?: (sessionDirectory: string) => void
   beforeLockCreate?: (lockPath: string) => void
   beforeTemporaryWrite?: (path: string) => void
+  afterTemporaryCreate?: (path: string) => void
   beforeFinalize?: (finalPath: string) => void
   afterFinalize?: (finalPath: string) => void
   removeTemporaryName?: (path: string) => void
@@ -118,9 +119,11 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
       opts.beforeTemporaryWrite?.(temporaryPath)
       assertDirectoryIdentity(sessionDirectory, sessionIdentity)
-      writeTemporaryNoFollow(temporaryPath, `${JSON.stringify(result, null, 2)}\n`)
-      temporaryIdentity = captureFileIdentity(temporaryPath)
+      temporaryIdentity = writeTemporaryNoFollow(temporaryPath, `${JSON.stringify(result, null, 2)}\n`)
       temporaryCreated = true
+      opts.afterTemporaryCreate?.(temporaryPath)
+      assertDirectoryIdentity(sessionDirectory, sessionIdentity)
+      assertFileIdentity(temporaryPath, temporaryIdentity)
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
       opts.beforeFinalize?.(finalPath)
@@ -175,6 +178,7 @@ export function loadUiResults(opts: {
   pluginKey: string
   beforeResultRead?: (resultPath: string) => void
   afterResultRead?: (resultPath: string) => void
+  beforePluginEnumeration?: (pluginRoot: string) => void
   afterPluginEnumeration?: (pluginRoot: string) => void
 }): UiResultV1[] {
   if (!isNonEmptyString(opts.uiRunsRoot)) throw new Error('uiRunsRoot must be a non-empty string')
@@ -184,13 +188,17 @@ export function loadUiResults(opts: {
   if (!existsSync(pluginRoot)) return []
   assertSafeUiPath(opts.uiRunsRoot, pluginRoot, 'plugin evidence directory')
 
+  const pluginIdentity = captureDirectoryIdentity(pluginRoot)
+  opts.beforePluginEnumeration?.(pluginRoot)
+  assertDirectoryIdentity(pluginRoot, pluginIdentity)
+
   let entries
   try {
     entries = readdirSync(pluginRoot, { withFileTypes: true })
   } catch (error) {
     throw corruptionError(pluginRoot, error)
   }
-  const pluginIdentity = captureDirectoryIdentity(pluginRoot)
+  assertDirectoryIdentity(pluginRoot, pluginIdentity)
   opts.afterPluginEnumeration?.(pluginRoot)
   assertDirectoryIdentity(pluginRoot, pluginIdentity)
 
@@ -389,9 +397,16 @@ function noFollowFlag(): number {
   return (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0
 }
 
-function writeTemporaryNoFollow(path: string, contents: string): void {
+function writeTemporaryNoFollow(path: string, contents: string): FileIdentity {
   const descriptor = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag(), 0o600)
-  try { writeFileSync(descriptor, contents, { encoding: 'utf8' }) } finally { closeSync(descriptor) }
+  try {
+    writeFileSync(descriptor, contents, { encoding: 'utf8' })
+    const stat = fstatSync(descriptor)
+    if (!stat.isFile() || !Number.isInteger(stat.dev) || !Number.isInteger(stat.ino) || stat.dev <= 0 || stat.ino <= 0) {
+      throw new Error(`temporary evidence identity unavailable or changed at ${path}`)
+    }
+    return { dev: stat.dev, ino: stat.ino }
+  } finally { closeSync(descriptor) }
 }
 
 function readResultNoFollow(path: string, expected?: FileIdentity): string {

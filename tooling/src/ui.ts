@@ -378,7 +378,7 @@ function captureCurrentIdentity(root: string, state: UiSessionStateV1): Captured
   try {
     target = currentTargetIdentity(root, state.target.name)
   } catch (error) {
-    if (error instanceof CompatibilityError && /compatibility manifest (?:requires both next and master targets|missing target)/i.test(error.message)) unavailableReasons.push('target-changed')
+    if (error instanceof CompatibilityError && error.code === 'missing-target' && error.target === state.target.name) unavailableReasons.push('target-changed')
     else throw error
   }
   return {

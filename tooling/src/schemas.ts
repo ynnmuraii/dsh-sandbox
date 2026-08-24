@@ -22,7 +22,20 @@ export interface PluginConfig {
   tracking: string
 }
 
-export class CompatibilityError extends Error {}
+export class CompatibilityError extends Error {
+  readonly code: string | undefined
+  readonly target: 'next' | 'master' | undefined
+
+  constructor(
+    message: string,
+    options?: { cause?: unknown; code?: string; target?: 'next' | 'master' },
+  ) {
+    super(message, options?.cause === undefined ? undefined : { cause: options.cause })
+    this.name = 'CompatibilityError'
+    this.code = options?.code
+    this.target = options?.target
+  }
+}
 
 export interface CatalogEntry {
   path: string
@@ -124,7 +137,10 @@ export function loadTargetPinFromFile(path: string, target: 'next' | 'master'): 
   const raw = parseYaml(readFileSync(path, 'utf8'), 'compatibility manifest') as { targets?: Record<string, TargetPin> }
   const pin = raw?.targets?.[target]
   if (pin === undefined || pin === null || typeof pin !== 'object') {
-    throw new CompatibilityError(`compatibility manifest missing target '${target}'`)
+    throw new CompatibilityError(`compatibility manifest missing target '${target}'`, {
+      code: 'missing-target',
+      target,
+    })
   }
   assertPin(target, pin)
   normalizeAllowBuilds(pin, target)

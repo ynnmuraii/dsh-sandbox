@@ -24,6 +24,7 @@ export interface UiSupervisorBinDependencies {
   beforeFailureWrite?(): void
   beforeRequestOpen?(path: string): void
   afterRequestRead?(path: string): void
+  beforeSessionOwnerClaim?(path: string): void
 }
 
 export async function runSupervisorBin(
@@ -36,7 +37,8 @@ export async function runSupervisorBin(
   try {
     if (argv.length !== 1 || !argv[0] || argv[0].startsWith('-')) throw new Error('usage: ui-supervisor-bin <request-file>')
     const requestPath = resolve(argv[0])
-    const parsed = JSON.parse(readRegular(requestPath, deps.beforeRequestOpen, deps.afterRequestRead)) as unknown
+    const requestRead = readRegular(requestPath, deps.beforeRequestOpen, deps.afterRequestRead)
+    const parsed = JSON.parse(requestRead.contents) as unknown
     validateUiSupervisorRequest(parsed)
     request = parsed
     const root = resolve(request.root)
@@ -47,6 +49,8 @@ export async function runSupervisorBin(
     if (requestPath !== join(sessionDir, 'request.json')) throw new Error('request file must be the session request.json')
     assertNoSymlinkComponents(runtimeRoot, 'forge runtime')
     assertNoSymlinkComponents(sessionDir, 'session directory')
+    deps.beforeSessionOwnerClaim?.(sessionDir)
+    assertIdentity(resolve(requestPath, '..'), requestRead.parentIdentity, 'request parent identity changed')
     ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
     ownedSession.assertCurrent()
     safeToReport = true
@@ -62,7 +66,17 @@ export async function runSupervisorBin(
   }
 }
 
-function readRegular(path: string, beforeOpen?: (path: string) => void, afterRead?: (path: string) => void): string {
+interface FileIdentity {
+  dev: number
+  ino: number
+}
+
+interface ReadRegularResult {
+  contents: string
+  parentIdentity: FileIdentity
+}
+
+function readRegular(path: string, beforeOpen?: (path: string) => void, afterRead?: (path: string) => void): ReadRegularResult {
   const entry = lstatSync(path)
   if (entry.isSymbolicLink() || !entry.isFile()) throw new Error(`request file is not a regular file: ${path}`)
   const parent = lstatSync(resolve(path, '..'))
@@ -81,7 +95,12 @@ function readRegular(path: string, beforeOpen?: (path: string) => void, afterRea
   if (afterParent.dev !== parent.dev || afterParent.ino !== parent.ino) throw new Error(`request parent identity changed: ${path}`)
   const afterEntry = lstatSync(path)
   if (afterEntry.dev !== entry.dev || afterEntry.ino !== entry.ino) throw new Error(`request file identity changed after read: ${path}`)
-  return contents
+  return { contents, parentIdentity: { dev: parent.dev, ino: parent.ino } }
+}
+
+function assertIdentity(path: string, expected: FileIdentity, message: string): void {
+  const actual = lstatSync(path)
+  if (actual.dev !== expected.dev || actual.ino !== expected.ino) throw new Error(`${message}: ${path}`)
 }
 
 function defaultDependencies(): UiSupervisorBinDependencies {
