@@ -7,7 +7,6 @@ import {
   ftruncateSync,
   lstatSync,
   openSync,
-  readSync,
   writeSync,
   rmSync,
 } from 'node:fs'
@@ -54,11 +53,16 @@ export interface UiSupervisorDependencies {
   prepareRuntime(opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string }): Promise<UiRuntimePlan>
   spawnChild(plan: UiRuntimePlan): UiChildHandle
   stopChildTree(handle: UiChildHandle): Promise<void>
-  writeLog(sessionDir: string, text: string, maxBytes: number): void
+  openLog(sessionDir: string, maxBytes: number): UiDiagnosticLog
   now(): string
   sleep(ms: number): Promise<void>
   pollIntervalMs: number
   maxLogBytes: number
+}
+
+export interface UiDiagnosticLog {
+  write(text: string): void
+  close(): void
 }
 
 export interface UiProcessTreeDependencies {
@@ -115,6 +119,7 @@ export async function runUiSupervisor(
   let stdoutTail = ''
   let done = false
   let outputFailure: Promise<never> | undefined
+  let diagnosticLog: UiDiagnosticLog | undefined
 
   try {
     plan = await deps.prepareRuntime({
@@ -124,6 +129,7 @@ export async function runUiSupervisor(
       sessionId: request.sessionId,
     })
     validatePlan(plan, sessionDir)
+    diagnosticLog = deps.openLog(sessionDir, deps.maxLogBytes)
     child = deps.spawnChild(plan)
     assertPid(child.pid)
 
@@ -137,9 +143,10 @@ export async function runUiSupervisor(
 
     const onOutput = (source: 'stdout' | 'stderr', chunk: unknown): void => {
       try {
+        if (done) return
         const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
-        deps.writeLog(sessionDir, text, deps.maxLogBytes)
-        if (source !== 'stdout' || done) return
+        diagnosticLog!.write(text)
+        if (source !== 'stdout') return
         stdoutTail += text
         let newline = stdoutTail.indexOf('\n')
         while (newline >= 0) {
@@ -156,6 +163,7 @@ export async function runUiSupervisor(
             sessionDir,
             sessionId: request.sessionId,
             child: child!,
+            diagnosticLog: diagnosticLog!,
             deps,
             stopIssued: () => stopIssued,
             issueStop: () => { stopIssued = true },
@@ -197,6 +205,7 @@ export async function runUiSupervisor(
         sessionDir,
         request,
         child,
+        diagnosticLog: diagnosticLog!,
         exitSettled: () => exitSettled,
         stopIssued: () => stopIssued,
         issueStop: () => { stopIssued = true },
@@ -207,6 +216,7 @@ export async function runUiSupervisor(
   } catch (error) {
     done = true
     const message = error instanceof Error ? error.message : String(error)
+    try { diagnosticLog?.close() } catch { /* preserve the primary lifecycle error */ }
     try {
       const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
       if (state.cleanup !== 'fail' && (state.state === 'starting' || state.state === 'ready' || state.state === 'crashed')) {
@@ -225,6 +235,7 @@ interface ControlContext {
   sessionDir: string
   request: UiSupervisorRequestV1
   child: UiChildHandle
+  diagnosticLog: UiDiagnosticLog
   exitSettled: () => boolean
   stopIssued: () => boolean
   issueStop: () => void
@@ -235,6 +246,7 @@ interface DiagnosticFailureContext {
   sessionDir: string
   sessionId: string
   child: UiChildHandle
+  diagnosticLog: UiDiagnosticLog
   deps: UiSupervisorDependencies
   stopIssued: () => boolean
   issueStop: () => void
@@ -255,6 +267,7 @@ async function failDiagnosticOutput(context: DiagnosticFailureContext, error: un
   } catch (stopError) {
     cleanupError = stopError
   }
+  try { context.diagnosticLog.close() } catch (closeError) { cleanupError ??= closeError }
   try {
     const state = readUiSession({ runtimeRoot: context.runtimeRoot, sessionId: context.sessionId })
     writeState(context.runtimeRoot, {
@@ -283,7 +296,7 @@ function compactState(state: UiSessionStateV1, removePids: boolean): UiSessionSt
 }
 
 async function handleControl(control: UiControlV1, context: ControlContext): Promise<void> {
-  const { deps, runtimeRoot, sessionDir, request, child } = context
+  const { deps, runtimeRoot, sessionDir, request, child, diagnosticLog } = context
   clearUiControl({ runtimeRoot, sessionId: request.sessionId })
   try {
     if (!context.exitSettled() && !context.stopIssued()) {
@@ -291,6 +304,7 @@ async function handleControl(control: UiControlV1, context: ControlContext): Pro
       await deps.stopChildTree(child)
       await child.exited
     }
+    diagnosticLog.close()
     cleanupSessionDescendants(sessionDir)
     const cleaned = readUiSession({ runtimeRoot, sessionId: request.sessionId })
     if (cleaned.state !== 'stopping') {
@@ -409,39 +423,44 @@ function removeContained(path: string, root: string, recursive: boolean): void {
   rmSync(path, { recursive, force: false })
 }
 
-export function writeBoundedSupervisorLog(sessionDir: string, text: string, maxBytes: number): void {
+export function openBoundedSupervisorLog(sessionDir: string, maxBytes: number): UiDiagnosticLog {
   if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error('maxLogBytes must be a positive integer')
   assertNoSymlinkComponents(sessionDir, 'UI session directory')
   const path = join(sessionDir, 'supervisor.log')
   assertContained(sessionDir, path, 'supervisor log')
-  const existing = existingEntry(path)
-  if (existing !== undefined && (existing.isSymbolicLink() || !existing.isFile() || existing.nlink !== 1)) {
-    throw new Error(`supervisor log is not a unique regular file at ${path}`)
-  }
-  const flags = constants.O_RDWR | (existing === undefined ? constants.O_CREAT | constants.O_EXCL : 0) | noFollowFlag()
-  let descriptor: number | undefined
+  const descriptor = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag(), 0o600)
   try {
-    descriptor = openSync(path, flags, 0o600)
     const pinned = fstatSync(descriptor)
     if (!pinned.isFile() || pinned.nlink !== 1) throw new Error(`supervisor log is not a unique regular file at ${path}`)
-    const old = Buffer.alloc(pinned.size)
-    let offset = 0
-    while (offset < old.length) offset += readSync(descriptor, old, offset, old.length - offset, offset)
-    const next = Buffer.concat([old, Buffer.from(text)]).subarray(-maxBytes)
-    ftruncateSync(descriptor, 0)
-    let written = 0
-    while (written < next.length) written += writeSync(descriptor, next, written, next.length - written, written)
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor)
+  } catch (error) {
+    closeSync(descriptor)
+    throw error
+  }
+  let bytes = Buffer.alloc(0)
+  let closed = false
+  return {
+    write(text: string): void {
+      if (closed) throw new Error('supervisor diagnostic log is closed')
+      const pinned = fstatSync(descriptor)
+      if (!pinned.isFile() || pinned.nlink !== 1) throw new Error(`supervisor log is no longer a unique regular file at ${path}`)
+      const next = Buffer.concat([bytes, Buffer.from(text)]).subarray(-maxBytes)
+      ftruncateSync(descriptor, 0)
+      let written = 0
+      while (written < next.length) {
+        const progress = writeSync(descriptor, next, written, next.length - written, written)
+        if (progress <= 0) throw new Error('supervisor diagnostic log write made no progress')
+        written += progress
+      }
+      bytes = Buffer.from(next)
+    },
+    close(): void {
+      if (closed) return
+      closed = true
+      closeSync(descriptor)
+    },
   }
 }
 
-function existingEntry(path: string): ReturnType<typeof lstatSync> | undefined {
-  try { return lstatSync(path) } catch (error) {
-    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw error
-  }
-}
 function noFollowFlag(): number { return (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0 }
 
 function validatePlan(plan: UiRuntimePlan, sessionDir: string): void {
@@ -460,7 +479,7 @@ function defaultDependencies(): UiSupervisorDependencies {
     prepareRuntime: opts => prepareUiRuntime(opts),
     spawnChild: spawnRuntimeChild,
     stopChildTree: child => stopOwnedChildTree(child),
-    writeLog: writeBoundedSupervisorLog,
+    openLog: openBoundedSupervisorLog,
     now: () => new Date().toISOString(),
     sleep: ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)),
     pollIntervalMs: 100,
