@@ -212,6 +212,7 @@ export async function runUiSupervisor(
     ownedSession.assertCurrent()
     assertUiRuntimePlanRetained(plan)
     child = deps.spawnChild(plan)
+    assertPid(child.pid)
 
     const started = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
     writeState(runtimeRoot, {
