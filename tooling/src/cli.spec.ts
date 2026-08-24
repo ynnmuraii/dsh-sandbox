@@ -716,6 +716,8 @@ describe('UI session CLI', () => {
     ['ui', 'finish', sessionId],
     ['ui', 'finish', sessionId, '--verdict', 'maybe', '--summary', 'x'],
     ['ui', 'finish', sessionId, '--verdict', 'pass'],
+    ['ui', 'finish', sessionId, '--verdict', 'pass', '--summary', '--json'],
+    ['ui', 'finish', sessionId, '--summary', '--verdict', 'pass'],
     ['ui', 'finish', sessionId, '--verdict', 'pass', '--verdict', 'fail', '--summary', 'x'],
     ['ui', 'finish', sessionId, '--verdict', 'pass', '--summary', 'x', '--summary', 'y'],
     ['ui', 'finish', sessionId, '--verdict', 'pass', '--summary', 'x', '--wat'],
