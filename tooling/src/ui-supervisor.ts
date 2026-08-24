@@ -20,6 +20,7 @@ import {
   type UiSessionStateV1,
 } from './ui-session.js'
 import {
+  assertUiRuntimePlanRetained,
   buildUiRuntimeEnvironment,
   prepareUiRuntime,
   type UiRuntimePlan,
@@ -209,8 +210,8 @@ export async function runUiSupervisor(
     ownedSession.assertCurrent()
     diagnosticLog = deps.openLog(sessionDir, deps.maxLogBytes)
     ownedSession.assertCurrent()
+    assertUiRuntimePlanRetained(plan)
     child = deps.spawnChild(plan)
-    assertPid(child.pid)
 
     const started = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
     writeState(runtimeRoot, {
@@ -660,6 +661,15 @@ function validatePlan(plan: UiRuntimePlan, sessionDir: string): void {
   }
   if (!plan.launcher || typeof plan.launcher.cmd !== 'string' || !plan.launcher.cmd || !Array.isArray(plan.launcher.args)) throw new Error('runtime plan launcher is invalid')
   if (!Array.isArray(plan.argv) || plan.argv.some(arg => typeof arg !== 'string')) throw new Error('runtime plan argv is invalid')
+  const retained: unknown = plan.retained
+  if (!retained || typeof retained !== 'object' || Array.isArray(retained)) throw new Error('runtime plan retained is invalid')
+  const retainedRecord = retained as Record<string, unknown>
+  for (const key of ['runtimeHome', 'profileDir', 'overlayDir', 'overlayFile'] as const) {
+    const value: unknown = retainedRecord[key]
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`runtime plan retained.${key} is invalid`)
+    const entry = value as Record<string, unknown>
+    if (typeof entry.dev !== 'number' || typeof entry.ino !== 'number') throw new Error(`runtime plan retained.${key} is invalid`)
+  }
 }
 
 function defaultDependencies(): UiSupervisorDependencies {

@@ -12,8 +12,14 @@ import { ROOT_PATHS, rootPath } from './context.js'
 import { loadCompatibilityFromFile, type Compatibility } from './schemas.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
 import { pnpmAsync } from './proc.js'
-import type { OwnedUiDirectory } from './ui-owned-directory.js'
+import type { OwnedUiDirectory, UiDirectoryIdentity } from './ui-owned-directory.js'
 
+export interface UiRuntimeRetainedIdentities {
+  runtimeHome: UiDirectoryIdentity
+  profileDir: UiDirectoryIdentity
+  overlayDir: UiDirectoryIdentity
+  overlayFile: UiDirectoryIdentity
+}
 export interface UiRuntimePlan {
   sessionDir: string
   runtimeHome: string
@@ -23,6 +29,7 @@ export interface UiRuntimePlan {
   launcher: { cmd: string; args: string[] }
   argv: string[]
   cwd: string
+  retained?: UiRuntimeRetainedIdentities
 }
 
 export interface UiRuntimePlugin {
@@ -47,7 +54,7 @@ const SESSION_ID_PATTERN = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
 export async function prepareUiRuntime(
   opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string; signal?: AbortSignal; ownedSession?: OwnedUiDirectory },
   deps: UiRuntimeDependencies = defaultDependencies(),
-): Promise<UiRuntimePlan> {
+): Promise<UiRuntimePlan & { retained: UiRuntimeRetainedIdentities }> {
   validateOptions(opts)
   const signal = opts.signal ?? new AbortController().signal
   signal.throwIfAborted()
@@ -107,7 +114,7 @@ export async function prepareUiRuntime(
   runtimeMutation(opts, deps, 'manifest-write', join(profileDir, 'package.json'), () => writeFileSync(join(profileDir, 'package.json'), JSON.stringify(manifest, null, 2) + '\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 }))
   runtimeMutation(opts, deps, 'workspace-write', join(profileDir, 'pnpm-workspace.yaml'), () => writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(targetPin.allowBuilds ?? {}), { encoding: 'utf8', flag: 'wx', mode: 0o600 }))
 
-  const plan: UiRuntimePlan = {
+  const plan: UiRuntimePlan & { retained: UiRuntimeRetainedIdentities } = {
     sessionDir,
     runtimeHome,
     profileName,
@@ -123,6 +130,12 @@ export async function prepareUiRuntime(
       '--no-open',
     ],
     cwd: profileDir,
+    retained: {
+      runtimeHome: identityOf(runtimeHome),
+      profileDir: identityOf(profileDir),
+      overlayDir: identityOf(overlayDir),
+      overlayFile: identityOf(overlayPath),
+    },
   }
   if (opts.target === 'next') {
     opts.ownedSession?.assertCurrent()
@@ -133,8 +146,42 @@ export async function prepareUiRuntime(
     await deps.installNextProfile(profileDir, buildUiRuntimeEnvironment(plan), signal)
     opts.ownedSession?.assertCurrent()
     assertMutationTarget(profileDir, 'profile-install')
+    plan.retained = {
+      runtimeHome: identityOf(runtimeHome),
+      profileDir: identityOf(profileDir),
+      overlayDir: identityOf(overlayDir),
+      overlayFile: identityOf(overlayPath),
+    }
   }
   return plan
+}
+
+export function assertUiRuntimePlanRetained(plan: UiRuntimePlan): void {
+  const rawRetained: unknown = plan.retained
+  const retained = rawRetained as UiRuntimeRetainedIdentities | undefined
+  const entries: Array<[string, string, UiDirectoryIdentity | undefined]> = [
+    ['runtimeHome', plan.runtimeHome, retained?.runtimeHome],
+    ['profileDir', plan.profileDir, retained?.profileDir],
+    ['overlayDir', join(plan.sessionDir, 'overlay'), retained?.overlayDir],
+    ['overlayFile', plan.overlayPath, retained?.overlayFile],
+  ]
+  for (const [anchor, path, expected] of entries) {
+    if (!expected || typeof expected.dev !== 'number' || typeof expected.ino !== 'number') throw new Error(`runtime plan retained.${anchor} is invalid`)
+    assertNoSymlinkComponents(path, `retained ${anchor}`)
+    let current
+    try {
+      current = lstatSync(path)
+    } catch (error) {
+      throw new Error(`retained ${anchor} identity unavailable at ${path}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (current.isSymbolicLink()) throw new Error(`retained ${anchor} identity changed at ${path}: symlink or junction`)
+    if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error(`retained ${anchor} identity changed at ${path}: expected dev ${expected.dev} ino ${expected.ino} but got dev ${current.dev} ino ${current.ino}`)
+  }
+}
+
+function identityOf(path: string): UiDirectoryIdentity {
+  const stat = lstatSync(path)
+  return { dev: stat.dev, ino: stat.ino }
 }
 
 function runtimeMutation(
