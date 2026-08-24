@@ -69,7 +69,7 @@ export interface UiServiceDependencies {
   sleep(ms: number): Promise<void>
   now(): string
   processAlive(pid: number): boolean
-  publishResult(opts: { uiRunsRoot: string; result: UiResultV1 }): string
+  publishResult(opts: { uiRunsRoot: string; result: UiResultV1; beforeFinalize?: (finalPath: string) => void }): string
   writeSession(opts: Parameters<typeof writeUiSession>[0]): void
   afterSessionCreate?(sessionDirectory: string): void
   beforeRequestWrite?(sessionDirectory: string): void
@@ -308,7 +308,25 @@ export async function finishUiSession(opts: FinishUiOptions, deps: UiServiceDepe
     finishedAt,
   }
   ownedSession.assertCurrent()
-  deps.publishResult({ uiRunsRoot: rootPath(opts.root, ROOT_PATHS.uiRuns), result })
+  deps.publishResult({
+    uiRunsRoot: rootPath(opts.root, ROOT_PATHS.uiRuns),
+    result,
+    beforeFinalize: () => {
+      ownedSession.assertCurrent()
+      const boundaryIdentity = captureCurrentIdentity(opts.root, state)
+      const boundaryReasons = staleReasons(state, boundaryIdentity)
+      if (boundaryReasons.length === 0 && (state.staleReasons?.length ?? 0) === 0) return
+      const newlyObserved = boundaryReasons.filter(reason => !(state.staleReasons ?? []).includes(reason))
+      if (newlyObserved.length > 0) {
+        state = latchUiStaleReasons(state, newlyObserved, safeNow(deps.now(), state.updatedAt))
+        writeOwnedSession(ownedSession, { runtimeRoot, state })
+      }
+      throw new UiProtocolOutcomeError(
+        `UI session ${opts.sessionId} became stale at publication: ${(state.staleReasons ?? boundaryReasons).join(', ')}`,
+        'stale',
+      )
+    },
+  })
   const terminal: UiSessionStateV1 = { ...state, state: 'finished', cleanup: 'pass', updatedAt: safeNow(deps.now(), state.updatedAt) }
   try { writeOwnedSession(ownedSession, { runtimeRoot, state: terminal }, deps.writeSession) } catch (error) {
     // Evidence publication is the immutable commit point. Keep the compact

@@ -142,10 +142,21 @@ function runtimeMutation(
   mutation: () => void,
 ): void {
   opts.ownedSession?.assertCurrent()
+  assertMutationTarget(path, operation)
   deps.beforeRuntimeMutation?.(operation, path)
   opts.ownedSession?.assertCurrent()
+  assertMutationTarget(path, operation)
   mutation()
   opts.ownedSession?.assertCurrent()
+}
+
+function assertMutationTarget(path: string, operation: UiRuntimeMutation): void {
+  assertNoSymlinkComponents(path, `UI runtime ${operation} path`)
+  const parent = resolve(path, '..')
+  const stat = entry(parent)
+  if (stat !== undefined && (stat.isSymbolicLink() || !stat.isDirectory())) {
+    throw new Error(`UI runtime ${operation} parent is not a regular directory at ${parent}`)
+  }
 }
 
 export function buildUiRuntimeEnvironment(plan: UiRuntimePlan, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
