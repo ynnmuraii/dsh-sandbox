@@ -167,6 +167,38 @@ describe('prepareUiRuntime', () => {
     expect(bundle.installNextProfile).not.toHaveBeenCalled()
   })
 
+  it('rejects a profile-directory symlink replacement before profile installation', async () => {
+    const current = fixture()
+    const outside = mkdtempSync(join(tmpdir(), 'dsh-lab-ui-runtime-profile-outside-'))
+    roots.push(outside)
+    const bundle = dependencies(current.compatibility)
+    const runtimeRoot = join(current.root, '.lab', 'runtime')
+    const sessionDir = join(runtimeRoot, 'ui-sessions', SESSION)
+    const profileDir = join(sessionDir, 'home', 'profiles', `example-next-ui-${SESSION}`)
+    mkdirSync(sessionDir, { recursive: true })
+    const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
+    bundle.installNextProfile.mockImplementation(async path => {
+      writeFileSync(join(path, 'install-canary.txt'), 'escaped')
+    })
+    bundle.deps.beforeRuntimeMutation = vi.fn((operation, path) => {
+      if (operation !== 'profile-install') return
+      expect(path).toBe(profileDir)
+      rmSync(profileDir, { recursive: true, force: true })
+      symlinkSync(outside, profileDir, process.platform === 'win32' ? 'junction' : 'dir')
+    })
+
+    await expect(prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+      ownedSession,
+    }, bundle.deps)).rejects.toThrow(/symlink|junction|containment|directory|unsafe|refus/i)
+
+    expect(bundle.installNextProfile).not.toHaveBeenCalled()
+    expect(existsSync(join(outside, 'install-canary.txt'))).toBe(false)
+  })
+
   it('materializes a unique next profile and source overlay entirely inside the session', async () => {
     const current = fixture()
     const { deps, installNextProfile } = dependencies(current.compatibility)
