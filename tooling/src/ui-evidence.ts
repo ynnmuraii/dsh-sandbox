@@ -1,4 +1,4 @@
-import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { pluginEvidenceKey } from './evidence.js'
 
@@ -32,6 +32,8 @@ export interface PublishUiResultOptions {
   afterFinalize?: (finalPath: string) => void
   removeTemporaryName?: (path: string) => void
   removePublicationLock?: (path: string) => void
+  beforeLockRemove?: (lockPath: string) => void
+  afterLockRemove?: (lockPath: string) => void
 }
 
 const PLUGIN_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-f0-9]{12}$/
@@ -158,7 +160,7 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
     }
     return finalPath
   } finally {
-    const lockFailure = removeLock(opts.uiRunsRoot, sessionDirectory, lockPath, opts.removePublicationLock, sessionIdentity, lockIdentity)
+    const lockFailure = removeLock(opts.uiRunsRoot, sessionDirectory, lockPath, opts.removePublicationLock, opts.beforeLockRemove, opts.afterLockRemove, sessionIdentity, lockIdentity)
     if (lockFailure !== undefined && (!committed || lockFailure.identity)) {
       if (primaryError !== undefined) throw new AggregateError([primaryError, lockFailure.error], `UI evidence publication failed and lock cleanup failed: ${primaryError instanceof Error ? primaryError.message : String(primaryError)}; ${lockFailure.error.message}`)
       throw lockFailure.error
@@ -209,18 +211,20 @@ export function loadUiResults(opts: {
       throw corruptionError(resultPath, error)
     }
     if (!resultStat.isFile()) throw corruptionError(resultPath, 'result.json is not a regular file')
+    const sessionIdentity = captureDirectoryIdentity(sessionDirectory)
+    const resultIdentity = captureFileIdentity(resultPath)
     opts.beforeResultRead?.(resultPath)
     try {
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
-      assertDirectoryEntry(sessionDirectory, 'session evidence directory')
-      assertRegularFile(resultPath)
+      assertDirectoryIdentity(sessionDirectory, sessionIdentity)
+      assertFileIdentity(resultPath, resultIdentity)
     } catch (error) {
       throw corruptionError(resultPath, error)
     }
 
     let parsed: unknown
     try {
-      parsed = JSON.parse(readResultNoFollow(resultPath))
+      parsed = JSON.parse(readResultNoFollow(resultPath, resultIdentity))
     } catch (error) {
       throw corruptionError(resultPath, error)
     }
@@ -380,11 +384,12 @@ function writeTemporaryNoFollow(path: string, contents: string): void {
   try { writeFileSync(descriptor, contents, { encoding: 'utf8' }) } finally { closeSync(descriptor) }
 }
 
-function readResultNoFollow(path: string): string {
+function readResultNoFollow(path: string, expected?: FileIdentity): string {
   const descriptor = openSync(path, constants.O_RDONLY | noFollowFlag())
   try {
     const stat = fstatSync(descriptor)
     if (!stat.isFile()) throw new Error('result.json is not a regular file')
+    if (expected !== undefined && (stat.dev !== expected.dev || stat.ino !== expected.ino)) throw new Error(`result.json identity changed at ${path}`)
     return readFileSync(descriptor, { encoding: 'utf8' })
   } finally { closeSync(descriptor) }
 }
@@ -460,16 +465,21 @@ function removeLock(
   sessionDirectory: string,
   path: string,
   hook: ((path: string) => void) | undefined,
+  beforeRemove: ((path: string) => void) | undefined,
+  afterRemove: ((path: string) => void) | undefined,
   sessionIdentity: DirectoryIdentity,
   lockIdentity: DirectoryIdentity,
 ): { error: Error; identity: boolean } | undefined {
   try {
+    beforeRemove?.(path)
     assertDirectoryIdentity(sessionDirectory, sessionIdentity)
     assertDirectoryIdentity(path, lockIdentity)
     assertSafeUiPath(uiRunsRoot, sessionDirectory, 'session evidence directory')
     assertDirectoryEntry(sessionDirectory, 'session evidence directory')
     if (hook) hook(path)
-    else rmSync(path, { recursive: true, force: true })
+    else rmdirSync(path)
+    afterRemove?.(path)
+    assertDirectoryIdentity(sessionDirectory, sessionIdentity)
     return undefined
   } catch (error) {
     const identity = /identity|symlink|junction|not a regular directory/i.test(error instanceof Error ? error.message : String(error))
@@ -483,6 +493,7 @@ function removeLock(
 }
 
 type DirectoryIdentity = { dev: number; ino: number }
+type FileIdentity = { dev: number; ino: number }
 function captureDirectoryIdentity(path: string): DirectoryIdentity {
   const stat = lstatSync(path)
   if (stat.isSymbolicLink() || !stat.isDirectory() || !Number.isInteger(stat.dev) || !Number.isInteger(stat.ino) || stat.dev <= 0 || stat.ino <= 0) throw new Error(`evidence directory identity unavailable or changed at ${path}`)
@@ -491,6 +502,15 @@ function captureDirectoryIdentity(path: string): DirectoryIdentity {
 function assertDirectoryIdentity(path: string, expected: DirectoryIdentity): void {
   const current = captureDirectoryIdentity(path)
   if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error(`evidence directory identity changed at ${path}`)
+}
+function captureFileIdentity(path: string): FileIdentity {
+  const stat = lstatSync(path)
+  if (stat.isSymbolicLink() || !stat.isFile() || !Number.isInteger(stat.dev) || !Number.isInteger(stat.ino) || stat.dev <= 0 || stat.ino <= 0) throw new Error(`result.json identity unavailable or changed at ${path}`)
+  return { dev: stat.dev, ino: stat.ino }
+}
+function assertFileIdentity(path: string, expected: FileIdentity): void {
+  const current = captureFileIdentity(path)
+  if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error(`result.json identity changed at ${path}`)
 }
 function sameDirectoryIdentity(path: string, expected: DirectoryIdentity): boolean {
   try {

@@ -71,6 +71,7 @@ export interface UiServiceDependencies {
   processAlive(pid: number): boolean
   publishResult(opts: { uiRunsRoot: string; result: UiResultV1 }): string
   writeSession(opts: Parameters<typeof writeUiSession>[0]): void
+  afterSessionCreate?(sessionDirectory: string): void
   beforeRequestWrite?(sessionDirectory: string): void
 }
 
@@ -131,6 +132,7 @@ export async function startUiSession(opts: StartUiOptions, deps: UiServiceDepend
   const sessionDir = createUiSession({ runtimeRoot, state })
   const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
   ownedSession.assertCurrent()
+  deps.afterSessionCreate?.(sessionDir)
   ownedSession.assertCurrent()
   deps.beforeRequestWrite?.(sessionDir)
   ownedSession.assertCurrent()
@@ -308,10 +310,8 @@ export async function finishUiSession(opts: FinishUiOptions, deps: UiServiceDepe
   }
   ownedSession.assertCurrent()
   deps.publishResult({ uiRunsRoot: rootPath(opts.root, ROOT_PATHS.uiRuns), result })
-  ownedSession.assertCurrent()
   const terminal: UiSessionStateV1 = { ...state, state: 'finished', cleanup: 'pass', updatedAt: safeNow(deps.now(), state.updatedAt) }
   try { writeOwnedSession(ownedSession, { runtimeRoot, state: terminal }, deps.writeSession) } catch (error) {
-    if (isOwnershipError(error)) throw error
     // Evidence publication is the immutable commit point. Keep the compact
     // stopping lease recoverable when terminal bookkeeping fails afterward.
   }
@@ -342,6 +342,7 @@ interface CapturedIdentity {
   target: UiTargetIdentity
   contextDigest: `sha256:${string}`
   runtimeName: string
+  unavailableReasons?: UiStaleReason[]
 }
 
 function captureIdentity(root: string, plugin: PluginRef, target: 'next' | 'master'): CapturedIdentity {
@@ -366,12 +367,25 @@ function captureIdentity(root: string, plugin: PluginRef, target: 'next' | 'mast
 }
 
 function captureCurrentIdentity(root: string, state: UiSessionStateV1): CapturedIdentity {
-  const target = currentTargetIdentity(root, state.target.name)
+  const unavailableReasons: UiStaleReason[] = []
+  let plugin: UiSessionStateV1['plugin'] = { ...state.plugin, sourcePath: resolve(state.plugin.sourcePath) }
+  try {
+    plugin = { ...plugin, digest: computePluginDigest(plugin.sourcePath).digest }
+  } catch {
+    unavailableReasons.push('plugin-changed')
+  }
+  let target = state.target
+  try {
+    target = currentTargetIdentity(root, state.target.name)
+  } catch {
+    unavailableReasons.push('target-changed')
+  }
   return {
-    plugin: { ...state.plugin, sourcePath: resolve(state.plugin.sourcePath), digest: computePluginDigest(state.plugin.sourcePath).digest },
+    plugin,
     target,
     contextDigest: computeContextDigest(root),
     runtimeName: state.plugin.packageName,
+    unavailableReasons,
   }
 }
 
@@ -390,7 +404,7 @@ function targetIdentityFromCompatibility(compatibility: Compatibility, target: '
 }
 
 function staleReasons(state: UiSessionStateV1, current: CapturedIdentity): UiStaleReason[] {
-  const reasons: UiStaleReason[] = []
+  const reasons: UiStaleReason[] = [...(current.unavailableReasons ?? [])]
   if (current.plugin.digest !== state.plugin.digest || current.plugin.packageName !== state.plugin.packageName || current.plugin.sourcePath !== state.plugin.sourcePath) reasons.push('plugin-changed')
   if (current.contextDigest !== state.contextDigest) reasons.push('context-changed')
   if (!sameTarget(current.target, state.target)) reasons.push('target-changed')
@@ -473,10 +487,6 @@ function sanitizeServiceError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   return message.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240) || 'UI supervisor spawn failed'
 }
-function isOwnershipError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /identity|ownership|replacement|swap|symlink|junction/i.test(message)
-}
 function isTerminal(state: UiSessionPhase): boolean { return state === 'finished' || state === 'aborted' }
 function sameTarget(left: UiTargetIdentity, right: UiTargetIdentity): boolean {
   if (left.name !== right.name) return false
@@ -484,7 +494,7 @@ function sameTarget(left: UiTargetIdentity, right: UiTargetIdentity): boolean {
     ? left.dsh === (right.name === 'next' ? right.dsh : undefined)
     : left.commit === (right.name === 'master' ? right.commit : undefined)
 }
-function defaultStatusDependencies(): Pick<UiServiceDependencies, 'now' | 'processAlive'> { return { now: () => new Date().toISOString(), processAlive: pid => { try { process.kill(pid, 0); return true } catch { return false } } } }
+function defaultStatusDependencies(): Pick<UiServiceDependencies, 'now' | 'processAlive'> { return { now: () => new Date().toISOString(), processAlive: pid => { try { process.kill(pid, 0); return true } catch (error) { if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ESRCH') return false; throw error } } } }
 function defaultDependencies(): UiServiceDependencies {
   return {
     spawnSupervisor: requestPath => {

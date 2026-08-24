@@ -377,7 +377,7 @@ interface DiagnosticFailureContext {
 
 async function failDiagnosticOutput(context: DiagnosticFailureContext, error: unknown): Promise<never> {
   const reason = sanitizeDiagnostic(`diagnostic log failure: ${error instanceof Error ? error.message : String(error)}`)
-  let terminationConfirmed = context.exitSettled()
+  let terminationConfirmed = context.treeCleanupConfirmed()
   let cleanupError: unknown
   try { context.diagnosticLog.close() } catch (closeError) { cleanupError = closeError }
   try {

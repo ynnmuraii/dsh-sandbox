@@ -11,6 +11,7 @@ import {
   validateUiSupervisorRequest,
   type UiSupervisorRequestV1,
 } from './ui-supervisor.js'
+import { claimOwnedUiDirectory, type OwnedUiDirectory } from './ui-owned-directory.js'
 
 export interface UiSupervisorBinDependencies {
   runSupervisor(request: UiSupervisorRequestV1): Promise<void>
@@ -23,6 +24,7 @@ export async function runSupervisorBin(
   deps: UiSupervisorBinDependencies = defaultDependencies(),
 ): Promise<number> {
   let request: UiSupervisorRequestV1 | undefined
+  let ownedSession: OwnedUiDirectory | undefined
   let safeToReport = false
   try {
     if (argv.length !== 1 || !argv[0] || argv[0].startsWith('-')) throw new Error('usage: ui-supervisor-bin <request-file>')
@@ -38,13 +40,15 @@ export async function runSupervisorBin(
     if (requestPath !== join(sessionDir, 'request.json')) throw new Error('request file must be the session request.json')
     assertNoSymlinkComponents(runtimeRoot, 'forge runtime')
     assertNoSymlinkComponents(sessionDir, 'session directory')
+    ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
+    ownedSession.assertCurrent()
     safeToReport = true
     await deps.runSupervisor(request)
     return 0
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (request !== undefined && safeToReport) {
-      try { reportFailure(request, message, deps.now()) } catch { /* safe reporting is best effort */ }
+      try { if (ownedSession !== undefined) reportFailure(request, ownedSession, message, deps.now()) } catch { /* safe reporting is best effort */ }
     }
     deps.stderr(`ui supervisor: ${sanitize(message)}`)
     return 1
@@ -65,22 +69,28 @@ function defaultDependencies(): UiSupervisorBinDependencies {
   }
 }
 
-function reportFailure(request: UiSupervisorRequestV1, message: string, now: string): void {
+function reportFailure(request: UiSupervisorRequestV1, ownedSession: OwnedUiDirectory, message: string, now: string): void {
   const root = resolve(request.root)
   const runtimeRoot = rootPath(root, ROOT_PATHS.runtime)
+  ownedSession.assertCurrent()
   const state = readUiSession({ runtimeRoot, sessionId: request.sessionId })
+  ownedSession.assertCurrent()
   if (state.state !== 'starting' && state.state !== 'ready' && state.state !== 'crashed') return
   if (state.cleanup === 'fail') return
   const { url: _url, cleanup: _cleanup, ...base } = state
-  writeUiSession({
-    runtimeRoot,
-    state: {
-      ...base,
-      state: 'crashed',
-      error: sanitize(message),
-      updatedAt: Date.parse(now) < Date.parse(state.updatedAt) ? state.updatedAt : now,
-    },
-  })
+  try {
+    writeUiSession({
+      runtimeRoot,
+      state: {
+        ...base,
+        state: 'crashed',
+        error: sanitize(message),
+        updatedAt: Date.parse(now) < Date.parse(state.updatedAt) ? state.updatedAt : now,
+      },
+    })
+  } finally {
+    ownedSession.assertCurrent()
+  }
 }
 
 function assertContained(root: string, candidate: string, label: string): void {

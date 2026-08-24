@@ -35,6 +35,8 @@ Commands:
   ui status <session-id> [--json]              inspect a UI session
   ui finish <session-id> --verdict pass|fail --summary S [--json]  finalize a UI session
   ui abort <session-id> [--json]               abort a UI session
+  UI browser/vision interaction is owned by the external browser agent/harness;
+  screenshots are transient and not retained by lab.
   doctor                   validate toolchain, catalog, and target pins
   upstream check           compare the pinned master commit with the remote
   upstream update [--verify] explicitly adopt the fetched master commit

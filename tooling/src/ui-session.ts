@@ -78,19 +78,23 @@ export function createUiSession(opts: { runtimeRoot: string; state: UiSessionSta
     throw error
   }
   assertDirectoryEntry(paths.sessionDir, 'UI session directory')
-  writeAtomic(paths.statePath, JSON.stringify(opts.state, null, 2) + '\n', false)
+  writeAtomic(paths.statePath, JSON.stringify(opts.state, null, 2) + '\n', false, directoryIdentity(paths.sessionDir))
   return paths.sessionDir
 }
 
-export function writeUiSessionRequest(opts: { runtimeRoot: string; sessionId: string; request: unknown }): string {
+export function writeUiSessionRequest(opts: { runtimeRoot: string; sessionId: string; request: unknown; beforeRequestOpen?: (requestPath: string) => void }): string {
   assertSessionId(opts.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.sessionId)
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.sessionId}`)
   const requestPath = join(paths.sessionDir, 'request.json')
+  const sessionIdentity = directoryIdentity(paths.sessionDir)
   const serialized = JSON.stringify(opts.request, null, 2)
   if (serialized === undefined) throw new Error('UI session request must be JSON-serializable')
+  opts.beforeRequestOpen?.(requestPath)
+  assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   writeExclusiveRegular(requestPath, serialized + '\n')
+  assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   return requestPath
 }
 
@@ -113,6 +117,11 @@ export function writeUiSession(opts: {
   runtimeRoot: string
   state: UiSessionStateV1
   beforeStateReplace?: (statePath: string) => void
+  beforeStateTemporaryWrite?: (temporaryPath: string) => void
+  beforeStateRename?: (statePath: string) => void
+  afterStateLockCreate?: (lockPath: string) => void
+  beforeStateLockRemove?: (lockPath: string) => void
+  afterStateLockRemove?: (lockPath: string) => void
 }): void {
   assertSessionId(opts.state.sessionId)
   const paths = sessionPaths(opts.runtimeRoot, opts.state.sessionId)
@@ -124,17 +133,17 @@ export function writeUiSession(opts: {
   opts.beforeStateReplace?.(paths.statePath)
   assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   const lockPath = join(paths.sessionDir, '.state.lock')
-  const lockIdentity = acquireSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath)
+  const lockIdentity = acquireSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath, opts.afterStateLockCreate)
   try {
     assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
     current = readUiSession({ runtimeRoot: opts.runtimeRoot, sessionId: opts.state.sessionId })
     const state = validateStateCandidate(current, opts.state, opts.state.sessionId)
     if (state === undefined) return
     assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
-    writeAtomic(paths.statePath, JSON.stringify(state, null, 2) + '\n', true)
+    writeAtomic(paths.statePath, JSON.stringify(state, null, 2) + '\n', true, sessionIdentity, opts.beforeStateTemporaryWrite, opts.beforeStateRename)
     assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
   } finally {
-    releaseSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath, lockIdentity)
+    releaseSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath, lockIdentity, opts.beforeStateLockRemove, opts.afterStateLockRemove)
   }
 }
 
@@ -424,54 +433,85 @@ function validateStateCandidate(current: UiSessionStateV1, candidate: UiSessionS
   return state
 }
 
-function acquireSessionMutationLock(sessionDir: string, sessionIdentity: DirectoryIdentity, lockPath: string): DirectoryIdentity {
+function acquireSessionMutationLock(sessionDir: string, sessionIdentity: DirectoryIdentity, lockPath: string, afterCreate?: (lockPath: string) => void): DirectoryIdentity {
   assertDirectoryIdentity(sessionDir, sessionIdentity)
   try { mkdirSync(lockPath) } catch (error) {
     if (isExistsError(error)) throw new Error(`concurrent UI session mutation is already locked at ${lockPath}`)
     throw error
   }
+  let lockIdentity: DirectoryIdentity | undefined
   try {
     assertDirectoryIdentity(sessionDir, sessionIdentity)
-    const lockIdentity = directoryIdentity(lockPath)
+    lockIdentity = directoryIdentity(lockPath)
     if (lockIdentity.dev <= 0 || lockIdentity.ino <= 0) throw new Error(`stable identity unavailable for UI session mutation lock ${lockPath}`)
+    afterCreate?.(lockPath)
+    assertDirectoryIdentity(sessionDir, sessionIdentity)
+    assertLockIdentity(lockPath, lockIdentity)
     return lockIdentity
   } catch (error) {
-    try { rmdirSync(lockPath) } catch { /* preserve the identity failure */ }
+    if (lockIdentity !== undefined) {
+      try {
+        assertDirectoryIdentity(sessionDir, sessionIdentity)
+        assertLockIdentity(lockPath, lockIdentity)
+        rmdirSync(lockPath)
+      } catch { /* preserve the identity failure and never remove a replacement lock */ }
+    }
     throw error
   }
 }
 
-function releaseSessionMutationLock(sessionDir: string, sessionIdentity: DirectoryIdentity, lockPath: string, expectedLockIdentity: DirectoryIdentity): void {
+function releaseSessionMutationLock(
+  sessionDir: string,
+  sessionIdentity: DirectoryIdentity,
+  lockPath: string,
+  expectedLockIdentity: DirectoryIdentity,
+  beforeRemove?: (lockPath: string) => void,
+  afterRemove?: (lockPath: string) => void,
+): void {
   try {
+    beforeRemove?.(lockPath)
     assertDirectoryIdentity(sessionDir, sessionIdentity)
-    const lockIdentity = directoryIdentity(lockPath)
-    if (lockIdentity.dev !== expectedLockIdentity.dev || lockIdentity.ino !== expectedLockIdentity.ino) {
-      throw new Error(`UI session mutation lock identity changed at ${lockPath}`)
-    }
+    assertLockIdentity(lockPath, expectedLockIdentity)
     assertDirectoryIdentity(sessionDir, sessionIdentity)
     rmdirSync(lockPath)
+    afterRemove?.(lockPath)
+    assertDirectoryIdentity(sessionDir, sessionIdentity)
   } catch (error) {
-    if (isNotFoundError(error)) return
     throw error
   }
 }
 function existingEntry(path: string): ReturnType<typeof lstatSync> | undefined {
   try { return lstatSync(path) } catch (error) { if (isNotFoundError(error)) return undefined; throw error }
 }
-function writeAtomic(path: string, contents: string, replace: boolean): void {
+function assertLockIdentity(path: string, expected: DirectoryIdentity): void {
+  const current = directoryIdentity(path)
+  if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error(`UI session mutation lock identity changed at ${path}`)
+}
+function writeAtomic(path: string, contents: string, replace: boolean, parentIdentity: DirectoryIdentity, beforeTemporaryWrite?: (temporaryPath: string) => void, beforeRename?: (statePath: string) => void): void {
   const parent = resolve(path, '..')
   assertDirectoryEntry(parent, 'UI session directory')
   const existing = existingEntry(path)
   if (existing !== undefined && (existing.isSymbolicLink() || !existing.isFile())) throw new Error(`UI state at ${path} is not a regular file`)
   const temp = `${path}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`
+  beforeTemporaryWrite?.(temp)
+  assertDirectoryIdentity(parent, parentIdentity)
   writeExclusiveRegular(temp, contents)
+  assertDirectoryIdentity(parent, parentIdentity)
   try {
     const current = existingEntry(path)
     if (current !== undefined && (current.isSymbolicLink() || !current.isFile())) throw new Error(`UI state at ${path} is not a regular file`)
     if (!replace && current !== undefined) throw new Error(`UI state already exists at ${path}`)
+    beforeRename?.(path)
+    assertDirectoryIdentity(parent, parentIdentity)
     renameSync(temp, path)
+    assertDirectoryIdentity(parent, parentIdentity)
   } finally {
-    try { unlinkSync(temp) } catch (error) { if (!isNotFoundError(error)) throw error }
+    try {
+      assertDirectoryIdentity(parent, parentIdentity)
+      unlinkSync(temp)
+    } catch (error) {
+      if (!isNotFoundError(error) && !/identity changed|not found|stable identity unavailable/i.test(error instanceof Error ? error.message : String(error))) throw error
+    }
   }
 }
 function writeExclusiveRegular(path: string, contents: string): void {
