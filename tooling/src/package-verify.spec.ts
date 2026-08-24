@@ -61,8 +61,9 @@ function runner(opts: {
         const output = opts.pack ?? JSON.stringify([{ filename: 'fixture-demo-0.0.0.tgz' }])
         if (opts.createTarball !== false) {
           try {
-            const parsed = JSON.parse(output) as Array<{ filename?: unknown }>
-            const filename = parsed.length === 1 ? parsed[0]?.filename : undefined
+            const parsed = JSON.parse(output) as unknown
+            const entry = Array.isArray(parsed) ? parsed[0] : parsed
+            const filename = (entry as { filename?: unknown } | undefined)?.filename
             if (
               typeof filename === 'string' &&
               !isAbsolute(filename) &&
@@ -91,7 +92,7 @@ describe('verifyPackageInWorkspace', () => {
 
     const tarball = resolve(workspacePath, 'fixture-demo-0.0.0.tgz')
     expect(subject.calls.map(call => call.args)).toEqual([
-      ['install', '--ignore-workspace', '--frozen-lockfile'],
+      ['install', '--frozen-lockfile'],
       ['typecheck'],
       ['test'],
       ['build'],
@@ -235,6 +236,50 @@ describe('verifyPackageInWorkspace', () => {
     [JSON.stringify([{ filename: resolve(tmpdir(), 'outside.tgz') }]), /tarball.*absolute|escape|outside/i],
     [JSON.stringify([{ filename: 'one.tgz' }, { filename: 'two.tgz' }]), /pack.*exactly one|ambiguous|multiple/i],
   ])('rejects unsafe pack output %j before pack-smoke', (pack, message) => {
+    const workspacePath = workspace()
+    const subject = runner({ pack })
+
+    expect(() => verifyPackageInWorkspace({
+      workspacePath,
+      allowBuilds: {},
+      runner: subject.runner,
+    })).toThrow(message)
+    expect(subject.calls.map(call => call.args[0])).toEqual([
+      'install',
+      'typecheck',
+      'test',
+      'build',
+      'pack',
+    ])
+  })
+
+  it('accepts the pnpm 11 single-object pack output', () => {
+    const workspacePath = workspace()
+    const subject = runner({ pack: JSON.stringify({
+      name: '@fixture/demo',
+      version: '0.0.0',
+      filename: 'fixture-demo-0.0.0.tgz',
+      files: [{ path: 'package.json' }],
+    }) })
+
+    const result = verifyPackageInWorkspace({
+      workspacePath,
+      allowBuilds: {},
+      runner: subject.runner,
+    })
+
+    expect(result.tarball).toBe(resolve(workspacePath, 'fixture-demo-0.0.0.tgz'))
+    expect(subject.calls.at(-1)?.args).toEqual([
+      'pack-smoke',
+      resolve(workspacePath, 'fixture-demo-0.0.0.tgz'),
+    ])
+  })
+
+  it.each([
+    [JSON.stringify({ name: '@fixture/demo', version: '0.0.0' }), /pack.*no.*tarball|no.*tarball.*filename/i],
+    [JSON.stringify({ filename: '../outside.tgz' }), /tarball.*escape|outside/i],
+    [JSON.stringify([[]]), /no.*tarball/i],
+  ])('rejects unsafe pnpm 11 pack output %j before pack-smoke', (pack, message) => {
     const workspacePath = workspace()
     const subject = runner({ pack })
 

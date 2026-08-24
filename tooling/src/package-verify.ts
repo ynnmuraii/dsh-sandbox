@@ -56,7 +56,7 @@ export function verifyPackageInWorkspace(opts: {
 
   try {
     runStep(steps, 'install', () => {
-      runner.pnpm(['install', '--ignore-workspace', '--frozen-lockfile'], { cwd: workspacePath })
+      runner.pnpm(['install', '--frozen-lockfile'], { cwd: workspacePath })
     })
     runStep(steps, 'typecheck', () => {
       runner.pnpm(['typecheck'], { cwd: workspacePath })
@@ -308,16 +308,10 @@ function parsePackOutput(output: string | Buffer): unknown {
 }
 
 function resolvePackedTarball(workspacePath: string, parsed: unknown): string {
-  if (!Array.isArray(parsed) || parsed.length !== 1) {
-    throw new Error('pnpm pack --json produced no tarball; it must produce exactly one tarball result')
-  }
-  const entry = parsed[0]
+  // pnpm 11 produces a single object { name, version, filename, files } while older produces [{ filename }]
+  const entry = Array.isArray(parsed) ? (parsed.length === 1 ? parsed[0] : null) : parsed
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-    throw new Error('pnpm pack --json produced no tarball')
-  }
-  const keys = Object.keys(entry)
-  if (keys.length !== 1 || keys[0] !== 'filename') {
-    throw new Error('pnpm pack --json produced a malformed tarball result')
+    throw new Error('pnpm pack --json produced no tarball; it must produce exactly one tarball result')
   }
   const filename = (entry as { filename?: unknown }).filename
   if (typeof filename !== 'string' || filename.length === 0) {
