@@ -2,7 +2,7 @@
 
 > **SOURCE OF TRUTH.** This file is compiled by `lab sync-context` into `plugins/*/.dsh-lab/shared-context.md`. Edit here, not in plugin snapshots.
 
-The standalone plugin repo layout and package contract. Grounded in design spec §5.2 and §11, and `research/deepseek-harness-plugin-lab.md`.
+The standalone plugin repo layout and package contract. Grounded in upstream Harness package conventions and the pinned revision.
 
 ## Standalone repo layout
 

@@ -2,7 +2,7 @@
 
 > **SOURCE OF TRUTH.** This file is compiled by `lab sync-context` into `plugins/*/.dsh-lab/shared-context.md`. Edit here, not in plugin snapshots.
 
-The Fiber/effect/dependency model under DeepSeek Harness. Grounded in `research/deepseek-harness-plugin-lab.md`.
+The Fiber/effect/dependency model under DeepSeek Harness. Grounded in upstream Cordis source and the pinned Harness revision.
 
 ## Fiber state machine
 

@@ -4,7 +4,7 @@ This is the agent-owned forge for creating, studying, debugging, and verifying i
 
 ## When to use this skill
 
-Use it when creating a plugin repository, changing plugin code, debugging a boot or HMR failure, running any `lab` command, or proving a plugin against a pinned target. When a command fails, jump straight to the matching section: [inspection diagnostics](#inspection-diagnostics), [UI session outcomes](#ui-session-protocol), or the troubleshooting recipes in the [lab author guide](../../../docs/using-the-lab.md).
+Use it when creating a plugin repository, changing plugin code, debugging a boot or HMR failure, running any `lab` command, or proving a plugin against a pinned target. When a command fails, jump straight to the matching section: [inspection diagnostics](#inspection-diagnostics), [UI session outcomes](#ui-session-protocol), or the troubleshooting recipes in the [lab author guide](../../../context/lab-author-guide.md).
 
 ## Canonical routing
 
@@ -15,7 +15,7 @@ Use it when creating a plugin repository, changing plugin code, debugging a boot
 | Repository layout and package metadata | [Plugin anatomy](../../../context/plugin-anatomy.md) |
 | Required behavior, lifecycle, and compatibility evidence | [Testing policy](../../../context/testing-policy.md) |
 | Target claims and pinned compatibility | [Compatibility](../../../context/compatibility.md) |
-| Authoring loop and lab commands | [Lab author guide](../../../docs/using-the-lab.md) |
+| Authoring loop and lab commands | [Lab author guide](../../../context/lab-author-guide.md) |
 
 ## The loop at a glance
 
@@ -31,7 +31,7 @@ Every command takes a catalog name or `--path P` for an external standalone repo
 
 ## Recommended loop
 
-Before production code, read the relevant canonical contracts and the [lab author guide](../../../docs/using-the-lab.md). Use the smallest useful loop: `pnpm lab inspect <name> --target <target>`, then `pnpm lab dev <name> --target <target>` while iterating, `pnpm lab verify <name> --target <target>` before handoff, and `pnpm lab status <name>` to distinguish current, stale, and missing evidence and summarize repository state. Use `--path` for an external standalone plugin.
+Before production code, read the relevant canonical contracts and the [lab author guide](../../../context/lab-author-guide.md). Use the smallest useful loop: `pnpm lab inspect <name> --target <target>`, then `pnpm lab dev <name> --target <target>` while iterating, `pnpm lab verify <name> --target <target>` before handoff, and `pnpm lab status <name>` to distinguish current, stale, and missing evidence and summarize repository state. Use `--path` for an external standalone plugin.
 
 `inspect` fails closed with typed diagnostics; fix them before `dev`, `verify`, or `ui start`.
 

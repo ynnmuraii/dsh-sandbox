@@ -34,7 +34,7 @@ temporary isolated runtime and minimal factual UI verdict. An external browser
 or vision agent/harness owns navigation and visual decisions; screenshots and
 browser artifacts are transient and not retained by the lab.
 
-- **Author guide & recipes** — [docs/using-the-lab.md](docs/using-the-lab.md)
+- **Author guide & recipes** — [context/lab-author-guide.md](context/lab-author-guide.md)
 - **Root context library** — [context/](context/) (plugin shared-context snapshots derive from it)
 - **Portable agent skill** — [.agents/skills/dsh-plugin-development/SKILL.md](.agents/skills/dsh-plugin-development/SKILL.md)
 - **Compatibility pins** — [workbench/compatibility.yaml](workbench/compatibility.yaml)
@@ -57,5 +57,5 @@ Adopt a reviewed upstream `master` explicitly with
 adopted checkout, and verify every catalogued plugin that declares `master`.
 The updater never commits, pushes, merges, resets, or rolls changes back.
 
-See [docs/using-the-lab.md](docs/using-the-lab.md) for the full recipe set and
+See [context/lab-author-guide.md](context/lab-author-guide.md) for the full recipe set and
 troubleshooting.

@@ -2,7 +2,7 @@
 
 > **SOURCE OF TRUTH.** This file is compiled by `lab sync-context` into `plugins/*/.dsh-lab/shared-context.md`. Edit here, not in plugin snapshots.
 
-Required test levels for plugin repos. Grounded in design spec §12 and `research/deepseek-harness-plugin-lab.md`.
+Required test levels for plugin repos. Grounded in upstream Harness testing guidance and the pinned revision.
 
 ## Six test levels
 

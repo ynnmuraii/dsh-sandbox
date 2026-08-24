@@ -2,7 +2,7 @@
 
 > **SOURCE OF TRUTH.** This file is compiled by `lab sync-context` into `plugins/*/.dsh-lab/shared-context.md`. Edit here, not in plugin snapshots.
 
-Public plugin contracts of DeepSeek Harness. Grounded in `research/deepseek-harness-plugin-lab.md` and design spec §11.
+Public plugin contracts of DeepSeek Harness. Grounded in upstream Harness contracts and the pinned revision.
 
 ## Plugin module exports
 

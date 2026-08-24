@@ -48,7 +48,7 @@ describe('committed portable agent skill projection', () => {
       '../../../context/plugin-anatomy.md',
       '../../../context/testing-policy.md',
       '../../../context/compatibility.md',
-      '../../../docs/using-the-lab.md',
+      '../../../context/lab-author-guide.md',
     ]
 
     for (const reference of requiredReferences) expect(committed).toContain(`](${reference})`)

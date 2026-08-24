@@ -2,7 +2,7 @@
 
 > **SOURCE OF TRUTH.** This file is compiled by `lab sync-context` into `plugins/*/.dsh-lab/shared-context.md`. Edit here, not in plugin snapshots.
 
-How compatibility targets are managed. Grounded in design spec §8 and the research note's version-pinning constraints.
+How compatibility targets are managed. Version pinning and per-target claims for the lab, against the pinned upstream revision.
 
 ## Targets
 

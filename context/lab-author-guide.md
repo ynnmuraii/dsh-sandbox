@@ -53,12 +53,14 @@ dsh-sandbox/
 ├── plugins/<name>/          a standalone nested repo per plugin
 ├── upstream/deepseek-harness  pinned master submodule (Task 8)
 ├── tooling/                 the lab CLI source
-└── docs/using-the-lab.md    this guide
+└── context/lab-author-guide.md  this guide
 ```
 
 Every plugin lives in its own **nested git repo** (`plugins/<name>`). The parent
-meta-repo deliberately does **not** track plugin internals (`tracking: local` is
-the only mode today); only `catalog.yaml` is committed in the parent.
+meta-repo deliberately does **not** track plugin internals; only `catalog.yaml`
+is committed in the parent. `tracking: local` keeps the plugin as an independent
+nested repo; `tracking: submodule` pins an external repository + commit (see the
+elevation recipe below).
 
 ## The six command families
 

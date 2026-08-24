@@ -246,7 +246,7 @@ describe('agent-first command and documentation contract', () => {
   it('documents mutation/isolation, the portable skill, and the separate UI protocol', () => {
     const docs = [
       readFileSync(new URL('../../README.md', import.meta.url), 'utf8'),
-      readFileSync(new URL('../../docs/using-the-lab.md', import.meta.url), 'utf8'),
+      readFileSync(new URL('../../context/lab-author-guide.md', import.meta.url), 'utf8'),
       readFileSync(new URL('../../AGENTS.md', import.meta.url), 'utf8'),
     ].join('\n')
 
