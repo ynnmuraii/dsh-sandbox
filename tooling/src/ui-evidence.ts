@@ -26,7 +26,10 @@ export interface PublishUiResultOptions {
   /** Synchronous seam for testing the publication boundary. */
   renameFile?: (from: string, to: string) => void
   beforePublishWrite?: (sessionDirectory: string) => void
+  beforeLockCreate?: (lockPath: string) => void
+  beforeTemporaryWrite?: (path: string) => void
   beforeFinalize?: (finalPath: string) => void
+  afterFinalize?: (finalPath: string) => void
   removeTemporaryName?: (path: string) => void
   removePublicationLock?: (path: string) => void
 }
@@ -68,9 +71,15 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
   assertSafeUiPath(opts.uiRunsRoot, pluginDirectory, 'plugin evidence directory')
   assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
   const sessionIdentity = captureDirectoryIdentity(sessionDirectory)
+  let lockIdentity: DirectoryIdentity
 
   try {
+    assertDirectoryIdentity(sessionDirectory, sessionIdentity)
+    opts.beforeLockCreate?.(lockPath)
+    assertDirectoryIdentity(sessionDirectory, sessionIdentity)
     mkdirSync(lockPath)
+    lockIdentity = captureDirectoryIdentity(lockPath)
+    assertDirectoryIdentity(sessionDirectory, sessionIdentity)
   } catch (error) {
     if (isFileExistsError(error)) {
       throw new Error(
@@ -82,6 +91,8 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
   }
 
   let temporaryCreated = false
+  let committed = false
+  let primaryError: unknown
   try {
     if (existsSync(finalPath)) {
       throw new Error(`UI session ${result.sessionId} is already finalized; immutable evidence cannot be replaced`)
@@ -103,6 +114,8 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
       temporaryCreated = true
+      opts.beforeTemporaryWrite?.(temporaryPath)
+      assertDirectoryIdentity(sessionDirectory, sessionIdentity)
       writeTemporaryNoFollow(temporaryPath, `${JSON.stringify(result, null, 2)}\n`)
       assertSafeUiPath(opts.uiRunsRoot, sessionDirectory, 'session evidence directory')
       assertDirectoryEntry(sessionDirectory, 'session evidence directory')
@@ -123,6 +136,10 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
           }
           throw error
         }
+      }
+      opts.afterFinalize?.(finalPath)
+      assertDirectoryIdentity(sessionDirectory, sessionIdentity)
+      if (opts.renameFile === undefined) {
         try {
           if (opts.removeTemporaryName) opts.removeTemporaryName(temporaryPath)
           else unlinkSync(temporaryPath)
@@ -132,13 +149,20 @@ export function publishUiResult(opts: PublishUiResultOptions): string {
         }
       }
       temporaryCreated = false
+      committed = true
+      assertDirectoryIdentity(sessionDirectory, sessionIdentity)
     } catch (error) {
-      if (temporaryCreated && sameDirectoryIdentity(sessionDirectory, sessionIdentity)) removeTemporary(opts.uiRunsRoot, sessionDirectory, temporaryPath)
+      primaryError = error
+      if (temporaryCreated && sameDirectoryIdentity(sessionDirectory, sessionIdentity)) removeTemporary(opts.uiRunsRoot, sessionDirectory, temporaryPath, sessionIdentity)
       throw error
     }
     return finalPath
   } finally {
-    removeLock(opts.uiRunsRoot, sessionDirectory, lockPath, opts.removePublicationLock)
+    const lockFailure = removeLock(opts.uiRunsRoot, sessionDirectory, lockPath, opts.removePublicationLock, sessionIdentity, lockIdentity)
+    if (lockFailure !== undefined && (!committed || lockFailure.identity)) {
+      if (primaryError !== undefined) throw new AggregateError([primaryError, lockFailure.error], `UI evidence publication failed and lock cleanup failed: ${primaryError instanceof Error ? primaryError.message : String(primaryError)}; ${lockFailure.error.message}`)
+      throw lockFailure.error
+    }
   }
 }
 
@@ -422,30 +446,46 @@ function compareCodePointStrings(left: string, right: string): number {
   return leftPoints.length === rightPoints.length ? 0 : leftPoints.length < rightPoints.length ? -1 : 1
 }
 
-function removeTemporary(uiRunsRoot: string, sessionDirectory: string, path: string): void {
+function removeTemporary(uiRunsRoot: string, sessionDirectory: string, path: string, sessionIdentity: DirectoryIdentity): void {
   try {
+    assertDirectoryIdentity(sessionDirectory, sessionIdentity)
     assertSafeUiPath(uiRunsRoot, sessionDirectory, 'session evidence directory')
     assertDirectoryEntry(sessionDirectory, 'session evidence directory')
     rmSync(path, { force: true })
   } catch { /* preserve the publication error */ }
 }
 
-function removeLock(uiRunsRoot: string, sessionDirectory: string, path: string, hook?: (path: string) => void): Error | undefined {
+function removeLock(
+  uiRunsRoot: string,
+  sessionDirectory: string,
+  path: string,
+  hook: ((path: string) => void) | undefined,
+  sessionIdentity: DirectoryIdentity,
+  lockIdentity: DirectoryIdentity,
+): { error: Error; identity: boolean } | undefined {
   try {
+    assertDirectoryIdentity(sessionDirectory, sessionIdentity)
+    assertDirectoryIdentity(path, lockIdentity)
     assertSafeUiPath(uiRunsRoot, sessionDirectory, 'session evidence directory')
     assertDirectoryEntry(sessionDirectory, 'session evidence directory')
     if (hook) hook(path)
     else rmSync(path, { recursive: true, force: true })
     return undefined
-  } catch {
-    return new Error(`Publication lock ${path} could not be removed; it may be orphaned. Confirm no publisher is active, then remove the lock and retry.`)
+  } catch (error) {
+    const identity = /identity|symlink|junction|not a regular directory/i.test(error instanceof Error ? error.message : String(error))
+    return {
+      error: identity && error instanceof Error
+        ? error
+        : new Error(`Publication lock ${path} could not be removed; it may be orphaned. Confirm no publisher is active, then remove the lock and retry.`, { cause: error }),
+      identity,
+    }
   }
 }
 
 type DirectoryIdentity = { dev: number; ino: number }
 function captureDirectoryIdentity(path: string): DirectoryIdentity {
   const stat = lstatSync(path)
-  if (stat.isSymbolicLink() || !stat.isDirectory() || !Number.isInteger(stat.dev) || !Number.isInteger(stat.ino) || stat.dev <= 0 || stat.ino <= 0) throw new Error(`stable identity unavailable for evidence directory ${path}`)
+  if (stat.isSymbolicLink() || !stat.isDirectory() || !Number.isInteger(stat.dev) || !Number.isInteger(stat.ino) || stat.dev <= 0 || stat.ino <= 0) throw new Error(`evidence directory identity unavailable or changed at ${path}`)
   return { dev: stat.dev, ino: stat.ino }
 }
 function assertDirectoryIdentity(path: string, expected: DirectoryIdentity): void {

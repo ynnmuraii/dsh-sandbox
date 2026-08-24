@@ -19,11 +19,13 @@ import {
   writeUiSession,
   type UiSessionPhase,
   type UiSessionStateV1,
+  type UiControlV1,
   type UiStaleReason,
 } from './ui-session.js'
 import { normalizeUiSummary, publishUiResult, type UiResultV1, type UiTargetIdentity } from './ui-evidence.js'
 import { computeContextDigest } from './status.js'
 import { resolveTsxLoader } from './run.js'
+import { claimOwnedUiDirectory, type OwnedUiDirectory } from './ui-owned-directory.js'
 
 export interface StartUiOptions {
   root: string
@@ -69,6 +71,7 @@ export interface UiServiceDependencies {
   processAlive(pid: number): boolean
   publishResult(opts: { uiRunsRoot: string; result: UiResultV1 }): string
   writeSession(opts: Parameters<typeof writeUiSession>[0]): void
+  beforeRequestWrite?(sessionDirectory: string): void
 }
 
 export type UiProtocolOutcome = 'stale' | 'cleanup-incomplete'
@@ -126,64 +129,74 @@ export async function startUiSession(opts: StartUiOptions, deps: UiServiceDepend
     updatedAt: startedAt,
   }
   const sessionDir = createUiSession({ runtimeRoot, state })
+  const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: sessionDir })
+  ownedSession.assertCurrent()
+  ownedSession.assertCurrent()
+  deps.beforeRequestWrite?.(sessionDir)
+  ownedSession.assertCurrent()
   const requestPath = writeUiSessionRequest({ runtimeRoot, sessionId, request: {
-    schemaVersion: 1,
-    root: resolve(opts.root),
-    sessionId,
-    plugin: {
-      packageName: identity.plugin.packageName,
-      sourcePath: identity.plugin.sourcePath,
-      runtimeName: identity.runtimeName,
-    },
-    target: opts.target,
-    startedAt,
-  } })
+      schemaVersion: 1,
+      root: resolve(opts.root),
+      sessionId,
+      plugin: {
+        packageName: identity.plugin.packageName,
+        sourcePath: identity.plugin.sourcePath,
+        runtimeName: identity.runtimeName,
+      },
+      target: opts.target,
+      startedAt,
+    } })
+  ownedSession.assertCurrent()
   let supervisor: { pid: number; unref(): void }
   try {
+    ownedSession.assertCurrent()
     supervisor = deps.spawnSupervisor(requestPath)
     if (!supervisor || !Number.isInteger(supervisor.pid) || supervisor.pid <= 0 || typeof supervisor.unref !== 'function') {
       throw new Error('UI supervisor did not return a valid process')
     }
     supervisor.unref()
-    const afterSpawn = readUiSession({ runtimeRoot, sessionId })
+    const afterSpawn = readOwnedSession(runtimeRoot, sessionId, ownedSession)
     if (afterSpawn.state === 'starting') {
-      writeUiSession({
+      writeOwnedSession(ownedSession, {
         runtimeRoot,
         state: { ...afterSpawn, supervisorPid: supervisor.pid, updatedAt: afterSpawn.updatedAt },
       })
     }
   } catch (error) {
     const message = sanitizeServiceError(error)
-    writeUiSession({
-      runtimeRoot,
-      state: {
-        ...state,
-        state: 'crashed',
-        error: message,
-        cleanup: 'fail',
-        updatedAt: safeNow(deps.now(), state.updatedAt),
-      },
-    })
+    try {
+      ownedSession.assertCurrent()
+      writeOwnedSession(ownedSession, {
+        runtimeRoot,
+        state: {
+          ...state,
+          state: 'crashed',
+          error: message,
+          cleanup: 'fail',
+          updatedAt: safeNow(deps.now(), state.updatedAt),
+        },
+      })
+    } catch { /* never mutate a replacement session during recovery */ }
     throw error
   }
 
   const deadline = Date.parse(startedAt) + timeoutMs
   while (true) {
-    const current = readUiSession({ runtimeRoot, sessionId })
+    const current = readOwnedSession(runtimeRoot, sessionId, ownedSession)
     if (current.state === 'ready' || current.state === 'crashed') return viewFromState(current)
     if (Date.parse(deps.now()) >= deadline) break
     await deps.sleep(POLL_INTERVAL_MS)
   }
 
-  const current = readUiSession({ runtimeRoot, sessionId })
+  const current = readOwnedSession(runtimeRoot, sessionId, ownedSession)
   if (current.state === 'ready' || current.state === 'crashed') return viewFromState(current)
   if (current.state === 'starting') {
-    if (readUiControl({ runtimeRoot, sessionId }) === undefined) {
-      writeUiControl({ runtimeRoot, sessionId, control: { schemaVersion: 1, action: 'abort', requestedAt: safeNow(deps.now(), current.updatedAt) } })
+    if (readOwnedControl(runtimeRoot, sessionId, ownedSession) === undefined) {
+      writeOwnedControl(ownedSession, { runtimeRoot, sessionId, control: { schemaVersion: 1, action: 'abort', requestedAt: safeNow(deps.now(), current.updatedAt) } })
     }
-    await waitForTerminal({ runtimeRoot, sessionId, deps, timeoutMs, accept: stateValue => stateValue.state === 'aborted' || (stateValue.state === 'crashed' && stateValue.cleanup === 'fail') })
+    await waitForTerminal({ runtimeRoot, sessionId, deps, timeoutMs, ownedSession, accept: stateValue => stateValue.state === 'aborted' || (stateValue.state === 'crashed' && stateValue.cleanup === 'fail') })
   }
-  const finalState = readUiSession({ runtimeRoot, sessionId })
+  const finalState = readOwnedSession(runtimeRoot, sessionId, ownedSession)
   throw new Error(`UI session ${sessionId} startup timed out; runtime path: ${sessionDir}; state: ${finalState.state}`)
 }
 
@@ -203,6 +216,15 @@ export function getUiSessionStatus(
       writeUiSession({ runtimeRoot, state })
     }
   }
+  const orphanPath = join(runtimeRoot, 'ui-sessions', opts.sessionId)
+  if (state.state === 'starting' && state.supervisorPid === undefined) {
+    const { url: _url, childPid: _childPid, ...orphaned } = state
+    return viewFromState({
+      ...orphaned,
+      state: 'crashed',
+      error: `UI supervisor owner is missing; session is orphaned at ${orphanPath}`,
+    })
+  }
   if ((state.state === 'starting' || state.state === 'ready') && state.supervisorPid !== undefined) {
     const supervisorAlive = deps.processAlive(state.supervisorPid)
     const childAlive = state.childPid === undefined ? true : supervisorAlive && deps.processAlive(state.childPid)
@@ -211,7 +233,13 @@ export function getUiSessionStatus(
     return viewFromState({
       ...orphaned,
       state: 'crashed',
-      error: `${supervisorAlive ? 'UI child is not running' : 'UI supervisor is not running'}; session is orphaned at ${join(runtimeRoot, 'ui-sessions', opts.sessionId)}`,
+      error: `${supervisorAlive ? 'UI child is not running' : 'UI supervisor is not running'}; session is orphaned at ${orphanPath}`,
+    })
+  }
+  if (state.state === 'crashed' && state.supervisorPid !== undefined && !deps.processAlive(state.supervisorPid)) {
+    return viewFromState({
+      ...state,
+      error: `${state.error ?? 'UI session crashed'}; recovery supervisor is not running; session is orphaned at ${orphanPath}`,
     })
   }
   if (isTerminal(state.state)) {
@@ -228,6 +256,8 @@ export async function finishUiSession(opts: FinishUiOptions, deps: UiServiceDepe
   const timeoutMs = validateTimeout(opts.stopTimeoutMs, 'stopTimeoutMs')
   const runtimeRoot = rootPath(opts.root, ROOT_PATHS.runtime)
   let state = readUiSession({ runtimeRoot, sessionId: opts.sessionId })
+  const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: join(runtimeRoot, 'ui-sessions', opts.sessionId) })
+  ownedSession.assertCurrent()
   if (state.state === 'finished' || state.state === 'aborted') throw new Error(`UI session ${opts.sessionId} is ${state.state} and immutable`)
   const identity = captureCurrentIdentity(opts.root, state)
   const reasons = staleReasons(state, identity)
@@ -236,7 +266,7 @@ export async function finishUiSession(opts: FinishUiOptions, deps: UiServiceDepe
       const newlyObserved = reasons.filter(reason => !(state.staleReasons ?? []).includes(reason))
       if (newlyObserved.length > 0) {
         state = latchUiStaleReasons(state, newlyObserved, safeNow(deps.now(), state.updatedAt))
-        writeUiSession({ runtimeRoot, state })
+        writeOwnedSession(ownedSession, { runtimeRoot, state })
       }
     }
     throw new UiProtocolOutcomeError(`UI session ${opts.sessionId} is stale: ${(state.staleReasons ?? reasons).join(', ')}`, 'stale')
@@ -246,8 +276,8 @@ export async function finishUiSession(opts: FinishUiOptions, deps: UiServiceDepe
   if (state.state === 'stopping') throw new Error(`UI session ${opts.sessionId} is already stopping; finish ownership belongs to another caller`)
   if (state.state === 'crashed' && state.cleanup === 'fail') throw new UiProtocolOutcomeError('UI session cleanup failed', 'cleanup-incomplete')
 
-  writeUiControl({ runtimeRoot, sessionId: opts.sessionId, control: { schemaVersion: 1, action: 'finish', requestedAt: safeNow(deps.now(), state.updatedAt) } })
-  state = await waitForState({ runtimeRoot, sessionId: opts.sessionId, deps, timeoutMs, accept: candidate => candidate.state === 'stopping' && candidate.cleanup === 'pass' && readUiControl({ runtimeRoot, sessionId: opts.sessionId }) === undefined })
+  writeOwnedControl(ownedSession, { runtimeRoot, sessionId: opts.sessionId, control: { schemaVersion: 1, action: 'finish', requestedAt: safeNow(deps.now(), state.updatedAt) } })
+  state = await waitForState({ runtimeRoot, sessionId: opts.sessionId, deps, timeoutMs, ownedSession, accept: candidate => candidate.state === 'stopping' && candidate.cleanup === 'pass' && readOwnedControl(runtimeRoot, opts.sessionId, ownedSession) === undefined })
   if (state.state !== 'stopping' || state.cleanup !== 'pass') throw new Error(`UI session ${opts.sessionId} cleanup did not complete`)
   const finishedAt = deps.now()
   validateTimestamp(finishedAt, 'now')
@@ -257,7 +287,7 @@ export async function finishUiSession(opts: FinishUiOptions, deps: UiServiceDepe
     const newlyObserved = lateReasons.filter(reason => !(state.staleReasons ?? []).includes(reason))
     if (newlyObserved.length > 0) {
       state = latchUiStaleReasons(state, newlyObserved, safeNow(deps.now(), state.updatedAt))
-      writeUiSession({ runtimeRoot, state })
+      writeOwnedSession(ownedSession, { runtimeRoot, state })
     }
     throw new UiProtocolOutcomeError(`UI session ${opts.sessionId} became stale during cleanup: ${(state.staleReasons ?? lateReasons).join(', ')}`, 'stale')
   }
@@ -274,9 +304,12 @@ export async function finishUiSession(opts: FinishUiOptions, deps: UiServiceDepe
     startedAt: state.startedAt,
     finishedAt,
   }
+  ownedSession.assertCurrent()
   deps.publishResult({ uiRunsRoot: rootPath(opts.root, ROOT_PATHS.uiRuns), result })
+  ownedSession.assertCurrent()
   const terminal: UiSessionStateV1 = { ...state, state: 'finished', cleanup: 'pass', updatedAt: safeNow(deps.now(), state.updatedAt) }
-  try { deps.writeSession({ runtimeRoot, state: terminal }) } catch {
+  try { writeOwnedSession(ownedSession, { runtimeRoot, state: terminal }, deps.writeSession) } catch (error) {
+    if (isOwnershipError(error)) throw error
     // Evidence publication is the immutable commit point. Keep the compact
     // stopping lease recoverable when terminal bookkeeping fails afterward.
   }
@@ -288,14 +321,16 @@ export async function abortUiSession(opts: AbortUiOptions, deps: UiServiceDepend
   const timeoutMs = validateTimeout(opts.stopTimeoutMs, 'stopTimeoutMs')
   const runtimeRoot = rootPath(opts.root, ROOT_PATHS.runtime)
   let state = readUiSession({ runtimeRoot, sessionId: opts.sessionId })
+  const ownedSession = claimOwnedUiDirectory({ root: runtimeRoot, directory: join(runtimeRoot, 'ui-sessions', opts.sessionId) })
+  ownedSession.assertCurrent()
   if (state.state === 'finished') throw new Error(`UI session ${opts.sessionId} is finished and immutable`)
   if (state.state === 'aborted') return viewFromState(state)
   if (state.state === 'stopping') throw new Error(`UI session ${opts.sessionId} is already stopping`)
   if (state.state === 'crashed' && state.cleanup === 'fail') throw new UiProtocolOutcomeError('UI session cleanup failed', 'cleanup-incomplete')
-  if (readUiControl({ runtimeRoot, sessionId: opts.sessionId }) === undefined) {
-    writeUiControl({ runtimeRoot, sessionId: opts.sessionId, control: { schemaVersion: 1, action: 'abort', requestedAt: safeNow(deps.now(), state.updatedAt) } })
+  if (readOwnedControl(runtimeRoot, opts.sessionId, ownedSession) === undefined) {
+    writeOwnedControl(ownedSession, { runtimeRoot, sessionId: opts.sessionId, control: { schemaVersion: 1, action: 'abort', requestedAt: safeNow(deps.now(), state.updatedAt) } })
   }
-  state = await waitForState({ runtimeRoot, sessionId: opts.sessionId, deps, timeoutMs, accept: candidate => candidate.state === 'aborted' })
+  state = await waitForState({ runtimeRoot, sessionId: opts.sessionId, deps, timeoutMs, ownedSession, accept: candidate => candidate.state === 'aborted' })
   if (state.state !== 'aborted') throw new UiProtocolOutcomeError(`UI session ${opts.sessionId} abort cleanup failed`, 'cleanup-incomplete')
   return viewFromState(state)
 }
@@ -385,18 +420,21 @@ async function waitForState(opts: {
   sessionId: string
   deps: Pick<UiServiceDependencies, 'sleep' | 'now'>
   timeoutMs: number
+  ownedSession: OwnedUiDirectory
   accept: (state: UiSessionStateV1) => boolean
 }): Promise<UiSessionStateV1> {
   const started = opts.deps.now()
   validateTimestamp(started, 'now')
   const deadline = Date.parse(started) + opts.timeoutMs
   while (true) {
-    const state = readUiSession(opts)
+    const state = readOwnedSession(opts.runtimeRoot, opts.sessionId, opts.ownedSession)
     if (opts.accept(state)) return state
     if (state.state === 'crashed' && state.cleanup === 'fail') throw new UiProtocolOutcomeError(`UI session ${opts.sessionId} cleanup failed`, 'cleanup-incomplete')
+    opts.ownedSession.assertCurrent()
     await opts.deps.sleep(POLL_INTERVAL_MS)
+    opts.ownedSession.assertCurrent()
     if (Date.parse(opts.deps.now()) >= deadline) {
-      const afterSleep = readUiSession(opts)
+      const afterSleep = readOwnedSession(opts.runtimeRoot, opts.sessionId, opts.ownedSession)
       if (opts.accept(afterSleep)) return afterSleep
       throw new UiProtocolOutcomeError(`UI session ${opts.sessionId} cleanup timed out`, 'cleanup-incomplete')
     }
@@ -408,6 +446,7 @@ async function waitForTerminal(opts: {
   sessionId: string
   deps: Pick<UiServiceDependencies, 'sleep' | 'now'>
   timeoutMs: number
+  ownedSession: OwnedUiDirectory
   accept: (state: UiSessionStateV1) => boolean
 }): Promise<UiSessionStateV1> {
   return waitForState(opts)
@@ -432,6 +471,10 @@ function sanitizeServiceError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   return message.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240) || 'UI supervisor spawn failed'
 }
+function isOwnershipError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /identity|ownership|replacement|swap|symlink|junction/i.test(message)
+}
 function isTerminal(state: UiSessionPhase): boolean { return state === 'finished' || state === 'aborted' }
 function sameTarget(left: UiTargetIdentity, right: UiTargetIdentity): boolean {
   if (left.name !== right.name) return false
@@ -454,4 +497,28 @@ function defaultDependencies(): UiServiceDependencies {
     publishResult: opts => publishUiResult(opts),
     writeSession: opts => writeUiSession(opts),
   }
+}
+
+function readOwnedSession(runtimeRoot: string, sessionId: string, ownedSession: OwnedUiDirectory): UiSessionStateV1 {
+  ownedSession.assertCurrent()
+  try { return readUiSession({ runtimeRoot, sessionId }) } finally { ownedSession.assertCurrent() }
+}
+
+function readOwnedControl(runtimeRoot: string, sessionId: string, ownedSession: OwnedUiDirectory): UiControlV1 | undefined {
+  ownedSession.assertCurrent()
+  try { return readUiControl({ runtimeRoot, sessionId }) } finally { ownedSession.assertCurrent() }
+}
+
+function writeOwnedControl(ownedSession: OwnedUiDirectory, opts: Parameters<typeof writeUiControl>[0]): void {
+  ownedSession.assertCurrent()
+  try { writeUiControl(opts) } finally { ownedSession.assertCurrent() }
+}
+
+function writeOwnedSession(
+  ownedSession: OwnedUiDirectory,
+  opts: Parameters<typeof writeUiSession>[0],
+  writeSession: (opts: Parameters<typeof writeUiSession>[0]) => void = writeUiSession,
+): void {
+  ownedSession.assertCurrent()
+  try { writeSession(opts) } finally { ownedSession.assertCurrent() }
 }

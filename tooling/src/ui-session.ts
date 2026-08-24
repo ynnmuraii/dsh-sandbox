@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
   linkSync,
@@ -118,27 +119,23 @@ export function writeUiSession(opts: {
   assertSafePath(paths.runtimeRoot, paths.sessionDir, 'UI session directory')
   assertDirectoryEntry(paths.sessionDir, `UI session ${opts.state.sessionId}`)
   const sessionIdentity = directoryIdentity(paths.sessionDir)
-  const current = readUiSession({ runtimeRoot: opts.runtimeRoot, sessionId: opts.state.sessionId })
-  const state = opts.state.state === 'crashed' && Number.isFinite(Date.parse(opts.state.updatedAt)) && Date.parse(opts.state.updatedAt) < Date.parse(current.updatedAt)
-    ? { ...opts.state, updatedAt: current.updatedAt }
-    : opts.state
-  validateState(state)
-  assertStaleReasonsRetained(current, state)
-  if (isTerminal(current.state)) {
-    if (JSON.stringify(current) !== JSON.stringify(state)) {
-      throw new Error(`terminal UI session ${opts.state.sessionId} is immutable`)
-    }
-    return
-  }
-  if (!canTransition(current.state, state.state)) {
-    throw new Error(`invalid UI session transition ${current.state} -> ${state.state}`)
-  }
-  if (Date.parse(state.updatedAt) < Date.parse(current.updatedAt)) {
-    throw new Error('updatedAt must not move backward')
-  }
+  let current = readUiSession({ runtimeRoot: opts.runtimeRoot, sessionId: opts.state.sessionId })
+  validateStateCandidate(current, opts.state, opts.state.sessionId)
   opts.beforeStateReplace?.(paths.statePath)
   assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
-  writeAtomic(paths.statePath, JSON.stringify(state, null, 2) + '\n', true)
+  const lockPath = join(paths.sessionDir, '.state.lock')
+  const lockIdentity = acquireSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath)
+  try {
+    assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
+    current = readUiSession({ runtimeRoot: opts.runtimeRoot, sessionId: opts.state.sessionId })
+    const state = validateStateCandidate(current, opts.state, opts.state.sessionId)
+    if (state === undefined) return
+    assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
+    writeAtomic(paths.statePath, JSON.stringify(state, null, 2) + '\n', true)
+    assertDirectoryIdentity(paths.sessionDir, sessionIdentity)
+  } finally {
+    releaseSessionMutationLock(paths.sessionDir, sessionIdentity, lockPath, lockIdentity)
+  }
 }
 
 export function writeUiControl(opts: {
@@ -410,6 +407,53 @@ function directoryIdentity(path: string): DirectoryIdentity {
 function assertDirectoryIdentity(path: string, expected: DirectoryIdentity): void {
   const current = directoryIdentity(path)
   if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error(`UI session directory identity changed at ${path}`)
+}
+
+function validateStateCandidate(current: UiSessionStateV1, candidate: UiSessionStateV1, sessionId: string): UiSessionStateV1 | undefined {
+  const state = candidate.state === 'crashed' && Number.isFinite(Date.parse(candidate.updatedAt)) && Date.parse(candidate.updatedAt) < Date.parse(current.updatedAt)
+    ? { ...candidate, updatedAt: current.updatedAt }
+    : candidate
+  validateState(state)
+  assertStaleReasonsRetained(current, state)
+  if (isTerminal(current.state)) {
+    if (JSON.stringify(current) !== JSON.stringify(state)) throw new Error(`terminal UI session ${sessionId} is immutable`)
+    return undefined
+  }
+  if (!canTransition(current.state, state.state)) throw new Error(`invalid UI session transition ${current.state} -> ${state.state}`)
+  if (Date.parse(state.updatedAt) < Date.parse(current.updatedAt)) throw new Error('updatedAt must not move backward')
+  return state
+}
+
+function acquireSessionMutationLock(sessionDir: string, sessionIdentity: DirectoryIdentity, lockPath: string): DirectoryIdentity {
+  assertDirectoryIdentity(sessionDir, sessionIdentity)
+  try { mkdirSync(lockPath) } catch (error) {
+    if (isExistsError(error)) throw new Error(`concurrent UI session mutation is already locked at ${lockPath}`)
+    throw error
+  }
+  try {
+    assertDirectoryIdentity(sessionDir, sessionIdentity)
+    const lockIdentity = directoryIdentity(lockPath)
+    if (lockIdentity.dev <= 0 || lockIdentity.ino <= 0) throw new Error(`stable identity unavailable for UI session mutation lock ${lockPath}`)
+    return lockIdentity
+  } catch (error) {
+    try { rmdirSync(lockPath) } catch { /* preserve the identity failure */ }
+    throw error
+  }
+}
+
+function releaseSessionMutationLock(sessionDir: string, sessionIdentity: DirectoryIdentity, lockPath: string, expectedLockIdentity: DirectoryIdentity): void {
+  try {
+    assertDirectoryIdentity(sessionDir, sessionIdentity)
+    const lockIdentity = directoryIdentity(lockPath)
+    if (lockIdentity.dev !== expectedLockIdentity.dev || lockIdentity.ino !== expectedLockIdentity.ino) {
+      throw new Error(`UI session mutation lock identity changed at ${lockPath}`)
+    }
+    assertDirectoryIdentity(sessionDir, sessionIdentity)
+    rmdirSync(lockPath)
+  } catch (error) {
+    if (isNotFoundError(error)) return
+    throw error
+  }
 }
 function existingEntry(path: string): ReturnType<typeof lstatSync> | undefined {
   try { return lstatSync(path) } catch (error) { if (isNotFoundError(error)) return undefined; throw error }

@@ -58,7 +58,7 @@ export interface UiChildHandle {
 }
 
 export interface UiSupervisorDependencies {
-  prepareRuntime(opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string; signal?: AbortSignal }): Promise<UiRuntimePlan>
+  prepareRuntime(opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string; signal?: AbortSignal; ownedSession?: OwnedUiDirectory }): Promise<UiRuntimePlan>
   spawnChild(plan: UiRuntimePlan): UiChildHandle
   stopChildTree(handle: UiChildHandle): Promise<void>
   openLog(sessionDir: string, maxBytes: number): UiDiagnosticLog
@@ -111,6 +111,7 @@ export async function runUiSupervisor(
   let child: UiChildHandle | undefined
   let exitSettled = false
   let stopIssued = false
+  let treeCleanupConfirmed = false
   let stdoutTail = ''
   let done = false
   let outputFailure: Promise<never> | undefined
@@ -132,6 +133,7 @@ export async function runUiSupervisor(
       target: request.target,
       sessionId: request.sessionId,
       signal: preparationController.signal,
+      ownedSession,
     }).then(value => {
       preparationSettled = true
       return value
@@ -158,6 +160,8 @@ export async function runUiSupervisor(
         sessionDir,
         request,
         ownedSession,
+        treeCleanupConfirmed: () => treeCleanupConfirmed,
+        markTreeCleanupConfirmed: () => { treeCleanupConfirmed = true },
         exitSettled: () => true,
         stopIssued: () => false,
         issueStop: () => undefined,
@@ -169,6 +173,22 @@ export async function runUiSupervisor(
     if (prepared === undefined) throw new Error('runtime preparation did not return a plan')
     plan = prepared
     validatePlan(plan, sessionDir)
+    const settledControl = readOwnedControl(runtimeRoot, request.sessionId, ownedSession)
+    if (settledControl !== undefined) {
+      await handleControl(settledControl, {
+        deps,
+        runtimeRoot,
+        sessionDir,
+        request,
+        ownedSession,
+        treeCleanupConfirmed: () => treeCleanupConfirmed,
+        markTreeCleanupConfirmed: () => { treeCleanupConfirmed = true },
+        exitSettled: () => true,
+        stopIssued: () => false,
+        issueStop: () => undefined,
+      })
+      return
+    }
     ownedSession.assertCurrent()
     diagnosticLog = deps.openLog(sessionDir, deps.maxLogBytes)
     ownedSession.assertCurrent()
@@ -207,6 +227,8 @@ export async function runUiSupervisor(
             child: child!,
             diagnosticLog: diagnosticLog!,
             ownedSession,
+            treeCleanupConfirmed: () => treeCleanupConfirmed,
+            markTreeCleanupConfirmed: () => { treeCleanupConfirmed = true },
             deps,
             stopIssued: () => stopIssued,
             issueStop: () => { stopIssued = true },
@@ -220,17 +242,29 @@ export async function runUiSupervisor(
     child.stdout.on('data', (chunk: unknown) => onOutput('stdout', chunk))
     child.stderr.on('data', (chunk: unknown) => onOutput('stderr', chunk))
 
-    const exitPromise = Promise.resolve(child.exited).then(exit => {
+    const exitPromise = Promise.resolve(child.exited).then(async exit => {
       exitSettled = true
+      if (!treeCleanupConfirmed && !stopIssued) {
+        stopIssued = true
+        try {
+          await deps.stopChildTree(child!)
+          await child!.exited
+          treeCleanupConfirmed = true
+        } catch (cleanupError) {
+          markCrashed(runtimeRoot, request.sessionId, `DSH child tree cleanup failed after leader exit: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`, deps, ownedSession, 'fail', true)
+          throw cleanupError
+        }
+      }
       if (done) return
       const state = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
       if (state.state === 'starting' || state.state === 'ready') {
-        markCrashed(runtimeRoot, request.sessionId, `DSH child exited before supervisor cleanup (code ${exit.code ?? 'null'}, signal ${exit.signal ?? 'none'})`, deps, ownedSession)
+        markCrashed(runtimeRoot, request.sessionId, `DSH child exited before supervisor cleanup (code ${exit.code ?? 'null'}, signal ${exit.signal ?? 'none'})`, deps, ownedSession, undefined, true)
       }
     }).catch(error => {
       exitSettled = true
       if (done) return
       const state = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
+      if (state.cleanup === 'fail') return
       if (state.state === 'starting' || state.state === 'ready') markCrashed(runtimeRoot, request.sessionId, `DSH child exit could not be observed: ${error instanceof Error ? error.message : String(error)}`, deps, ownedSession)
     })
 
@@ -250,6 +284,8 @@ export async function runUiSupervisor(
         sessionDir,
         request,
         ownedSession,
+        treeCleanupConfirmed: () => treeCleanupConfirmed,
+        markTreeCleanupConfirmed: () => { treeCleanupConfirmed = true },
         child,
         diagnosticLog: diagnosticLog!,
         exitSettled: () => exitSettled,
@@ -263,11 +299,12 @@ export async function runUiSupervisor(
     done = true
     const message = error instanceof Error ? error.message : String(error)
     try { diagnosticLog?.close() } catch { /* preserve the primary lifecycle error */ }
-    if (child !== undefined && !exitSettled && !stopIssued) {
+    if (child !== undefined && !treeCleanupConfirmed && !stopIssued) {
       stopIssued = true
       try {
         await deps.stopChildTree(child)
         await child.exited
+        treeCleanupConfirmed = true
         exitSettled = true
       } catch {
         // Preserve the original setup/publication failure as the primary error.
@@ -302,6 +339,8 @@ interface ControlContext {
   sessionDir: string
   request: UiSupervisorRequestV1
   ownedSession: OwnedUiDirectory
+  treeCleanupConfirmed: () => boolean
+  markTreeCleanupConfirmed: () => void
   child?: UiChildHandle
   diagnosticLog?: UiDiagnosticLog
   exitSettled: () => boolean
@@ -316,6 +355,8 @@ interface DiagnosticFailureContext {
   child: UiChildHandle
   diagnosticLog: UiDiagnosticLog
   ownedSession: OwnedUiDirectory
+  treeCleanupConfirmed: () => boolean
+  markTreeCleanupConfirmed: () => void
   deps: UiSupervisorDependencies
   stopIssued: () => boolean
   issueStop: () => void
@@ -333,6 +374,7 @@ async function failDiagnosticOutput(context: DiagnosticFailureContext, error: un
       await context.deps.stopChildTree(context.child)
       await context.child.exited
       terminationConfirmed = true
+      context.markTreeCleanupConfirmed()
     }
   } catch (stopError) {
     cleanupError ??= stopError
@@ -379,7 +421,9 @@ async function handleControl(control: UiControlV1, context: ControlContext): Pro
       context.issueStop()
       await deps.stopChildTree(child)
       await child.exited
+      context.markTreeCleanupConfirmed()
     }
+    if (child !== undefined && !context.treeCleanupConfirmed()) throw new Error('owned child tree cleanup was not confirmed')
     cleanupSessionDescendants(sessionDir, ownedSession)
     const cleaned = readOwnedSession(runtimeRoot, request.sessionId, ownedSession)
     const compact = compactState(cleaned, true)
@@ -453,6 +497,8 @@ async function waitForRecoveryControl(opts: {
         sessionDir: opts.sessionDir,
         request: opts.request,
         ownedSession: opts.ownedSession,
+        treeCleanupConfirmed: () => true,
+        markTreeCleanupConfirmed: () => undefined,
         exitSettled: () => true,
         stopIssued: () => false,
         issueStop: () => undefined,
@@ -476,10 +522,14 @@ function markReady(runtimeRoot: string, sessionId: string, url: string, childPid
   }, deps, ownedSession)
 }
 
-function markCrashed(runtimeRoot: string, sessionId: string, error: string, deps: UiSupervisorDependencies, ownedSession: OwnedUiDirectory, cleanup?: 'fail'): void {
+function markCrashed(runtimeRoot: string, sessionId: string, error: string, deps: UiSupervisorDependencies, ownedSession: OwnedUiDirectory, cleanup?: 'fail', preserveSupervisor = false): void {
   const state = readOwnedSession(runtimeRoot, sessionId, ownedSession)
   if (state.state !== 'starting' && state.state !== 'ready' && state.state !== 'crashed') return
   const crashedBase = compactState(state, cleanup === undefined)
+  if (preserveSupervisor && cleanup === undefined) {
+    crashedBase.supervisorPid = process.pid
+    delete crashedBase.childPid
+  }
   writeState(runtimeRoot, {
     ...crashedBase,
     state: 'crashed',

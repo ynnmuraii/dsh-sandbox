@@ -65,7 +65,10 @@ export function defaultProcessTreeDependencies(): ProcessTreeDependencies {
     },
     waitForExit: waitForExitWithin,
     treeAlive: pidOrGroup => {
-      try { process.kill(pidOrGroup, 0); return true } catch { return false }
+      try { process.kill(pidOrGroup, 0); return true } catch (error) {
+        if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ESRCH') return false
+        throw error
+      }
     },
     termGraceMs: 5_000,
     killGraceMs: 5_000,

@@ -12,6 +12,7 @@ import { ROOT_PATHS, rootPath } from './context.js'
 import { loadCompatibilityFromFile, type Compatibility } from './schemas.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
 import { pnpmAsync } from './proc.js'
+import type { OwnedUiDirectory } from './ui-owned-directory.js'
 
 export interface UiRuntimePlan {
   sessionDir: string
@@ -34,12 +35,17 @@ export interface UiRuntimeDependencies {
   loadCompatibility(path: string): Compatibility
   resolveLauncher(root: string, target: 'next' | 'master', compatibility: Compatibility, signal?: AbortSignal): Promise<{ cmd: string; args: string[] }>
   installNextProfile(profileDir: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): void | Promise<void>
+  beforeRuntimeMutation?(operation: UiRuntimeMutation, path: string): void
 }
+
+export type UiRuntimeMutation =
+  | 'session-dir' | 'runtime-home' | 'profiles-dir' | 'profile-dir' | 'overlay-dir'
+  | 'overlay-write' | 'manifest-write' | 'workspace-write' | 'launcher-resolve' | 'profile-install'
 
 const SESSION_ID_PATTERN = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
 
 export async function prepareUiRuntime(
-  opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string; signal?: AbortSignal },
+  opts: { root: string; plugin: UiRuntimePlugin; target: 'next' | 'master'; sessionId: string; signal?: AbortSignal; ownedSession?: OwnedUiDirectory },
   deps: UiRuntimeDependencies = defaultDependencies(),
 ): Promise<UiRuntimePlan> {
   validateOptions(opts)
@@ -69,11 +75,11 @@ export async function prepareUiRuntime(
   assertNoSymlinkComponents(root, 'forge root')
   assertNoSymlinkComponents(sessionDir, 'UI runtime session directory')
 
-  mkdirChecked(sessionDir, 'UI runtime session directory')
-  mkdirChecked(runtimeHome, 'UI runtime home')
-  mkdirChecked(join(runtimeHome, 'profiles'), 'UI runtime profiles directory')
-  mkdirChecked(profileDir, 'UI runtime profile directory')
-  mkdirChecked(overlayDir, 'UI runtime overlay directory')
+  runtimeMutation(opts, deps, 'session-dir', sessionDir, () => mkdirChecked(sessionDir, 'UI runtime session directory'))
+  runtimeMutation(opts, deps, 'runtime-home', runtimeHome, () => mkdirChecked(runtimeHome, 'UI runtime home'))
+  runtimeMutation(opts, deps, 'profiles-dir', join(runtimeHome, 'profiles'), () => mkdirChecked(join(runtimeHome, 'profiles'), 'UI runtime profiles directory'))
+  runtimeMutation(opts, deps, 'profile-dir', profileDir, () => mkdirChecked(profileDir, 'UI runtime profile directory'))
+  runtimeMutation(opts, deps, 'overlay-dir', overlayDir, () => mkdirChecked(overlayDir, 'UI runtime overlay directory'))
   assertNoSymlinkComponents(sourcePath, 'plugin source path')
 
   const overlay = buildDevOverlay(
@@ -81,10 +87,14 @@ export async function prepareUiRuntime(
     pathToFileURL(sourceEntry).href,
     sourceRoot,
   )
-  writeFileSync(overlayPath, overlay, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+  runtimeMutation(opts, deps, 'overlay-write', overlayPath, () => writeFileSync(overlayPath, overlay, { encoding: 'utf8', flag: 'wx', mode: 0o600 }))
 
   signal.throwIfAborted()
+  opts.ownedSession?.assertCurrent()
+  deps.beforeRuntimeMutation?.('launcher-resolve', sessionDir)
+  opts.ownedSession?.assertCurrent()
   const launcher = await deps.resolveLauncher(root, opts.target, compatibility, signal)
+  opts.ownedSession?.assertCurrent()
   if (!launcher || typeof launcher.cmd !== 'string' || !Array.isArray(launcher.args)) throw new Error('launcher resolver returned an invalid command')
   const upstream = rootPath(root, ROOT_PATHS.upstream)
   const dsh = opts.target === 'next'
@@ -94,8 +104,8 @@ export async function prepareUiRuntime(
     name: `@dsh-lab/profile-${profileName}`,
     bundles: DEV_WEB_BUNDLES,
   }, { dsh })
-  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(manifest, null, 2) + '\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 })
-  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(targetPin.allowBuilds ?? {}), { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+  runtimeMutation(opts, deps, 'manifest-write', join(profileDir, 'package.json'), () => writeFileSync(join(profileDir, 'package.json'), JSON.stringify(manifest, null, 2) + '\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 }))
+  runtimeMutation(opts, deps, 'workspace-write', join(profileDir, 'pnpm-workspace.yaml'), () => writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(targetPin.allowBuilds ?? {}), { encoding: 'utf8', flag: 'wx', mode: 0o600 }))
 
   const plan: UiRuntimePlan = {
     sessionDir,
@@ -114,8 +124,28 @@ export async function prepareUiRuntime(
     ],
     cwd: profileDir,
   }
-  if (opts.target === 'next') await deps.installNextProfile(profileDir, buildUiRuntimeEnvironment(plan), signal)
+  if (opts.target === 'next') {
+    opts.ownedSession?.assertCurrent()
+    deps.beforeRuntimeMutation?.('profile-install', profileDir)
+    opts.ownedSession?.assertCurrent()
+    await deps.installNextProfile(profileDir, buildUiRuntimeEnvironment(plan), signal)
+    opts.ownedSession?.assertCurrent()
+  }
   return plan
+}
+
+function runtimeMutation(
+  opts: { ownedSession?: OwnedUiDirectory },
+  deps: UiRuntimeDependencies,
+  operation: UiRuntimeMutation,
+  path: string,
+  mutation: () => void,
+): void {
+  opts.ownedSession?.assertCurrent()
+  deps.beforeRuntimeMutation?.(operation, path)
+  opts.ownedSession?.assertCurrent()
+  mutation()
+  opts.ownedSession?.assertCurrent()
 }
 
 export function buildUiRuntimeEnvironment(plan: UiRuntimePlan, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
