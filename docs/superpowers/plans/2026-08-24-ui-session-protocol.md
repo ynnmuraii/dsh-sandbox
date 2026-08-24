@@ -532,6 +532,14 @@ export interface UiServiceDependencies {
   publishResult(opts: { uiRunsRoot: string; result: UiResultV1 }): string
 }
 
+export interface UiSupervisorSpawnPlan {
+  command: string
+  args: [string, string]
+  options: { detached: true; shell: false; stdio: 'ignore'; windowsHide: true }
+}
+
+export function buildUiSupervisorSpawn(requestPath: string): UiSupervisorSpawnPlan
+
 export async function startUiSession(opts: StartUiOptions, deps?: UiServiceDependencies): Promise<UiSessionViewV1>
 export function getUiSessionStatus(
   opts: { root: string; sessionId: string },
@@ -568,6 +576,7 @@ Commit only the test with message `test: define public UI session service`.
 **Files:**
 - Create: `tooling/src/ui.ts`
 - Modify: `tooling/src/ui-session.ts`
+- Modify: `tooling/src/status.ts` (export the existing canonical context digest helper for shared use)
 - Test: `tooling/src/ui.spec.ts`
 
 **Interfaces:**
