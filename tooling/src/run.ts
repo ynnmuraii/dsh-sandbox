@@ -18,6 +18,7 @@ import { assertRuntimePluginIdentity } from './runtime-identity.js'
 export interface ProfileSpec {
   name: string
   bundles: string[]
+  dependencies?: Record<string, string>
 }
 
 export interface DevOptions {
@@ -116,6 +117,11 @@ export function buildProfilePackageJson(
         bundles: spec.bundles,
       },
     },
+  }
+  if (spec.dependencies) {
+    for (const [dep, version] of Object.entries(spec.dependencies)) {
+      manifest.dependencies[dep] = version
+    }
   }
   if (pin.dsh !== undefined) {
     manifest.dependencies['@deepseek-ai/dsh'] = pin.dsh

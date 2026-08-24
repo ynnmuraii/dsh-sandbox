@@ -665,17 +665,29 @@ function noFollowFlag(): number { return (constants as typeof constants & { O_NO
 function validatePlan(plan: UiRuntimePlan, sessionDir: string): void {
   if (!plan || typeof plan !== 'object') throw new Error('runtime preparation returned an invalid plan')
   if (resolve(plan.sessionDir) !== resolve(sessionDir)) throw new Error('runtime plan session directory does not match request')
-  for (const [key, value] of Object.entries({ runtimeHome: plan.runtimeHome, profileDir: plan.profileDir, overlayPath: plan.overlayPath, cwd: plan.cwd })) {
+  for (const [key, value] of Object.entries({ runtimeHome: plan.runtimeHome, profileDir: plan.profileDir, cwd: plan.cwd } as Record<string, unknown>)) {
     if (typeof value !== 'string' || !value) throw new Error(`runtime plan ${key} is invalid`)
-    assertContained(sessionDir, value, `runtime plan ${key}`)
+    assertContained(sessionDir, value as string, `runtime plan ${key}`)
+  }
+  // overlayPath is optional in bundle-mode (no --patch); validate only when present.
+  if (plan.overlayPath !== undefined) {
+    if (typeof plan.overlayPath !== 'string' || !plan.overlayPath) throw new Error('runtime plan overlayPath is invalid')
+    assertContained(sessionDir, plan.overlayPath, 'runtime plan overlayPath')
   }
   if (!plan.launcher || typeof plan.launcher.cmd !== 'string' || !plan.launcher.cmd || !Array.isArray(plan.launcher.args)) throw new Error('runtime plan launcher is invalid')
   if (!Array.isArray(plan.argv) || plan.argv.some(arg => typeof arg !== 'string')) throw new Error('runtime plan argv is invalid')
   const retained: unknown = plan.retained
   if (!retained || typeof retained !== 'object' || Array.isArray(retained)) throw new Error('runtime plan retained is invalid')
   const retainedRecord = retained as Record<string, unknown>
-  for (const key of ['runtimeHome', 'profileDir', 'overlayDir', 'overlayFile'] as const) {
+  for (const key of ['runtimeHome', 'profileDir'] as const) {
     const value: unknown = retainedRecord[key]
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`runtime plan retained.${key} is invalid`)
+    const entry = value as Record<string, unknown>
+    if (typeof entry.dev !== 'number' || typeof entry.ino !== 'number') throw new Error(`runtime plan retained.${key} is invalid`)
+  }
+  for (const key of ['overlayDir', 'overlayFile'] as const) {
+    const value: unknown = retainedRecord[key]
+    if (value === undefined) continue
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`runtime plan retained.${key} is invalid`)
     const entry = value as Record<string, unknown>
     if (typeof entry.dev !== 'number' || typeof entry.ino !== 'number') throw new Error(`runtime plan retained.${key} is invalid`)

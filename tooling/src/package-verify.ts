@@ -1,8 +1,9 @@
 import { dump as dumpYaml, load as loadYaml } from 'js-yaml'
 import { lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve, win32 } from 'node:path'
+import { clientBundleRequirement, verifyClientBundleInTarball } from './client-smoke.js'
+import type { ClientBundleRequirement } from './client-smoke.js'
 import { pnpm, type RunOpts } from './proc.js'
-import type { RunStepResult } from './evidence.js'
 
 export interface PackageVerifyResult {
   tarball: string
@@ -13,7 +14,7 @@ export interface PackageVerifyRunner {
   pnpm(args: string[], opts: RunOpts & { cwd: string }): string | Buffer
 }
 
-const STEP_IDS = ['install', 'typecheck', 'test', 'build', 'pack', 'pack-smoke'] as const
+const STEP_IDS = ['install', 'typecheck', 'test', 'build', 'pack', 'client-smoke', 'pack-smoke'] as const
 type StepId = (typeof STEP_IDS)[number]
 
 interface WorkspacePolicy {
@@ -77,6 +78,14 @@ export function verifyPackageInWorkspace(opts: {
       // during validation and using a different one during pack-smoke.
       tarball = resolvePackedTarball(workspacePath, parsePackOutput(output))
     })
+    // Client-smoke is the lab-owned browser-face gate on the packed tarball —
+    // not a pnpm invocation. A manifest without dsh.client leaves the step
+    // skipped; a declared bundle must be present and registrable.
+    const clientManifest = JSON.parse(readFileSync(resolve(workspacePath, 'package.json'), 'utf8')) as unknown
+    const clientRequirement = clientBundleRequirement(clientManifest)
+    if (clientRequirement.required) {
+      runStep(steps, 'client-smoke', () => verifyClientBundleInTarball(tarball, clientRequirement))
+    }
     runStep(steps, 'pack-smoke', () => {
       runner.pnpm(['pack-smoke', tarball], { cwd: workspacePath })
     })

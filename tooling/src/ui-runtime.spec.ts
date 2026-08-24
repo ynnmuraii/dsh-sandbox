@@ -419,4 +419,108 @@ describe('prepareUiRuntime', () => {
       expect(existsSync(join(current.root, '.lab'))).toBe(false)
     },
   )
+
+  it('boots a dual-face plugin in bundle-mode without an overlay and with a file: dependency', async () => {
+    const current = fixture()
+    // Dual-face manifest: dsh.client web + exports ./client. The bundle-mode
+    // branch must be taken, injecting a file: dependency and extending
+    // DEV_WEB_BUNDLES, while skipping overlay materialization and --patch.
+    writeFileSync(join(current.plugin.sourcePath, 'package.json'), JSON.stringify({
+      name: '@fixture/example',
+      exports: { '.': './lib/index.js', './client': './lib/client.js' },
+      dsh: { client: { platform: 'web' } },
+    }))
+    mkdirSync(join(current.plugin.sourcePath, 'lib'), { recursive: true })
+    writeFileSync(join(current.plugin.sourcePath, 'lib', 'client.js'), 'window.__ModuleLoader__.load({ id: "@fixture/example", factory() {} })\n')
+    writeFileSync(join(current.plugin.sourcePath, 'lib', 'index.js'), 'export const node = true\n')
+    const { deps, installNextProfile } = dependencies(current.compatibility)
+
+    const plan = await prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+    }, deps)
+
+    // No overlay in bundle-mode — the plugin's own patch contributes the loader row.
+    expect(plan.overlayPath).toBeUndefined()
+    expect(plan.retained.overlayDir).toBeUndefined()
+    expect(plan.retained.overlayFile).toBeUndefined()
+    const overlayFile = join(current.root, '.lab', 'runtime', 'ui-sessions', SESSION, 'overlay', 'cordis.patch.yml')
+    expect(existsSync(overlayFile)).toBe(false)
+    expect(existsSync(join(current.root, '.lab', 'runtime', 'ui-sessions', SESSION, 'overlay'))).toBe(false)
+    expect(plan.argv).not.toContain('--patch')
+    // Bundles must be base + web-app + the plugin package itself.
+    const manifest = JSON.parse(readFileSync(join(plan.profileDir, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+      dsh: { profile: { bundles: string[] } }
+    }
+    expect(manifest.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@fixture/example'])
+    const expectedDep = `file:${relative(plan.profileDir, current.plugin.sourcePath).replaceAll('\\', '/')}`
+    expect(manifest.dependencies['@fixture/example']).toBe(expectedDep)
+    expect(manifest.dependencies['@deepseek-ai/dsh']).toBe(NEXT)
+    expect(installNextProfile).toHaveBeenCalledTimes(1)
+  })
+
+  it('throws a built-plugin instruction when the dual-face lib/client.js is missing', async () => {
+    const current = fixture()
+    writeFileSync(join(current.plugin.sourcePath, 'package.json'), JSON.stringify({
+      name: '@fixture/example',
+      exports: { '.': './lib/index.js', './client': './lib/client.js' },
+      dsh: { client: { platform: 'web' } },
+    }))
+    mkdirSync(join(current.plugin.sourcePath, 'lib'), { recursive: true })
+    writeFileSync(join(current.plugin.sourcePath, 'lib', 'index.js'), 'export const node = true\n')
+    // Intentionally leave lib/client.js absent to trigger the built-plugin guard.
+    const { deps } = dependencies(current.compatibility)
+
+    await expect(prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+    }, deps)).rejects.toThrow(/bundle-mode UI session requires a built plugin: run pnpm build in .* first \(missing .*lib[\\/]client\.js\)/i)
+    expect(existsSync(join(current.root, '.lab'))).toBe(false)
+  })
+
+  it('keeps plain plugins on the source overlay path (regression)', async () => {
+    const current = fixture()
+    // Plain plugin — no dsh.client — must remain byte-identical to the
+    // historical source-mode behavior: overlay written, --patch present.
+    const { deps } = dependencies(current.compatibility)
+
+    const plan = await prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+    }, deps)
+
+    expect(plan.overlayPath).toBe(join(current.root, '.lab', 'runtime', 'ui-sessions', SESSION, 'overlay', 'cordis.patch.yml'))
+    expect(existsSync(plan.overlayPath!)).toBe(true)
+    expect(readFileSync(plan.overlayPath!, 'utf8')).toContain(current.plugin.sourcePath.replaceAll('\\', '/'))
+    expect(plan.argv).toContain('--patch')
+    expect(plan.argv[plan.argv.indexOf('--patch') + 1]).toBe(plan.overlayPath)
+    expect(plan.retained.overlayDir).toEqual(identityOf(join(current.root, '.lab', 'runtime', 'ui-sessions', SESSION, 'overlay')))
+    expect(plan.retained.overlayFile).toEqual(identityOf(plan.overlayPath!))
+  })
+
+  it('fails loud before any mutation when dsh.client is malformed', async () => {
+    const current = fixture()
+    writeFileSync(join(current.plugin.sourcePath, 'package.json'), JSON.stringify({
+      name: '@fixture/example',
+      exports: { './client': './lib/client.js' },
+      dsh: { client: 'not-an-object' },
+    }))
+    const { deps } = dependencies(current.compatibility)
+
+    await expect(prepareUiRuntime({
+      root: current.root,
+      plugin: current.plugin,
+      target: 'next',
+      sessionId: SESSION,
+    }, deps)).rejects.toThrow(/dsh\.client.*object/i)
+    // Loud failure must happen before any filesystem mutation.
+    expect(existsSync(join(current.root, '.lab'))).toBe(false)
+  })
 })

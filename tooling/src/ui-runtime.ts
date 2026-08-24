@@ -12,20 +12,20 @@ import { ROOT_PATHS, rootPath } from './context.js'
 import { loadCompatibilityFromFile, type Compatibility } from './schemas.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
 import { pnpmAsync } from './proc.js'
+import { clientBundleRequirement } from './client-smoke.js'
 import type { OwnedUiDirectory, UiDirectoryIdentity } from './ui-owned-directory.js'
-
 export interface UiRuntimeRetainedIdentities {
   runtimeHome: UiDirectoryIdentity
   profileDir: UiDirectoryIdentity
-  overlayDir: UiDirectoryIdentity
-  overlayFile: UiDirectoryIdentity
+  overlayDir?: UiDirectoryIdentity
+  overlayFile?: UiDirectoryIdentity
 }
 export interface UiRuntimePlan {
   sessionDir: string
   runtimeHome: string
   profileName: string
   profileDir: string
-  overlayPath: string
+  overlayPath?: string
   launcher: { cmd: string; args: string[] }
   argv: string[]
   cwd: string
@@ -65,6 +65,34 @@ export async function prepareUiRuntime(
   if (!existsSync(sourceEntry) || !regularFile(sourceEntry)) throw new Error(`plugin source entry not found: ${sourceEntry}`)
   if (!existsSync(sourceRoot) || !directory(sourceRoot)) throw new Error(`plugin source root not found: ${sourceRoot}`)
 
+  // Dual-face detection reuses the verify pipeline's client-smoke helper, so
+  // malformed dsh.client shapes fail here before any filesystem mutation. A
+  // plugin without package.json simply has no browser face (source mode); a
+  // present-but-unparseable manifest is a loud error.
+  let rawManifest: unknown = {}
+  if (regularFile(join(sourcePath, 'package.json'))) {
+    try {
+      rawManifest = JSON.parse(readFileSync(join(sourcePath, 'package.json'), 'utf8'))
+    } catch (cause) {
+      throw new Error(`failed to parse plugin package.json at ${join(sourcePath, 'package.json')}: ${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }
+  // clientBundleRequirement throws on malformed dsh.client — surfaced before
+  // any mutation so callers get a loud, actionable error.
+  const requirement = clientBundleRequirement(rawManifest)
+  const bundleMode = requirement.required
+  const bundlePackageName = requirement.packageName || opts.plugin.packageName
+
+  if (bundleMode) {
+    // Bundle-mode UI sessions boot the built artifacts through a file: dependency
+    // and the web bundle set. Both entry points must be regular non-symlink
+    // files; the instructive message points the user at `pnpm build`.
+    const libClient = join(sourcePath, 'lib', 'client.js')
+    const libIndex = join(sourcePath, 'lib', 'index.js')
+    if (!regularFile(libClient)) throw new Error(`bundle-mode UI session requires a built plugin: run pnpm build in ${sourcePath} first (missing ${libClient})`)
+    if (!regularFile(libIndex)) throw new Error(`bundle-mode UI session requires a built plugin: run pnpm build in ${sourcePath} first (missing ${libIndex})`)
+  }
+
   const compatibilityPath = rootPath(root, ROOT_PATHS.compatibility)
   const compatibility = deps.loadCompatibility(compatibilityPath)
   const targetPin = compatibility.targets[opts.target]
@@ -76,8 +104,8 @@ export async function prepareUiRuntime(
   const runtimeHome = join(sessionDir, 'home')
   const profileName = `${opts.plugin.runtimeName}-${opts.target}-ui-${opts.sessionId}`
   const profileDir = join(runtimeHome, 'profiles', profileName)
-  const overlayDir = join(sessionDir, 'overlay')
-  const overlayPath = join(overlayDir, 'cordis.patch.yml')
+  const overlayDir = bundleMode ? undefined : join(sessionDir, 'overlay')
+  const overlayPath = bundleMode ? undefined : join(sessionDir, 'overlay', 'cordis.patch.yml')
   assertContained(root, sessionDir, 'UI runtime session directory')
   assertNoSymlinkComponents(root, 'forge root')
   assertNoSymlinkComponents(sessionDir, 'UI runtime session directory')
@@ -86,15 +114,19 @@ export async function prepareUiRuntime(
   runtimeMutation(opts, deps, 'runtime-home', runtimeHome, () => mkdirChecked(runtimeHome, 'UI runtime home'))
   runtimeMutation(opts, deps, 'profiles-dir', join(runtimeHome, 'profiles'), () => mkdirChecked(join(runtimeHome, 'profiles'), 'UI runtime profiles directory'))
   runtimeMutation(opts, deps, 'profile-dir', profileDir, () => mkdirChecked(profileDir, 'UI runtime profile directory'))
-  runtimeMutation(opts, deps, 'overlay-dir', overlayDir, () => mkdirChecked(overlayDir, 'UI runtime overlay directory'))
+  if (!bundleMode) {
+    runtimeMutation(opts, deps, 'overlay-dir', overlayDir!, () => mkdirChecked(overlayDir!, 'UI runtime overlay directory'))
+  }
   assertNoSymlinkComponents(sourcePath, 'plugin source path')
 
-  const overlay = buildDevOverlay(
-    opts.plugin.runtimeName,
-    pathToFileURL(sourceEntry).href,
-    sourceRoot,
-  )
-  runtimeMutation(opts, deps, 'overlay-write', overlayPath, () => writeFileSync(overlayPath, overlay, { encoding: 'utf8', flag: 'wx', mode: 0o600 }))
+  if (!bundleMode) {
+    const overlay = buildDevOverlay(
+      opts.plugin.runtimeName,
+      pathToFileURL(sourceEntry).href,
+      sourceRoot,
+    )
+    runtimeMutation(opts, deps, 'overlay-write', overlayPath!, () => writeFileSync(overlayPath!, overlay, { encoding: 'utf8', flag: 'wx', mode: 0o600 }))
+  }
 
   signal.throwIfAborted()
   opts.ownedSession?.assertCurrent()
@@ -107,34 +139,42 @@ export async function prepareUiRuntime(
   const dsh = opts.target === 'next'
     ? targetPin.dsh!
     : `file:${relative(profileDir, upstream).replace(/\\/g, '/')}`
-  const manifest = buildProfilePackageJson({
-    name: `@dsh-lab/profile-${profileName}`,
-    bundles: DEV_WEB_BUNDLES,
-  }, { dsh })
+  // Bundle-mode composes through a file: dependency and the web bundle set.
+  // The plugin's own dsh.bundle.patch cordis.patch.yml contributes its loader
+  // row — the plugin package name becomes entry.options.name, exactly what the
+  // upstream client module system resolves for the browser face. No overlay is
+  // written and no --patch is passed.
+  const manifest = bundleMode
+    ? buildProfilePackageJson({
+        name: `@dsh-lab/profile-${profileName}`,
+        bundles: [...DEV_WEB_BUNDLES, bundlePackageName],
+        dependencies: { [bundlePackageName]: `file:${relative(profileDir, sourcePath).replace(/\\/g, '/')}` },
+      }, { dsh })
+    : buildProfilePackageJson({
+        name: `@dsh-lab/profile-${profileName}`,
+        bundles: DEV_WEB_BUNDLES,
+      }, { dsh })
   runtimeMutation(opts, deps, 'manifest-write', join(profileDir, 'package.json'), () => writeFileSync(join(profileDir, 'package.json'), JSON.stringify(manifest, null, 2) + '\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 }))
   runtimeMutation(opts, deps, 'workspace-write', join(profileDir, 'pnpm-workspace.yaml'), () => writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(targetPin.allowBuilds ?? {}), { encoding: 'utf8', flag: 'wx', mode: 0o600 }))
 
+  const baseArgv = bundleMode
+    ? [...launcher.args, '--profile', profileName, '--host', '127.0.0.1', '--port', '0', '--no-open']
+    : [...launcher.args, '--profile', profileName, '--patch', overlayPath!, '--host', '127.0.0.1', '--port', '0', '--no-open']
   const plan: UiRuntimePlan & { retained: UiRuntimeRetainedIdentities } = {
     sessionDir,
     runtimeHome,
     profileName,
     profileDir,
-    overlayPath,
+    // Source-mode plans carry the overlay path (callers branch on its
+    // presence); bundle-mode plans boot the plugin's own bundle layer.
+    ...(overlayPath === undefined ? {} : { overlayPath }),
     launcher: { cmd: launcher.cmd, args: [...launcher.args] },
-    argv: [
-      ...launcher.args,
-      '--profile', profileName,
-      '--patch', overlayPath,
-      '--host', '127.0.0.1',
-      '--port', '0',
-      '--no-open',
-    ],
+    argv: baseArgv,
     cwd: profileDir,
     retained: {
       runtimeHome: identityOf(runtimeHome),
       profileDir: identityOf(profileDir),
-      overlayDir: identityOf(overlayDir),
-      overlayFile: identityOf(overlayPath),
+      ...(bundleMode ? {} : { overlayDir: identityOf(overlayDir!), overlayFile: identityOf(overlayPath!) }),
     },
   }
   if (opts.target === 'next') {
@@ -149,8 +189,7 @@ export async function prepareUiRuntime(
     plan.retained = {
       runtimeHome: identityOf(runtimeHome),
       profileDir: identityOf(profileDir),
-      overlayDir: identityOf(overlayDir),
-      overlayFile: identityOf(overlayPath),
+      ...(bundleMode ? {} : { overlayDir: identityOf(overlayDir!), overlayFile: identityOf(overlayPath!) }),
     }
   }
   return plan
@@ -159,14 +198,22 @@ export async function prepareUiRuntime(
 export function assertUiRuntimePlanRetained(plan: UiRuntimePlan): void {
   const rawRetained: unknown = plan.retained
   const retained = rawRetained as UiRuntimeRetainedIdentities | undefined
-  const entries: Array<[string, string, UiDirectoryIdentity | undefined]> = [
+  // In bundle-mode the overlay is absent — overlayPath and retained overlay
+  // identities are optional. Skip those checks when the plan has no overlay.
+  const entries: Array<[string, string | undefined, UiDirectoryIdentity | undefined]> = [
     ['runtimeHome', plan.runtimeHome, retained?.runtimeHome],
     ['profileDir', plan.profileDir, retained?.profileDir],
-    ['overlayDir', join(plan.sessionDir, 'overlay'), retained?.overlayDir],
+    ['overlayDir', plan.overlayPath ? join(plan.sessionDir, 'overlay') : undefined, retained?.overlayDir],
     ['overlayFile', plan.overlayPath, retained?.overlayFile],
   ]
   for (const [anchor, path, expected] of entries) {
-    if (!expected || typeof expected.dev !== 'number' || typeof expected.ino !== 'number') throw new Error(`runtime plan retained.${anchor} is invalid`)
+    if (path === undefined || expected === undefined) {
+      // Tolerate absent overlay in bundle-mode: undefined overlayFile means the
+      // overlay was never materialized and must not be asserted.
+      if (anchor === 'overlayDir' || anchor === 'overlayFile') continue
+      throw new Error(`runtime plan retained.${anchor} is invalid`)
+    }
+    if (typeof expected.dev !== 'number' || typeof expected.ino !== 'number') throw new Error(`runtime plan retained.${anchor} is invalid`)
     assertNoSymlinkComponents(path, `retained ${anchor}`)
     let current
     try {

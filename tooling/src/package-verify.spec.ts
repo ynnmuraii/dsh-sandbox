@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { load as loadYaml } from 'js-yaml'
 import {
   verifyPackageInWorkspace,
@@ -78,6 +79,43 @@ function runner(opts: {
     },
   }
 }
+// Hand-rolled ustar + gzip helper — duplicated in client-smoke.spec.ts by
+// design (specs must stay self-contained). Builds a minimal gzip-compressed
+// tar containing the given entries; pnpm pack entries are under `package/`.
+function buildTarGz(entries: Array<{ name: string; content: Buffer | string }>): Buffer {
+  const parts: Buffer[] = []
+  for (const entry of entries) {
+    const content = typeof entry.content === 'string' ? Buffer.from(entry.content, 'utf8') : entry.content
+    const header = createUstarHeader(entry.name, content.length)
+    parts.push(header)
+    parts.push(content)
+    const pad = (512 - (content.length % 512)) % 512
+    if (pad) parts.push(Buffer.alloc(pad))
+  }
+  parts.push(Buffer.alloc(1024))
+  return gzipSync(Buffer.concat(parts))
+}
+
+function createUstarHeader(name: string, size: number): Buffer {
+  const header = Buffer.alloc(512)
+  Buffer.from(name, 'utf8').copy(header, 0, 0, Math.min(Buffer.byteLength(name), 100))
+  header.write('000644\x00', 100, 'utf8')
+  header.write('0000000\x00', 108, 'utf8')
+  header.write('0000000\x00', 116, 'utf8')
+  const sizeOct = size.toString(8).padStart(11, '0') + '\0'
+  header.write(sizeOct, 124, 'utf8')
+  header.write('00000000000\x00', 136, 'utf8')
+  header.write('        ', 148, 'utf8')
+  header[156] = 0x30
+  header.write('ustar\x00', 257, 'utf8')
+  header.write('00', 263, 'utf8')
+  let sum = 0
+  for (let i = 0; i < 512; i++) sum += header[i]
+  const checksum = sum.toString(8).padStart(6, '0') + '\0 '
+  header.write(checksum, 148, 'utf8')
+  return header
+}
+
 
 describe('verifyPackageInWorkspace', () => {
   it('runs the exact staged pipeline in the temporary workspace', () => {
@@ -109,6 +147,7 @@ describe('verifyPackageInWorkspace', () => {
       ['test', 'pass'],
       ['build', 'pass'],
       ['pack', 'pass'],
+      ['client-smoke', 'skipped'],
       ['pack-smoke', 'pass'],
     ])
   })
@@ -378,6 +417,7 @@ describe('verifyPackageInWorkspace', () => {
       ['test', 'fail'],
       ['build', 'skipped'],
       ['pack', 'skipped'],
+      ['client-smoke', 'skipped'],
       ['pack-smoke', 'skipped'],
     ])
     expect(steps.every(step => Number.isFinite(step.durationMs) && step.durationMs >= 0)).toBe(true)
@@ -407,6 +447,92 @@ describe('verifyPackageInWorkspace', () => {
     expect(summary).not.toContain('user:secret')
     expect(summary).toContain('[REDACTED]')
   })
+  it('passes client-smoke when the tarball contains the declared client bundle', () => {
+    const workspacePath = workspace()
+    // Declare a web client bundle — this fixture now requires the client-smoke gate.
+    const manifestPath = join(workspacePath, 'package.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>
+    manifest.dsh = { client: { platform: 'web' } }
+    manifest.exports = { './client': './lib/client.js' }
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
+
+    const tarBytes = buildTarGz([
+      { name: 'package/lib/client.js', content: "window.__ModuleLoader__.load({id:'@fixture/demo',factory:()=>({})})" },
+    ])
+    const calls: Call[] = []
+    const capturingRunner: PackageVerifyRunner = {
+      pnpm(args, opts) {
+        calls.push({ args: [...args], cwd: opts.cwd })
+        if (args[0] !== 'pack') return ''
+        // Exercise the array-form pack output; verifyPackageInWorkspace must
+        // accept both pnpm 11 object and legacy array spellings.
+        const output = JSON.stringify([{ filename: 'fixture-demo-0.0.0.tgz' }])
+        writeFileSync(join(opts.cwd!, 'fixture-demo-0.0.0.tgz'), tarBytes)
+        return output
+      },
+    }
+
+    const result = verifyPackageInWorkspace({
+      workspacePath,
+      allowBuilds: {},
+      runner: capturingRunner,
+    })
+
+    // client-smoke is implicit — it does not add a pnpm invocation.
+    expect(calls.map(call => call.args)).toEqual([
+      ['install', '--frozen-lockfile'],
+      ['typecheck'],
+      ['test'],
+      ['build'],
+      ['pack', '--json'],
+      ['pack-smoke', resolve(workspacePath, 'fixture-demo-0.0.0.tgz')],
+    ])
+    expect(result.steps.map(step => [step.id, step.status])).toEqual([
+      ['install', 'pass'],
+      ['typecheck', 'pass'],
+      ['test', 'pass'],
+      ['build', 'pass'],
+      ['pack', 'pass'],
+      ['client-smoke', 'pass'],
+      ['pack-smoke', 'pass'],
+    ])
+  })
+
+  it('fails client-smoke when the declared client bundle is missing from the tarball', () => {
+    const workspacePath = workspace()
+    const manifestPath = join(workspacePath, 'package.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>
+    manifest.dsh = { client: { platform: 'web' } }
+    manifest.exports = { './client': './lib/client.js' }
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
+
+    // Tarball intentionally omits package/lib/client.js — only an unrelated file.
+    const tarBytes = buildTarGz([{ name: 'package/lib/other.js', content: 'console.log("other")' }])
+    const calls: Call[] = []
+    const capturingRunner: PackageVerifyRunner = {
+      pnpm(args, opts) {
+        calls.push({ args: [...args], cwd: opts.cwd })
+        if (args[0] !== 'pack') return ''
+        const output = JSON.stringify([{ filename: 'fixture-demo-0.0.0.tgz' }])
+        writeFileSync(join(opts.cwd!, 'fixture-demo-0.0.0.tgz'), tarBytes)
+        return output
+      },
+    }
+
+    let error: unknown
+    try {
+      verifyPackageInWorkspace({ workspacePath, allowBuilds: {}, runner: capturingRunner })
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(Error)
+    const steps = (error as Error & { steps: Array<{ id: string; status: string; summary?: string }> }).steps
+    expect(steps.find(step => step.id === 'client-smoke')?.status).toBe('fail')
+    expect(steps.find(step => step.id === 'client-smoke')?.summary).toMatch(/does not contain the declared client bundle/)
+    // pack-smoke must not run after a client-smoke failure.
+    expect(calls.map(call => call.args[0])).toEqual(['install', 'typecheck', 'test', 'build', 'pack'])
+    expect(steps.find(step => step.id === 'pack-smoke')?.status).toBe('skipped')
+  })
 })
 
 function expectStructuredPrerequisiteError(run: () => unknown): void {
@@ -418,7 +544,7 @@ function expectStructuredPrerequisiteError(run: () => unknown): void {
   }
   expect(error).toBeInstanceOf(Error)
   const steps = (error as Error & { steps?: Array<{ id: string; status: string }> }).steps
-  expect(steps).toHaveLength(6)
+  expect(steps).toHaveLength(7)
   expect(steps!.some(step => step.status === 'blocked' || step.status === 'fail')).toBe(true)
   expect(steps!.every(step => ['blocked', 'fail', 'skipped'].includes(step.status))).toBe(true)
 }
