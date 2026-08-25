@@ -11,7 +11,10 @@ coverage/
 # Local plugin repos are standalone nested git repos (tracking: local); the
 # meta-repo never tracks their internals. To promote a plugin to a submodule,
 # force-record the gitlink because this path is ignored:
-#   git submodule add -f <url> plugins/<name>   (see context/lab-author-guide.md)
 plugins/*
 debug.log
 
+# Local run evidence and session dumps (ephemeral, not for history)
+.lab/runs/
+.lab/ui-runs/
+omp-session-*.html
