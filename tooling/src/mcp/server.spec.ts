@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createMcpHandler } from '@modelcontextprotocol/server'
-import { buildServer } from './server.js'
+import { buildServer, doctorMeta } from './server.js'
 import { handleInspect } from './handlers.js'
 import { inspectPlugin } from '../inspect.js'
 import { resolvePluginRef } from '../plugin-ref.js'
@@ -404,10 +404,13 @@ describe('mcp authoring gating', () => {
     const dupResult = (dup.result ?? dup) as { isError?: boolean; content?: Array<{ text: string }> }
     expect(dupResult.isError).toBe(true)
     expect(dupResult.content?.[0]?.text).toContain('INVALID_NAME')
+    // Bad_Name is rejected at the zod schema boundary (.regex(NAME_RE)) before
+    // the handler runs — assert the input-validation shape, not INVALID_NAME.
     const bad = await rpc(handler, { jsonrpc: '2.0', id: 302, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'Bad_Name' } } })
     const badResult = (bad.result ?? bad) as { isError?: boolean; content?: Array<{ text: string }> }
     expect(badResult.isError).toBe(true)
-    expect(badResult.content?.[0]?.text).toContain('INVALID_NAME')
+    expect(badResult.content?.[0]?.text).toContain('Input validation error')
+    expect(existsSync(join(root, 'plugins', 'Bad_Name'))).toBe(false)
     await handler.close().catch(() => {})
   })
 
@@ -443,6 +446,190 @@ describe('mcp authoring gating', () => {
     const nongitResult = (nongit.result ?? nongit) as { isError?: boolean; content?: Array<{ text: string }> }
     expect(nongitResult.isError).toBe(true)
     expect(nongitResult.content?.[0]?.text).toContain('NOT_A_PLUGIN_REPO')
+    await handler.close().catch(() => {})
+  })
+})
+
+const MODERN_ENVELOPE = {
+  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+  'io.modelcontextprotocol/clientInfo': { name: 'meta-test-client', version: '0.0.0' },
+  'io.modelcontextprotocol/clientCapabilities': { tools: {} },
+}
+
+async function modernRpc(handler: { fetch: (req: Request) => Promise<Response> }, body: unknown, method: string, extraHeaders: Record<string, string> = {}) {
+  const req = new Request('http://localhost/', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-method': method, ...extraHeaders },
+    body: JSON.stringify(body),
+  })
+  const res = await handler.fetch(req)
+  const text = await res.text()
+  let jsonText = text
+  if (text.startsWith('event:')) {
+    const dataLine = text.split('\n').find(line => line.startsWith('data:'))
+    if (dataLine !== undefined) jsonText = dataLine.slice(5).trim()
+  }
+  return JSON.parse(jsonText)
+}
+
+describe('mcp dshLab metadata contract', () => {
+  it('inspect fail carries _meta.dshLab { exitCode: 1, ok: false }', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const pkg = JSON.parse(readFileSync(join(pluginPath, 'package.json'), 'utf8')) as { scripts: Record<string, string> }
+    delete pkg.scripts.test
+    writeFileSync(join(pluginPath, 'package.json'), JSON.stringify(pkg, null, 2) + '\n')
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 500, method: 'tools/call', params: { name: 'dsh_lab.inspect', arguments: { path: pluginPath } } })
+    const result = (json.result ?? json) as { structuredContent?: { ok: boolean }; isError?: boolean; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent!.ok).toBe(false)
+    expect(result._meta?.dshLab).toMatchObject({ exitCode: 1, ok: false })
+    await handler.close().catch(() => {})
+  })
+
+  it('status not-run carries _meta.dshLab exitCode 2', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 501, method: 'tools/call', params: { name: 'dsh_lab.status', arguments: { path: pluginPath } } })
+    const result = (json.result ?? json) as { _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result._meta?.dshLab).toMatchObject({ exitCode: 2 })
+    await handler.close().catch(() => {})
+  })
+
+  it('doctor meta helper: [] is hasError false/exit 0, error diag is true/nonzero', () => {
+    expect(doctorMeta([])).toEqual({ hasError: false, exitCode: 0 })
+    expect(doctorMeta([{ level: 'error', message: 'boom' }])).toEqual({ hasError: true, exitCode: 1 })
+    expect(doctorMeta([{ level: 'warn', message: 'x' }])).toEqual({ hasError: false, exitCode: 0 })
+  })
+
+  it('doctor result carries _meta.dshLab hasError true/exit 1 on a broken forge', async () => {
+    const { root } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 502, method: 'tools/call', params: { name: 'dsh_lab.doctor', arguments: {} } })
+    const result = (json.result ?? json) as { _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result._meta?.dshLab).toMatchObject({ hasError: true, exitCode: 1 })
+    await handler.close().catch(() => {})
+  })
+
+  it('verify pass carries _meta.dshLab { exitCode: 0, result: pass, runId }', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const deps: any = {
+      inspectPlugin: vi.fn(() => ({ schemaVersion: 1, plugin: { packageName: '@fixture/demo', sourcePath: pluginPath }, faces: { host: true, client: 'unknown' }, diagnostics: [], ok: true })),
+      verifyPackage: vi.fn(() => ({
+        tarball: join(root, 'dummy.tgz'),
+        steps: [
+          { id: 'install', status: 'pass' as const, durationMs: 1 },
+          { id: 'typecheck', status: 'pass' as const, durationMs: 1 },
+          { id: 'test', status: 'pass' as const, durationMs: 1 },
+          { id: 'build', status: 'pass' as const, durationMs: 1 },
+          { id: 'pack', status: 'pass' as const, durationMs: 1 },
+          { id: 'pack-smoke', status: 'pass' as const, durationMs: 1 },
+        ],
+      })),
+      verifyTarget: vi.fn(async () => {}),
+      createRunId: vi.fn(() => 'verify-meta-0001'),
+      now: vi.fn(() => new Date('2026-08-23T10:00:00.000Z')),
+    }
+    const handler = createMcpHandler(() => buildServer(root, { verifyDeps: deps }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 503, method: 'tools/call', params: { name: 'dsh_lab.verify', arguments: { path: pluginPath, target: 'next' } } })
+    const result = (json.result ?? json) as { _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result._meta?.dshLab).toMatchObject({ exitCode: 0, result: 'pass', runId: 'verify-meta-0001' })
+    await handler.close().catch(() => {})
+  })
+
+  it('verify fail carries _meta.dshLab { exitCode: 1, result: fail, runId }', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const codedSteps = [
+      { id: 'install', status: 'pass' as const, durationMs: 1 },
+      { id: 'build', status: 'fail' as const, durationMs: 2, summary: 'build failed', code: 'pnpm.build.fail' as const, detail: 'tail' },
+    ]
+    const failure = Object.assign(new Error('package failed'), { steps: codedSteps })
+    const deps: any = {
+      inspectPlugin: vi.fn(() => ({ schemaVersion: 1, plugin: { packageName: '@fixture/demo', sourcePath: pluginPath }, faces: { host: true, client: 'unknown' }, diagnostics: [], ok: true })),
+      verifyPackage: vi.fn(() => { throw failure }),
+      verifyTarget: vi.fn(async () => {}),
+      createRunId: vi.fn(() => 'verify-fail-0001'),
+      now: vi.fn(() => new Date('2026-08-23T10:00:01.000Z')),
+    }
+    const handler = createMcpHandler(() => buildServer(root, { verifyDeps: deps }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 504, method: 'tools/call', params: { name: 'dsh_lab.verify', arguments: { path: pluginPath, target: 'next' } } })
+    const result = (json.result ?? json) as { _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result._meta?.dshLab).toMatchObject({ exitCode: 1, result: 'fail', runId: 'verify-fail-0001' })
+    await handler.close().catch(() => {})
+  })
+
+  it('ui_finish stale carries _meta.dshLab { code: UI_STALE, exitCode: 2 }', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const state = uiReadyState(root, pluginPath, UI_SESSION)
+    createUiSession({ runtimeRoot: join(root, '.lab', 'runtime'), state: { ...state, staleReasons: ['plugin-changed'] } })
+    const handler = createMcpHandler(() => buildServer(root, { uiDeps: { now: () => UI_NOW, processAlive: () => true } }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 505, method: 'tools/call', params: { name: 'dsh_lab.ui_finish', arguments: { sessionId: UI_SESSION, verdict: 'pass', summary: 'x' } } })
+    const result = (json.result ?? json) as { isError?: boolean; content?: Array<{ text: string }>; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBe(true)
+    expect(result.content?.[0]?.text).toContain('UI_STALE')
+    expect(result._meta?.dshLab).toMatchObject({ code: 'UI_STALE', exitCode: 2 })
+    await handler.close().catch(() => {})
+  })
+
+  it('create_plugin duplicate name carries _meta.dshLab { code: INVALID_NAME, exitCode: 1 }', async () => {
+    const { root } = mkAuthoringRoot()
+    const handler = createMcpHandler(() => buildServer(root, { allowAuthoring: true }))
+    await rpc(handler, { jsonrpc: '2.0', id: 506, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'acme-meta' } } })
+    const dup = await rpc(handler, { jsonrpc: '2.0', id: 507, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'acme-meta' } } })
+    const result = (dup.result ?? dup) as { isError?: boolean; content?: Array<{ text: string }>; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBe(true)
+    expect(result.content?.[0]?.text).toContain('INVALID_NAME')
+    expect(result._meta?.dshLab).toMatchObject({ code: 'INVALID_NAME', exitCode: 1 })
+    await handler.close().catch(() => {})
+  })
+})
+
+describe('mcp schema-boundary validation', () => {
+  it('invalid create_plugin name is rejected at the schema boundary before mutation', async () => {
+    const { root } = mkAuthoringRoot()
+    const handler = createMcpHandler(() => buildServer(root, { allowAuthoring: true }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 600, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'Bad_Name' } } })
+    const result = (json.result ?? json) as { isError?: boolean; content?: Array<{ text: string }> }
+    expect(result.isError).toBe(true)
+    expect(result.content?.[0]?.text).toContain('Input validation error')
+    expect(result.content?.[0]?.text).toContain('catalog slug')
+    expect(existsSync(join(root, 'plugins', 'Bad_Name'))).toBe(false)
+    await handler.close().catch(() => {})
+  })
+
+  it('invalid ui sessionId is rejected at the schema boundary before any fs read', async () => {
+    const { root } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 601, method: 'tools/call', params: { name: 'dsh_lab.ui_status', arguments: { sessionId: 'not-a-valid-session' } } })
+    const result = (json.result ?? json) as { isError?: boolean; content?: Array<{ text: string }> }
+    expect(result.isError).toBe(true)
+    expect(result.content?.[0]?.text).toContain('Input validation error')
+    expect(existsSync(join(root, '.lab'))).toBe(false)
+    await handler.close().catch(() => {})
+  })
+})
+
+describe('mcp modern 2026-07-28 era', () => {
+  it('server/discover advertises the 2026-07-28 protocol revision with a modern envelope', async () => {
+    const { root } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await modernRpc(handler, { jsonrpc: '2.0', id: 700, method: 'server/discover', params: { _meta: MODERN_ENVELOPE } }, 'server/discover')
+    const result = (json.result ?? json) as { supportedVersions?: string[]; capabilities?: Record<string, unknown>; _meta?: Record<string, unknown> }
+    expect(result.supportedVersions).toContain('2026-07-28')
+    expect((result.supportedVersions ?? []).length).toBeGreaterThan(0)
+    expect(result.capabilities).toBeDefined()
+    expect(result._meta?.['io.modelcontextprotocol/serverInfo']).toMatchObject({ name: 'dsh-lab', version: '0.0.0' })
+    await handler.close().catch(() => {})
+  })
+
+  it('modern tools/call returns _meta.dshLab alongside serverInfo (not a legacy initialize)', async () => {
+    const { root } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await modernRpc(handler, { jsonrpc: '2.0', id: 701, method: 'tools/call', params: { _meta: MODERN_ENVELOPE, name: 'dsh_lab.list_plugins', arguments: {} } }, 'tools/call', { 'mcp-name': 'dsh_lab.list_plugins' })
+    const result = (json.result ?? json) as { isError?: boolean; _meta?: Record<string, unknown> }
+    expect(result.isError).toBeUndefined()
+    expect(result._meta?.['io.modelcontextprotocol/serverInfo']).toMatchObject({ name: 'dsh-lab', version: '0.0.0' })
+    expect((result._meta as { dshLab?: unknown } | undefined)?.dshLab).toMatchObject({ exitCode: 0 })
     await handler.close().catch(() => {})
   })
 })

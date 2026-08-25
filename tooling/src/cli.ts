@@ -568,7 +568,7 @@ function formatClaim(claim: StatusClaim): string {
   return `${claim.state.toUpperCase()}${detail}`
 }
 
-function statusExitCode(result: PluginStatus): number {
+export function statusExitCode(result: PluginStatus): number {
   const claims = [result.structure, result.bundle, ...Object.values(result.targets), result.ui]
   return claims.some(claim => claim.state !== 'pass' && claim.state !== 'not-applicable') ? 2 : 0
 }
