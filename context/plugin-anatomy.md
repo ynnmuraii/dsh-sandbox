@@ -31,6 +31,7 @@ The plugin repo owns implementation, bundle patch, manifest, tests, dev deps and
 - `files` includes only the artifacts needed at install.
 - `dsh.bundle.patch` points at the bundle patch.
 - Function plugin: named exports `name`, `inject`, `Config`, `apply`; no default export.
+- `tsconfig.json` is self-contained (no `extends` outside the repo) and the repo carries its own `vitest.config.ts` — `lab verify` snapshots sources into a temp workspace without the forge context.
 
 ## Dual-face package (host + browser)
 
