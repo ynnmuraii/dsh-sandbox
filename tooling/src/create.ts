@@ -43,7 +43,7 @@ export function loadPluginConfig(path: string): PluginConfig {
 
 // Namespace-friendly name check: lowercase letters, digits, hyphens, and
 // must start with a letter-or-digit.
-const NAME_RE = /^[a-z0-9][a-z0-9-]*$/
+export const NAME_RE = /^[a-z0-9][a-z0-9-]*$/
 
 // Names of template-local dirs that must never be copied into a new plugin.
 const SKIPPED: Record<string, true> = { node_modules: true, '.git': true }

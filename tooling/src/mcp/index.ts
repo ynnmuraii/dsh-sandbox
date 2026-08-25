@@ -1,8 +1,8 @@
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
-import { buildServer } from './server.js'
+import { buildServer, type McpServerOptions } from './server.js'
 
-export async function runMcp(root: string): Promise<number> {
-  const handle = serveStdio(() => buildServer(root))
+export async function runMcp(root: string, options?: McpServerOptions): Promise<number> {
+  const handle = serveStdio(() => buildServer(root, options))
   console.error('[dsh-lab] MCP server ready (stdio)')
   await new Promise<void>(resolve => {
     const done = () => resolve()

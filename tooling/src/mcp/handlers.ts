@@ -9,6 +9,8 @@ import { loadCatalogFromFile } from '../schemas.js'
 import { ROOT_PATHS, rootPath } from '../context.js'
 import { verifyPlugin, type VerifyPluginDependencies } from '../verify.js'
 import { inferVerifyTarget, UI_SESSION_ID_PATTERN, validateMetadataTargets } from '../cli.js'
+import { createPlugin, NAME_RE } from '../create.js'
+import { syncContext, type SyncedResult } from '../sync.js'
 import { abortUiSession, finishUiSession, getUiSessionStatus, startUiSession, UiProtocolOutcomeError, type UiServiceDependencies, type UiSessionViewV1 } from '../ui.js'
 
 export class ToolError extends Error {
@@ -194,6 +196,54 @@ export function handleGetEvidence(
   }
 
   return { verify, ui }
+}
+
+export async function handleCreatePlugin(
+  root: string,
+  args: { name: string },
+): Promise<{ sourcePath: string; catalogName: string }> {
+  if (!NAME_RE.test(args.name)) {
+    throw new ToolError(`invalid plugin name '${args.name}': use lowercase letters, digits, hyphens`, 'INVALID_NAME')
+  }
+  try {
+    const sourcePath = await createPlugin({ root, name: args.name })
+    return { sourcePath, catalogName: args.name }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (
+      lower.includes('already registered in the catalog') ||
+      lower.includes('target already exists and is non-empty') ||
+      lower.includes('invalid plugin name')
+    ) {
+      throw new ToolError(msg, 'INVALID_NAME')
+    }
+    throw new ToolError(msg, 'CREATE_FAILED')
+  }
+}
+
+export async function handleSyncContext(
+  root: string,
+  args: { plugin?: string; all?: boolean },
+): Promise<SyncedResult[]> {
+  const useAll = args.all === true
+  const hasPlugin = args.plugin !== undefined
+  if (useAll === hasPlugin) {
+    throw new ToolError("exactly one of 'plugin' or 'all: true' is required", 'INVALID_ARGS')
+  }
+  try {
+    return await syncContext({ root, names: hasPlugin ? [args.plugin!] : [], all: useAll })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (lower.includes('unknown plugin')) {
+      throw new ToolError(msg, 'UNKNOWN_PLUGIN')
+    }
+    if (lower.includes('missing or not a git repo')) {
+      throw new ToolError(msg, 'NOT_A_PLUGIN_REPO')
+    }
+    throw new ToolError(msg, 'SYNC_CONTEXT_FAILED')
+  }
 }
 
 function validateSessionIdOrThrow(sessionId: string): void {

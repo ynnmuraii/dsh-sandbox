@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createMcpHandler } from '@modelcontextprotocol/server'
@@ -8,6 +8,7 @@ import { handleInspect } from './handlers.js'
 import { inspectPlugin } from '../inspect.js'
 import { resolvePluginRef } from '../plugin-ref.js'
 import { createUiSession, type UiSessionStateV1 } from '../ui-session.js'
+import { loadCatalogFromFile } from '../schemas.js'
 import { computePluginDigest } from '../plugin-snapshot.js'
 import { computeContextDigest } from '../status.js'
 
@@ -76,6 +77,18 @@ function mkRootWithPlugin(): { root: string; pluginPath: string } {
   )
   writeFileSync(join(pluginPath, '.dsh-lab', 'plugin.yaml'), 'name: demo\ntracking: local\nmaturity: experiment\ntargets:\n  - next\n')
   return { root, pluginPath }
+}
+
+function mkAuthoringRoot(): { root: string } {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-mcp-authoring-'))
+  roots.push(root)
+  mkdirSync(join(root, 'context'), { recursive: true })
+  writeFileSync(join(root, 'context', 'harness-contracts.md'), '# harness\n')
+  return { root }
+}
+
+function scArray<T>(sc: unknown): T[] {
+  return Array.isArray(sc) ? (sc as T[]) : (((sc as { result?: unknown })?.result) as T[] ?? [])
 }
 
 async function rpc(handler: { fetch: (req: Request) => Promise<Response> }, body: unknown) {
@@ -255,7 +268,7 @@ describe('mcp server integration via createMcpHandler', () => {
       createRunId: vi.fn(() => 'verify-server-0001'),
       now: vi.fn(() => new Date('2026-08-23T10:00:00.000Z')),
     }
-    const handler = createMcpHandler(() => buildServer(root, deps))
+    const handler = createMcpHandler(() => buildServer(root, { verifyDeps: deps }))
     const json = await rpc(handler, { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'dsh_lab.verify', arguments: { path: pluginPath, target: 'next' } } })
     const result = json.result ?? json
     expect(result.isError).toBeUndefined()
@@ -322,7 +335,7 @@ describe('mcp UI server integration', () => {
   it('ui_status returns a ready view through the handler', async () => {
     const { root, pluginPath } = mkRootWithPlugin()
     createUiSession({ runtimeRoot: join(root, '.lab', 'runtime'), state: uiReadyState(root, pluginPath, UI_SESSION) })
-    const handler = createMcpHandler(() => buildServer(root, undefined, { now: () => UI_NOW, processAlive: () => true }))
+    const handler = createMcpHandler(() => buildServer(root, { uiDeps: { now: () => UI_NOW, processAlive: () => true } }))
     const json = await rpc(handler, { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'dsh_lab.ui_status', arguments: { sessionId: UI_SESSION } } })
     const result = json.result ?? json
     expect(result.isError).toBeUndefined()
@@ -337,6 +350,99 @@ describe('mcp UI server integration', () => {
     const result = json.result ?? json
     expect(result.isError).toBe(true)
     expect(result.content?.[0]?.text).toContain('UI_NOT_FOUND')
+    await handler.close().catch(() => {})
+  })
+})
+
+describe('mcp authoring gating', () => {
+  const AUTH_TOOLS = ['dsh_lab.create_plugin', 'dsh_lab.sync_context']
+
+  it('default server lists 10 and rejects authoring tools without mutation', async () => {
+    const { root } = mkAuthoringRoot()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 100, method: 'tools/list', params: {} })
+    const names = ((json.result?.tools ?? json.tools) as Array<{ name: string }>).map(t => t.name)
+    expect(names).toHaveLength(10)
+    expect(names).not.toContain('dsh_lab.create_plugin')
+    expect(names).not.toContain('dsh_lab.sync_context')
+    const call = await rpc(handler, { jsonrpc: '2.0', id: 101, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'acme-test' } } })
+    expect(call.error !== undefined || (call.result ?? call).isError === true).toBe(true)
+    expect(existsSync(join(root, 'plugins', 'acme-test'))).toBe(false)
+    await handler.close().catch(() => {})
+  })
+
+  it('gated server lists 12 including authoring tools', async () => {
+    const { root } = mkAuthoringRoot()
+    const handler = createMcpHandler(() => buildServer(root, { allowAuthoring: true }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 200, method: 'tools/list', params: {} })
+    const names = ((json.result?.tools ?? json.tools) as Array<{ name: string }>).map(t => t.name)
+    expect(names).toHaveLength(12)
+    expect(names).toEqual(expect.arrayContaining(AUTH_TOOLS))
+    await handler.close().catch(() => {})
+  })
+
+  it('gated create_plugin scaffolds a nested repo + catalog and rejects dup/invalid', async () => {
+    const { root } = mkAuthoringRoot()
+    const handler = createMcpHandler(() => buildServer(root, { allowAuthoring: true }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 300, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'acme-test' } } })
+    const result = (json.result ?? json) as { structuredContent?: { sourcePath: string; catalogName: string }; isError?: boolean }
+    expect(result.isError).toBeUndefined()
+    const sc = result.structuredContent!
+    expect(sc.catalogName).toBe('acme-test')
+    expect(sc.sourcePath).toBe(join(root, 'plugins', 'acme-test'))
+    expect(existsSync(join(sc.sourcePath, '.git'))).toBe(true)
+    const pkg = JSON.parse(readFileSync(join(sc.sourcePath, 'package.json'), 'utf8'))
+    expect(pkg.type).toBe('module')
+    expect(pkg.main).toBe('lib/index.js')
+    expect(pkg.dsh?.bundle?.patch).toBe('cordis.patch.yml')
+    expect(existsSync(join(sc.sourcePath, 'pnpm-workspace.yaml'))).toBe(true)
+    expect(existsSync(join(sc.sourcePath, '.dsh-lab', 'shared-context.md'))).toBe(true)
+    const catalog = loadCatalogFromFile(join(root, 'catalog.yaml'))
+    expect(catalog.plugins['acme-test']).toMatchObject({ path: 'plugins/acme-test', tracking: 'local', maturity: 'experiment' })
+
+    const dup = await rpc(handler, { jsonrpc: '2.0', id: 301, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'acme-test' } } })
+    const dupResult = (dup.result ?? dup) as { isError?: boolean; content?: Array<{ text: string }> }
+    expect(dupResult.isError).toBe(true)
+    expect(dupResult.content?.[0]?.text).toContain('INVALID_NAME')
+    const bad = await rpc(handler, { jsonrpc: '2.0', id: 302, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'Bad_Name' } } })
+    const badResult = (bad.result ?? bad) as { isError?: boolean; content?: Array<{ text: string }> }
+    expect(badResult.isError).toBe(true)
+    expect(badResult.content?.[0]?.text).toContain('INVALID_NAME')
+    await handler.close().catch(() => {})
+  })
+
+  it('gated sync_context rewrites snapshots, is idempotent, and validates args/unknown/non-git', async () => {
+    const { root } = mkAuthoringRoot()
+    const handler = createMcpHandler(() => buildServer(root, { allowAuthoring: true }))
+    await rpc(handler, { jsonrpc: '2.0', id: 400, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'acme-test' } } })
+    writeFileSync(join(root, 'context', 'harness-contracts.md'), '# harness changed\n')
+    const s1 = await rpc(handler, { jsonrpc: '2.0', id: 401, method: 'tools/call', params: { name: 'dsh_lab.sync_context', arguments: { plugin: 'acme-test' } } })
+    const r1 = (s1.result ?? s1) as { structuredContent: Array<{ kind: string; name: string; changed: boolean; path: string }>; isError?: boolean }
+    expect(r1.isError).toBeUndefined()
+    expect(scArray(r1.structuredContent)[0]).toMatchObject({ kind: 'plugin-context', name: 'acme-test', changed: true })
+    const s2 = await rpc(handler, { jsonrpc: '2.0', id: 402, method: 'tools/call', params: { name: 'dsh_lab.sync_context', arguments: { plugin: 'acme-test' } } })
+    const r2 = (s2.result ?? s2) as { structuredContent: Array<{ changed: boolean }> }
+    expect(scArray<{ changed: boolean }>(r2.structuredContent)[0]!.changed).toBe(false)
+    const all = await rpc(handler, { jsonrpc: '2.0', id: 403, method: 'tools/call', params: { name: 'dsh_lab.sync_context', arguments: { all: true } } })
+    const rAll = (all.result ?? all) as { structuredContent: Array<{ name: string }>; isError?: boolean }
+    expect(rAll.isError).toBeUndefined()
+    expect(scArray<{ name: string }>(rAll.structuredContent).map(r => r.name)).toContain('acme-test')
+    for (const args of [{}, { plugin: 'acme-test', all: true }]) {
+      const bad = await rpc(handler, { jsonrpc: '2.0', id: 404, method: 'tools/call', params: { name: 'dsh_lab.sync_context', arguments: args } })
+      const badResult = (bad.result ?? bad) as { isError?: boolean; content?: Array<{ text: string }> }
+      expect(badResult.isError).toBe(true)
+      expect(badResult.content?.[0]?.text).toContain('INVALID_ARGS')
+    }
+    const unknown = await rpc(handler, { jsonrpc: '2.0', id: 405, method: 'tools/call', params: { name: 'dsh_lab.sync_context', arguments: { plugin: 'nope' } } })
+    const unknownResult = (unknown.result ?? unknown) as { isError?: boolean; content?: Array<{ text: string }> }
+    expect(unknownResult.isError).toBe(true)
+    expect(unknownResult.content?.[0]?.text).toContain('UNKNOWN_PLUGIN')
+    writeFileSync(join(root, 'catalog.yaml'), 'plugins:\n  nongit:\n    path: plugins/nongit\n    tracking: local\n')
+    mkdirSync(join(root, 'plugins', 'nongit'), { recursive: true })
+    const nongit = await rpc(handler, { jsonrpc: '2.0', id: 406, method: 'tools/call', params: { name: 'dsh_lab.sync_context', arguments: { plugin: 'nongit' } } })
+    const nongitResult = (nongit.result ?? nongit) as { isError?: boolean; content?: Array<{ text: string }> }
+    expect(nongitResult.isError).toBe(true)
+    expect(nongitResult.content?.[0]?.text).toContain('NOT_A_PLUGIN_REPO')
     await handler.close().catch(() => {})
   })
 })

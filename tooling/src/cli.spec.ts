@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { parsePluginSelector, runCli } from './cli.js'
+import { parseMcpFlags, parsePluginSelector, runCli } from './cli.js'
 import { checkUpstream, updateUpstream } from './upstream-update.js'
 import { resolvePluginRef } from './plugin-ref.js'
 import { inspectPlugin } from './inspect.js'
@@ -1003,5 +1003,23 @@ describe('JSON shape stability (C8)', () => {
     expect(parsed).toHaveProperty('lab')
     expect(parsed).toHaveProperty('summary')
     expect(parsed).toHaveProperty('cleanup')
+  })
+})
+
+describe('parseMcpFlags', () => {
+  it('parses an empty flag list to authoring disabled', () => {
+    expect(parseMcpFlags([])).toEqual({ allowAuthoring: false })
+  })
+
+  it('accepts --allow-authoring once', () => {
+    expect(parseMcpFlags(['--allow-authoring'])).toEqual({ allowAuthoring: true })
+  })
+
+  it('rejects a duplicate --allow-authoring', () => {
+    expect(() => parseMcpFlags(['--allow-authoring', '--allow-authoring'])).toThrow(/only once/i)
+  })
+
+  it('rejects an unknown mcp flag', () => {
+    expect(() => parseMcpFlags(['--root', 'x'])).toThrow(/unknown mcp flag '--root'/)
   })
 })

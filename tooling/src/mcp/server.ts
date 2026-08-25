@@ -3,11 +3,13 @@ import * as z from 'zod/v4'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  handleCreatePlugin,
   handleDoctor,
   handleGetEvidence,
   handleInspect,
   handleListPlugins,
   handleStatus,
+  handleSyncContext,
   handleUiAbort,
   handleUiFinish,
   handleUiStart,
@@ -18,7 +20,13 @@ import {
 import type { VerifyPluginDependencies } from '../verify.js'
 import type { UiServiceDependencies } from '../ui.js'
 
-export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDependencies>, uiDeps?: Partial<UiServiceDependencies>): McpServer {
+export interface McpServerOptions {
+  verifyDeps?: Partial<VerifyPluginDependencies>
+  uiDeps?: Partial<UiServiceDependencies>
+  allowAuthoring?: boolean
+}
+
+export function buildServer(root: string, options?: McpServerOptions): McpServer {
   const server = new McpServer({ name: 'dsh-lab', version: '0.0.0' })
 
   server.registerTool(
@@ -171,7 +179,7 @@ export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDepen
     async args => {
       try {
         const typed = args as { plugin?: string; path?: string; target?: 'next' | 'master' | 'all' }
-        const result = await handleVerify(root, typed, verifyDeps)
+        const result = await handleVerify(root, typed, options?.verifyDeps)
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result) }],
           structuredContent: result as unknown as Record<string, unknown>,
@@ -248,7 +256,7 @@ export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDepen
     async args => {
       try {
         const typed = args as { plugin?: string; path?: string; target: 'next' | 'master'; startupTimeoutMs?: number }
-        const result = await handleUiStart(root, typed, uiDeps)
+        const result = await handleUiStart(root, typed, options?.uiDeps)
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result) }],
           structuredContent: result as unknown as Record<string, unknown>,
@@ -278,7 +286,7 @@ export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDepen
     async args => {
       try {
         const typed = args as { sessionId: string }
-        const result = handleUiStatus(root, typed, uiDeps as Pick<UiServiceDependencies, 'now' | 'processAlive'> | undefined)
+        const result = handleUiStatus(root, typed, options?.uiDeps as Pick<UiServiceDependencies, 'now' | 'processAlive'> | undefined)
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result) }],
           structuredContent: result as unknown as Record<string, unknown>,
@@ -310,7 +318,7 @@ export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDepen
     async args => {
       try {
         const typed = args as { sessionId: string; verdict: 'pass' | 'fail'; summary: string }
-        const result = await handleUiFinish(root, typed, uiDeps)
+        const result = await handleUiFinish(root, typed, options?.uiDeps)
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result) }],
           structuredContent: result as unknown as Record<string, unknown>,
@@ -340,7 +348,7 @@ export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDepen
     async args => {
       try {
         const typed = args as { sessionId: string }
-        const result = await handleUiAbort(root, typed, uiDeps)
+        const result = await handleUiAbort(root, typed, options?.uiDeps)
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result) }],
           structuredContent: result as unknown as Record<string, unknown>,
@@ -355,6 +363,75 @@ export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDepen
       }
     },
   )
+
+  if (options?.allowAuthoring === true) {
+    server.registerTool(
+      'dsh_lab.create_plugin',
+      {
+        description:
+          "MUTATING authoring operation. Create a new plugin from the canonical template under plugins/<name> (a nested git repo) and register it in catalog.yaml as tracking: local. Does NOT commit or push. Only available when the server is started with --allow-authoring (or DSH_LAB_ALLOW_AUTHORING=1). Returns { sourcePath, catalogName }. Errors: INVALID_NAME for an invalid or duplicate name; CREATE_FAILED for other failures.",
+        inputSchema: z
+          .object({
+            name: z
+              .string()
+              .min(1)
+              .describe('catalog slug (lowercase letters, digits, hyphens, must start with a letter-or-digit)'),
+          })
+          .strict(),
+      },
+      async args => {
+        try {
+          const typed = args as { name: string }
+          const result = await handleCreatePlugin(root, typed)
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+            structuredContent: result as unknown as Record<string, unknown>,
+          }
+        } catch (e) {
+          const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+          const message = e instanceof Error ? e.message : String(e)
+          return {
+            content: [{ type: 'text' as const, text: `${code}: ${message}` }],
+            isError: true,
+          }
+        }
+      },
+    )
+    server.registerTool(
+      'dsh_lab.sync_context',
+      {
+        description:
+          "MUTATING authoring operation. Regenerate a plugin's .dsh-lab/shared-context.md snapshot from the canonical context digest. Pass exactly one of { plugin: '<name>' } or { all: true }; both or neither is INVALID_ARGS. Does NOT commit or push. Only available when the server is started with --allow-authoring (or DSH_LAB_ALLOW_AUTHORING=1). Returns SyncedResult[] { kind, name, changed, path }. Errors: INVALID_ARGS, UNKNOWN_PLUGIN, NOT_A_PLUGIN_REPO, SYNC_CONTEXT_FAILED.",
+        inputSchema: z
+          .object({
+            plugin: z
+              .string()
+              .min(1)
+              .describe('Catalog plugin name to sync (mutually exclusive with all:true)')
+              .optional(),
+            all: z.boolean().describe('Sync every catalog entry (mutually exclusive with plugin)').optional(),
+          })
+          .strict(),
+      },
+      async args => {
+        try {
+          const typed = args as { plugin?: string; all?: boolean }
+          const result = await handleSyncContext(root, typed)
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+            structuredContent: result as unknown as Record<string, unknown>,
+          }
+        } catch (e) {
+          const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+          const message = e instanceof Error ? e.message : String(e)
+          return {
+            content: [{ type: 'text' as const, text: `${code}: ${message}` }],
+            isError: true,
+          }
+        }
+      },
+    )
+  }
 
   type ResourceDef = { uri: string; file: string; title: string; mimeType: string; description: string }
 

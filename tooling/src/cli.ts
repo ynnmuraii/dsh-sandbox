@@ -178,8 +178,15 @@ export async function runCli(argv: string[]): Promise<number> {
     case 'upstream':
       return runUpstream(rest)
     case 'mcp': {
+      let allowAuthoring: boolean
+      try {
+        allowAuthoring = parseMcpFlags(rest).allowAuthoring || process.env.DSH_LAB_ALLOW_AUTHORING === '1'
+      } catch (e) {
+        console.error(`error: ${(e as Error).message}`)
+        return 1
+      }
       const { runMcp } = await import('./mcp/index.js')
-      return runMcp(process.cwd())
+      return runMcp(process.cwd(), { allowAuthoring })
     }
     case '--help':
     case '-h':
@@ -518,6 +525,19 @@ function parseInspectFlags(rest: string[]): { target?: 'next' | 'master'; json: 
     throw new Error(`unknown inspect flag '${flag}'`)
   }
   return target === undefined ? { json } : { target, json }
+}
+
+export function parseMcpFlags(rest: string[]): { allowAuthoring: boolean } {
+  let allowAuthoring = false
+  for (const flag of rest) {
+    if (flag === '--allow-authoring') {
+      if (allowAuthoring) throw new Error('--allow-authoring may be specified only once')
+      allowAuthoring = true
+      continue
+    }
+    throw new Error(`unknown mcp flag '${flag}'`)
+  }
+  return { allowAuthoring }
 }
 
 function parseStatusFlags(rest: string[]): { json: boolean } {
