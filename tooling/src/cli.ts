@@ -16,6 +16,7 @@ import {
   type UiSessionViewV1,
 } from './ui.js'
 import type { UiResultV1 } from './ui-evidence.js'
+import { runMcp } from './mcp/index.js'
 
 export { parsePluginSelector } from './plugin-ref.js'
 
@@ -40,6 +41,7 @@ Commands:
   doctor                   validate toolchain, catalog, and target pins
   upstream check           compare the pinned master commit with the remote
   upstream update [--verify] explicitly adopt the fetched master commit
+  mcp                      start MCP stdio server (read-only control plane)
 `
 
 const UPSTREAM_HELP = `
@@ -176,6 +178,8 @@ export async function runCli(argv: string[]): Promise<number> {
       return runUi(rest)
     case 'upstream':
       return runUpstream(rest)
+    case 'mcp':
+      return runMcp(process.cwd())
     case '--help':
     case '-h':
     case undefined:
