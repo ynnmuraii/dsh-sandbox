@@ -7,6 +7,9 @@ import { buildServer } from './server.js'
 import { handleInspect } from './handlers.js'
 import { inspectPlugin } from '../inspect.js'
 import { resolvePluginRef } from '../plugin-ref.js'
+import { createUiSession, type UiSessionStateV1 } from '../ui-session.js'
+import { computePluginDigest } from '../plugin-snapshot.js'
+import { computeContextDigest } from '../status.js'
 
 const roots: string[] = []
 const NEXT = '0.1.1-rc.2'
@@ -103,8 +106,8 @@ describe('mcp server integration via createMcpHandler', () => {
     const json = await rpc(handler, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
     const tools = json.result?.tools ?? json.tools
     const names = (tools as Array<{ name: string }>).map(t => t.name)
-    expect(names).toEqual(expect.arrayContaining(['dsh_lab.inspect', 'dsh_lab.status', 'dsh_lab.doctor', 'dsh_lab.get_evidence', 'dsh_lab.list_plugins', 'dsh_lab.verify']))
-    expect(names).toHaveLength(6)
+    expect(names).toEqual(expect.arrayContaining(['dsh_lab.inspect', 'dsh_lab.status', 'dsh_lab.doctor', 'dsh_lab.get_evidence', 'dsh_lab.list_plugins', 'dsh_lab.verify', 'dsh_lab.ui_start', 'dsh_lab.ui_status', 'dsh_lab.ui_finish', 'dsh_lab.ui_abort']))
+    expect(names).toHaveLength(10)
     await handler.close().catch(() => {})
   })
 
@@ -269,5 +272,71 @@ describe('mcp server integration via createMcpHandler', () => {
     expect(errResult.isError).toBe(true)
     expect(errResult.content?.[0]?.text).toContain('INVALID_TARGET')
     await handler2.close().catch(() => {})
+  })
+})
+
+const UI_SESSION = 'ui-20260824T120000000Z-a1b2c3d4'
+const UI_NOW = '2026-08-24T12:00:04.000Z'
+
+function uiReadyState(root: string, pluginPath: string, sessionId: string): UiSessionStateV1 {
+  return {
+    schemaVersion: 1,
+    sessionId,
+    state: 'ready',
+    plugin: { packageName: '@fixture/demo', sourcePath: pluginPath, digest: computePluginDigest(pluginPath).digest },
+    target: { name: 'next', dsh: NEXT },
+    contextDigest: computeContextDigest(root),
+    supervisorPid: 7001,
+    childPid: 7002,
+    url: 'http://127.0.0.1:49152',
+    startedAt: '2026-08-24T12:00:00.000Z',
+    updatedAt: '2026-08-24T12:00:00.000Z',
+  }
+}
+
+describe('mcp UI server integration', () => {
+  it('tools/list advertises exactly the 10 ui-enabled tools', async () => {
+    const { root } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 19, method: 'tools/list', params: {} })
+    const tools = json.result?.tools ?? json.tools
+    const names = (tools as Array<{ name: string }>).map(tool => tool.name)
+    expect(names).toHaveLength(10)
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'dsh_lab.inspect',
+        'dsh_lab.status',
+        'dsh_lab.doctor',
+        'dsh_lab.get_evidence',
+        'dsh_lab.list_plugins',
+        'dsh_lab.verify',
+        'dsh_lab.ui_start',
+        'dsh_lab.ui_status',
+        'dsh_lab.ui_finish',
+        'dsh_lab.ui_abort',
+      ]),
+    )
+    await handler.close().catch(() => {})
+  })
+
+  it('ui_status returns a ready view through the handler', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    createUiSession({ runtimeRoot: join(root, '.lab', 'runtime'), state: uiReadyState(root, pluginPath, UI_SESSION) })
+    const handler = createMcpHandler(() => buildServer(root, undefined, { now: () => UI_NOW, processAlive: () => true }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'dsh_lab.ui_status', arguments: { sessionId: UI_SESSION } } })
+    const result = json.result ?? json
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({ sessionId: UI_SESSION, state: 'ready', stale: false, url: 'http://127.0.0.1:49152' })
+    await handler.close().catch(() => {})
+  })
+
+  it('ui_status returns an isError UI_NOT_FOUND for an unknown session', async () => {
+    const { root } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'dsh_lab.ui_status', arguments: { sessionId: UI_SESSION } } })
+    const result = json.result ?? json
+    expect(result.isError).toBe(true)
+    expect(result.content?.[0]?.text).toContain('UI_NOT_FOUND')
+    await handler.close().catch(() => {})
   })
 })

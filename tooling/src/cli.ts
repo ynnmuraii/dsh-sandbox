@@ -359,7 +359,7 @@ interface UiSelectorParse {
 interface UiSessionParse { sessionId: string; json: boolean }
 interface UiFinishParse extends UiSessionParse { verdict: 'pass' | 'fail'; summary: string }
 
-const UI_SESSION_ID_PATTERN = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
+export const UI_SESSION_ID_PATTERN = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
 
 function parseUiStart(args: string[]): UiSelectorParse {
   let name: string | undefined

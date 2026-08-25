@@ -8,7 +8,8 @@ import { loadUiResults, type UiResultV1 } from '../ui-evidence.js'
 import { loadCatalogFromFile } from '../schemas.js'
 import { ROOT_PATHS, rootPath } from '../context.js'
 import { verifyPlugin, type VerifyPluginDependencies } from '../verify.js'
-import { inferVerifyTarget, validateMetadataTargets } from '../cli.js'
+import { inferVerifyTarget, UI_SESSION_ID_PATTERN, validateMetadataTargets } from '../cli.js'
+import { abortUiSession, finishUiSession, getUiSessionStatus, startUiSession, UiProtocolOutcomeError, type UiServiceDependencies, type UiSessionViewV1 } from '../ui.js'
 
 export class ToolError extends Error {
   code: string
@@ -193,4 +194,128 @@ export function handleGetEvidence(
   }
 
   return { verify, ui }
+}
+
+function validateSessionIdOrThrow(sessionId: string): void {
+  if (!UI_SESSION_ID_PATTERN.test(sessionId)) {
+    throw new ToolError(`invalid or unsafe sessionId ${JSON.stringify(sessionId)}`, 'INVALID_SELECTOR')
+  }
+}
+
+function isUiProtocolOutcomeError(error: unknown): error is UiProtocolOutcomeError {
+  return error instanceof UiProtocolOutcomeError || (error !== null && typeof error === 'object' && (error as { name?: unknown }).name === 'UiProtocolOutcomeError' && ((error as { outcome?: unknown }).outcome === 'stale' || (error as { outcome?: unknown }).outcome === 'cleanup-incomplete'))
+}
+
+function mapUiNotFoundError(error: unknown): ToolError | undefined {
+  const msg = error instanceof Error ? error.message : String(error)
+  const lower = msg.toLowerCase()
+  if (lower.includes('enoent') || lower.includes('no such file') || lower.includes('not found') || lower.includes('is not a regular directory') || lower.includes('is not a unique regular file')) {
+    return new ToolError(msg, 'UI_NOT_FOUND')
+  }
+  return undefined
+}
+
+export async function handleUiStart(
+  root: string,
+  args: { plugin?: string; path?: string; target: 'next' | 'master'; startupTimeoutMs?: number },
+  deps?: Partial<UiServiceDependencies>,
+): Promise<UiSessionViewV1> {
+  const ref = resolvePlugin(root, args.plugin, args.path)
+  try {
+    const view = await startUiSession(
+      { root, plugin: ref, target: args.target, ...(args.startupTimeoutMs !== undefined ? { startupTimeoutMs: args.startupTimeoutMs } : {}) },
+      deps as UiServiceDependencies | undefined,
+    )
+    return view
+  } catch (e) {
+    if (isUiProtocolOutcomeError(e)) {
+      const code = (e as UiProtocolOutcomeError).outcome === 'stale' ? 'UI_STALE' : 'UI_CLEANUP_INCOMPLETE'
+      throw new ToolError((e as Error).message, code)
+    }
+    const notFound = mapUiNotFoundError(e)
+    if (notFound !== undefined) throw notFound
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (lower.includes('target')) throw new ToolError(msg, 'INVALID_TARGET')
+    if (lower.includes('startuptimeoutms') || lower.includes('timeout')) throw new ToolError(msg, 'INVALID_ARGS')
+    throw new ToolError(msg, 'UI_START_FAILED')
+  }
+}
+
+export function handleUiStatus(
+  root: string,
+  args: { sessionId: string },
+  deps?: Pick<UiServiceDependencies, 'now' | 'processAlive'>,
+): UiSessionViewV1 {
+  validateSessionIdOrThrow(args.sessionId)
+  try {
+    return getUiSessionStatus({ root, sessionId: args.sessionId }, deps as Pick<UiServiceDependencies, 'now' | 'processAlive'> | undefined)
+  } catch (e) {
+    if (isUiProtocolOutcomeError(e)) {
+      const code = (e as UiProtocolOutcomeError).outcome === 'stale' ? 'UI_STALE' : 'UI_CLEANUP_INCOMPLETE'
+      throw new ToolError((e as Error).message, code)
+    }
+    const notFound = mapUiNotFoundError(e)
+    if (notFound !== undefined) throw notFound
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (lower.includes('invalid or unsafe sessionid')) throw new ToolError(msg, 'INVALID_SELECTOR')
+    throw new ToolError(msg, 'UI_STATUS_FAILED')
+  }
+}
+
+
+export async function handleUiFinish(
+  root: string,
+  args: { sessionId: string; verdict: 'pass' | 'fail'; summary: string },
+  deps?: Partial<UiServiceDependencies>,
+): Promise<UiResultV1> {
+  validateSessionIdOrThrow(args.sessionId)
+  try {
+    const result = await finishUiSession(
+      { root, sessionId: args.sessionId, verdict: args.verdict, summary: args.summary },
+      deps as UiServiceDependencies | undefined,
+    )
+    return result
+  } catch (e) {
+    if (isUiProtocolOutcomeError(e)) {
+      const code = (e as UiProtocolOutcomeError).outcome === 'stale' ? 'UI_STALE' : 'UI_CLEANUP_INCOMPLETE'
+      throw new ToolError((e as Error).message, code)
+    }
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (lower.includes('summary') || lower.includes('code points') || lower.includes('control characters') || lower.includes('single line')) {
+      throw new ToolError(msg, 'INVALID_SUMMARY')
+    }
+    if (lower.includes('invalid or unsafe sessionid')) throw new ToolError(msg, 'INVALID_SELECTOR')
+    const notFound = mapUiNotFoundError(e)
+    if (notFound !== undefined) throw notFound
+    if (lower.includes('is finished') || lower.includes('is aborted') || lower.includes('is already stopping') || lower.includes('requires a ready') || lower.includes('requires a ready or crashed')) {
+      throw new ToolError(msg, 'UI_FINISH_FAILED')
+    }
+    throw new ToolError(msg, 'UI_FINISH_FAILED')
+  }
+}
+
+export async function handleUiAbort(
+  root: string,
+  args: { sessionId: string },
+  deps?: Partial<UiServiceDependencies>,
+): Promise<UiSessionViewV1> {
+  validateSessionIdOrThrow(args.sessionId)
+  try {
+    const view = await abortUiSession({ root, sessionId: args.sessionId }, deps as UiServiceDependencies | undefined)
+    return view
+  } catch (e) {
+    if (isUiProtocolOutcomeError(e)) {
+      const code = (e as UiProtocolOutcomeError).outcome === 'stale' ? 'UI_STALE' : 'UI_CLEANUP_INCOMPLETE'
+      throw new ToolError((e as Error).message, code)
+    }
+    const notFound = mapUiNotFoundError(e)
+    if (notFound !== undefined) throw notFound
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (lower.includes('invalid or unsafe sessionid')) throw new ToolError(msg, 'INVALID_SELECTOR')
+    throw new ToolError(msg, 'UI_ABORT_FAILED')
+  }
 }

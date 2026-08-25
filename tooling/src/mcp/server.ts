@@ -8,12 +8,17 @@ import {
   handleInspect,
   handleListPlugins,
   handleStatus,
+  handleUiAbort,
+  handleUiFinish,
+  handleUiStart,
+  handleUiStatus,
   handleVerify,
   ToolError,
 } from './handlers.js'
 import type { VerifyPluginDependencies } from '../verify.js'
+import type { UiServiceDependencies } from '../ui.js'
 
-export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDependencies>): McpServer {
+export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDependencies>, uiDeps?: Partial<UiServiceDependencies>): McpServer {
   const server = new McpServer({ name: 'dsh-lab', version: '0.0.0' })
 
   server.registerTool(
@@ -208,6 +213,134 @@ export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDepen
       try {
         const typed = args as { plugin?: string; path?: string; kind?: 'verify' | 'ui' | 'all'; limit?: number }
         const result = handleGetEvidence(root, typed)
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+          structuredContent: result as unknown as Record<string, unknown>,
+        }
+      } catch (e) {
+        const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+        const message = e instanceof Error ? e.message : String(e)
+        return {
+          content: [{ type: 'text' as const, text: `${code}: ${message}` }],
+          isError: true,
+        }
+      }
+    },
+  )
+  server.registerTool(
+    'dsh_lab.ui_start',
+    {
+      description:
+        "Start an isolated UI session for a plugin against a pinned target. Creates a detached supervisor that boots the DSH harness with an overlay for the plugin. BOUNDED LONG-RUNNING: blocks up to startupTimeoutMs (default 120000, range 1000..600000, poll 25ms) waiting for state to leave 'starting'; typically <5s, returns as soon as state is 'ready' or 'crashed'. Returns UiSessionViewV1 { schemaVersion:1, sessionId:'ui-YYYYMMDDTHHMMSSZ-xxxxxxxx', state:'starting'|'ready'|'crashed'|'stopping'|'finished'|'aborted', stale:boolean, staleReasons:('plugin-changed'|'context-changed'|'target-changed')[] — latch and never un-latch, plugin:{packageName,sourcePath,digest:'sha256:…'}, target:{name:'next',dsh:string}|{name:'master',commit:string}, contextDigest:'sha256:…', url?:string (present when ready), error?:string, cleanup?:'pass'|'fail', orphan?:true (supervisor pid gone — manual cleanup may be needed at .lab/runtime/ui-sessions/<id>), startedAt, updatedAt }. Use sessionId as explicit handle for ui_status/finish/abort (2026-07-28 explicit-handle pattern).",
+      inputSchema: z
+        .object({
+          plugin: z.string().min(1).describe('Catalog plugin name (enumerate via dsh_lab.list_plugins)').optional(),
+          path: z.string().min(1).describe('Absolute path to a standalone plugin directory — exactly one of plugin or path is required').optional(),
+          target: z.enum(['next', 'master']).describe('Target pin to boot against; mirrors lab ui start --target (required)'),
+          startupTimeoutMs: z.number().int().min(1000).max(600000).optional().default(120000).describe('Max ms to wait for ready (poll 25ms); default 120000'),
+        })
+        .strict()
+        .refine(
+          data => (data.plugin !== undefined) !== (data.path !== undefined),
+          { message: 'exactly one of plugin or path is required' },
+        ),
+    },
+    async args => {
+      try {
+        const typed = args as { plugin?: string; path?: string; target: 'next' | 'master'; startupTimeoutMs?: number }
+        const result = await handleUiStart(root, typed, uiDeps)
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+          structuredContent: result as unknown as Record<string, unknown>,
+        }
+      } catch (e) {
+        const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+        const message = e instanceof Error ? e.message : String(e)
+        return {
+          content: [{ type: 'text' as const, text: `${code}: ${message}` }],
+          isError: true,
+        }
+      }
+    },
+  )
+
+  server.registerTool(
+    'dsh_lab.ui_status',
+    {
+      description:
+        "Get live status of a UI session by sessionId. Synchronous read of .lab/runtime/ui-sessions/<sessionId>/state.json plus liveness + stale checks. Returns UiSessionViewV1 { sessionId, state:'starting'|'ready'|'crashed'|'stopping'|'finished'|'aborted', stale, staleReasons:('plugin-changed'|'context-changed'|'target-changed')[] — staleReasons latch and never un-latch, plugin, target, contextDigest, url?, error?, cleanup?, orphan?:true, startedAt, updatedAt }. stale:true means plugin digest, context digest, or target pin changed since session start (use to decide re-start). orphan:true means supervisor pid gone (process.kill(pid,0) failed) — view is still returned (not an error) but manual cleanup of the session dir may be needed. sessionId pattern ^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$.",
+      inputSchema: z
+        .object({
+          sessionId: z.string().min(1).describe('UI session handle minted by dsh_lab.ui_start (pattern ui-YYYYMMDDTHHMMSSZ-xxxxxxxx)'),
+        })
+        .strict(),
+    },
+    async args => {
+      try {
+        const typed = args as { sessionId: string }
+        const result = handleUiStatus(root, typed, uiDeps as Pick<UiServiceDependencies, 'now' | 'processAlive'> | undefined)
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+          structuredContent: result as unknown as Record<string, unknown>,
+        }
+      } catch (e) {
+        const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+        const message = e instanceof Error ? e.message : String(e)
+        return {
+          content: [{ type: 'text' as const, text: `${code}: ${message}` }],
+          isError: true,
+        }
+      }
+    },
+  )
+
+  server.registerTool(
+    'dsh_lab.ui_finish',
+    {
+      description:
+        "Finish a UI session with an external verdict. verdict is the external browser/vision agent's judgment; the lab owns only lifecycle + evidence — it writes a finish control, waits for supervisor to consume it and publish UiResultV1 to .lab/ui-runs/... and verify runtime cleanup (typically seconds). Returns UiResultV1 { schemaVersion:1, sessionId, operation:'ui', verdict:'pass'|'fail', summary:string (1..500 Unicode code points, single line, no controls — normalized via normalizeUiSummary), plugin:{packageName,sourcePath,digest}, target, lab:{contextDigest}, environment:{node,pnpm,platform}, startedAt, finishedAt }. summary is the short human-readable reason for the verdict. Errors: UiProtocolOutcomeError with outcome 'stale' (staleReasons latched) → isError UI_STALE with staleReasons in message; outcome 'cleanup-incomplete' → UI_CLEANUP_INCOMPLETE; summary violating single-line/500 → INVALID_SUMMARY; unknown sessionId → UI_NOT_FOUND.",
+      inputSchema: z
+        .object({
+          sessionId: z.string().min(1).describe('UI session handle minted by dsh_lab.ui_start (pattern ui-YYYYMMDDTHHMMSSZ-xxxxxxxx)'),
+          verdict: z.enum(['pass', 'fail']).describe("External agent's judgment for this session"),
+          summary: z.string().min(1).max(500).describe('Single-line human summary 1..500 code points, no control characters'),
+        })
+        .strict(),
+    },
+    async args => {
+      try {
+        const typed = args as { sessionId: string; verdict: 'pass' | 'fail'; summary: string }
+        const result = await handleUiFinish(root, typed, uiDeps)
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+          structuredContent: result as unknown as Record<string, unknown>,
+        }
+      } catch (e) {
+        const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+        const message = e instanceof Error ? e.message : String(e)
+        return {
+          content: [{ type: 'text' as const, text: `${code}: ${message}` }],
+          isError: true,
+        }
+      }
+    },
+  )
+
+  server.registerTool(
+    'dsh_lab.ui_abort',
+    {
+      description:
+        "Abort a UI session (cooperative stop). Writes an abort control, waits for supervisor to reach state 'aborted' (typically seconds) and verifies cleanup. Returns UiSessionViewV1 { sessionId, state:'aborted' (or 'crashed' if already terminal), stale, staleReasons, plugin, target, contextDigest, url?, error?, cleanup, orphan?, startedAt, updatedAt }. orphan:true means supervisor pid gone — view is returned (not an error) with guidance that the session dir at .lab/runtime/ui-sessions/<id> may need manual removal. Unknown sessionId → isError UI_NOT_FOUND. Stale or cleanup-incomplete → UI_STALE / UI_CLEANUP_INCOMPLETE.",
+      inputSchema: z
+        .object({
+          sessionId: z.string().min(1).describe('UI session handle minted by dsh_lab.ui_start (pattern ui-YYYYMMDDTHHMMSSZ-xxxxxxxx)'),
+        })
+        .strict(),
+    },
+    async args => {
+      try {
+        const typed = args as { sessionId: string }
+        const result = await handleUiAbort(root, typed, uiDeps)
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result) }],
           structuredContent: result as unknown as Record<string, unknown>,
