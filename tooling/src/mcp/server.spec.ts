@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -103,8 +103,8 @@ describe('mcp server integration via createMcpHandler', () => {
     const json = await rpc(handler, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
     const tools = json.result?.tools ?? json.tools
     const names = (tools as Array<{ name: string }>).map(t => t.name)
-    expect(names).toEqual(expect.arrayContaining(['dsh_lab.inspect', 'dsh_lab.status', 'dsh_lab.doctor', 'dsh_lab.get_evidence', 'dsh_lab.list_plugins']))
-    expect(names).toHaveLength(5)
+    expect(names).toEqual(expect.arrayContaining(['dsh_lab.inspect', 'dsh_lab.status', 'dsh_lab.doctor', 'dsh_lab.get_evidence', 'dsh_lab.list_plugins', 'dsh_lab.verify']))
+    expect(names).toHaveLength(6)
     await handler.close().catch(() => {})
   })
 
@@ -231,5 +231,43 @@ describe('mcp server integration via createMcpHandler', () => {
     expect(msg).toContain('available:')
     expect(msg).toContain('example')
     await handler.close().catch(() => {})
+  })
+
+  it('verify tool with mocked deps returns pass and persists (via server)', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const deps: any = {
+      inspectPlugin: vi.fn(() => ({ schemaVersion: 1, plugin: { packageName: '@fixture/demo', sourcePath: pluginPath }, faces: { host: true, client: 'unknown' }, diagnostics: [], ok: true })),
+      verifyPackage: vi.fn(() => ({
+        tarball: join(root, 'dummy.tgz'),
+        steps: [
+          { id: 'install', status: 'pass' as const, durationMs: 1 },
+          { id: 'typecheck', status: 'pass' as const, durationMs: 1 },
+          { id: 'test', status: 'pass' as const, durationMs: 1 },
+          { id: 'build', status: 'pass' as const, durationMs: 1 },
+          { id: 'pack', status: 'pass' as const, durationMs: 1 },
+          { id: 'pack-smoke', status: 'pass' as const, durationMs: 1 },
+        ],
+      })),
+      verifyTarget: vi.fn(async () => {}),
+      createRunId: vi.fn(() => 'verify-server-0001'),
+      now: vi.fn(() => new Date('2026-08-23T10:00:00.000Z')),
+    }
+    const handler = createMcpHandler(() => buildServer(root, deps))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'dsh_lab.verify', arguments: { path: pluginPath, target: 'next' } } })
+    const result = json.result ?? json
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toBeDefined()
+    expect((result.structuredContent as any).result).toBe('pass')
+    expect((result.structuredContent as any).runId).toBe('verify-server-0001')
+    await handler.close().catch(() => {})
+    // fresh root for INVALID_TARGET
+    const { root: root2, pluginPath: pluginPath2 } = mkRootWithPlugin()
+    writeFileSync(join(pluginPath2, '.dsh-lab', 'plugin.yaml'), 'name: demo\ntracking: local\nmaturity: experiment\n')
+    const handler2 = createMcpHandler(() => buildServer(root2))
+    const err2 = await rpc(handler2, { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'dsh_lab.verify', arguments: { path: pluginPath2 } } })
+    const errResult = err2.result ?? err2
+    expect(errResult.isError).toBe(true)
+    expect(errResult.content?.[0]?.text).toContain('INVALID_TARGET')
+    await handler2.close().catch(() => {})
   })
 })

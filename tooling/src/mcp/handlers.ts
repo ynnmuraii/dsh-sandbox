@@ -7,6 +7,8 @@ import { pluginEvidenceKey, loadRunResults, type VerifyRunResultV1 } from '../ev
 import { loadUiResults, type UiResultV1 } from '../ui-evidence.js'
 import { loadCatalogFromFile } from '../schemas.js'
 import { ROOT_PATHS, rootPath } from '../context.js'
+import { verifyPlugin, type VerifyPluginDependencies } from '../verify.js'
+import { inferVerifyTarget, validateMetadataTargets } from '../cli.js'
 
 export class ToolError extends Error {
   code: string
@@ -119,6 +121,42 @@ export async function handleDoctor(root: string): Promise<DiagnosticResult[]> {
 export interface GetEvidenceResult {
   verify: VerifyRunResultV1[]
   ui: UiResultV1[]
+}
+
+export async function handleVerify(
+  root: string,
+  args: { plugin?: string; path?: string; target?: 'next' | 'master' | 'all' },
+  deps?: Partial<VerifyPluginDependencies>,
+): Promise<VerifyRunResultV1> {
+  const ref = resolvePlugin(root, args.plugin, args.path)
+  try {
+    validateMetadataTargets(ref)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    throw new ToolError(msg, 'INVALID_TARGET')
+  }
+  let target: 'next' | 'master' | 'all'
+  if (args.target !== undefined) {
+    target = args.target
+  } else {
+    try {
+      target = inferVerifyTarget(ref)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      throw new ToolError(msg, 'INVALID_TARGET')
+    }
+  }
+  try {
+    const result = await verifyPlugin({ root, plugin: ref, target, ...(deps ? { dependencies: deps } : {}) } as any)
+    return result
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (lower.includes('does not declare target') || lower.includes('unknown target') || lower.includes('requires --target') || lower.includes('declares no supported')) {
+      throw new ToolError(msg, 'INVALID_TARGET')
+    }
+    throw new ToolError(msg, 'VERIFY_PREREQ')
+  }
 }
 
 export function handleGetEvidence(

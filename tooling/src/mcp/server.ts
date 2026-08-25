@@ -8,10 +8,12 @@ import {
   handleInspect,
   handleListPlugins,
   handleStatus,
+  handleVerify,
   ToolError,
 } from './handlers.js'
+import type { VerifyPluginDependencies } from '../verify.js'
 
-export function buildServer(root: string): McpServer {
+export function buildServer(root: string, verifyDeps?: Partial<VerifyPluginDependencies>): McpServer {
   const server = new McpServer({ name: 'dsh-lab', version: '0.0.0' })
 
   server.registerTool(
@@ -134,6 +136,46 @@ export function buildServer(root: string): McpServer {
         const message = e instanceof Error ? e.message : String(e)
         return {
           content: [{ type: 'text' as const, text: `DOCTOR_FAILED: ${message}` }],
+          isError: true,
+        }
+      }
+    },
+  )
+
+  server.registerTool(
+    'dsh_lab.verify',
+    {
+      description:
+        "Verify a plugin end-to-end: inspect → snapshot → build+pack in a temp workspace → install via dsh plugin add → compose against the pinned target. LONG-RUNNING (minutes; spawns pnpm/dsh with your user rights — the call stays open until done; no isolation). Returns VerifyRunResultV1 { runId, result: 'pass'|'fail'|'blocked', targets: {next, master}, steps: [{ id, status, durationMs, summary?, code?, detail? }], cleanup, environment, startedAt, finishedAt }. Per-target/step failures are NOT tool errors — result:'fail' carries step codes (e.g. pnpm.build.fail, dsh.plugin-add.fail) for branching. If the client drops mid-run, the finalized result is still persisted: re-query via dsh_lab.status / dsh_lab.get_evidence. Prerequisite failures (missing/dirty upstream for master, undeclared target) return isError with code VERIFY_PREREQ. target 'all' runs both declared targets sequentially.",
+      inputSchema: z
+        .object({
+          plugin: z.string().min(1).describe('Catalog plugin name (enumerate via dsh_lab.list_plugins)').optional(),
+          path: z
+            .string()
+            .min(1)
+            .describe('Absolute path to a standalone plugin directory — exactly one of plugin or path is required')
+            .optional(),
+          target: z.enum(['next', 'master', 'all']).optional().describe("Target to verify (default inferred from plugin metadata; 'all' runs both declared targets)"),
+        })
+        .strict()
+        .refine(
+          data => (data.plugin !== undefined) !== (data.path !== undefined),
+          { message: 'exactly one of plugin or path is required' },
+        ),
+    },
+    async args => {
+      try {
+        const typed = args as { plugin?: string; path?: string; target?: 'next' | 'master' | 'all' }
+        const result = await handleVerify(root, typed, verifyDeps)
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+          structuredContent: result as unknown as Record<string, unknown>,
+        }
+      } catch (e) {
+        const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+        const message = e instanceof Error ? e.message : String(e)
+        return {
+          content: [{ type: 'text' as const, text: `${code}: ${message}` }],
           isError: true,
         }
       }

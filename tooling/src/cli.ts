@@ -16,7 +16,6 @@ import {
   type UiSessionViewV1,
 } from './ui.js'
 import type { UiResultV1 } from './ui-evidence.js'
-import { runMcp } from './mcp/index.js'
 
 export { parsePluginSelector } from './plugin-ref.js'
 
@@ -178,8 +177,10 @@ export async function runCli(argv: string[]): Promise<number> {
       return runUi(rest)
     case 'upstream':
       return runUpstream(rest)
-    case 'mcp':
+    case 'mcp': {
+      const { runMcp } = await import('./mcp/index.js')
       return runMcp(process.cwd())
+    }
     case '--help':
     case '-h':
     case undefined:
@@ -277,14 +278,14 @@ function parseVerifyFlags(rest: string[]): { target?: 'next' | 'master' | 'all';
   return target === undefined ? { json } : { target, json }
 }
 
-function inferVerifyTarget(plugin: { metadata?: { targets?: string[] } }): 'next' | 'master' | 'all' {
+export function inferVerifyTarget(plugin: { metadata?: { targets?: string[] } }): 'next' | 'master' | 'all' {
   const declared = validateMetadataTargets(plugin)
   if (declared.length === 1) return declared[0]!
   if (declared.length > 1) return 'all'
   throw new Error('verify requires --target when plugin metadata does not declare a target')
 }
 
-function validateMetadataTargets(plugin: { metadata?: { targets?: string[] } }): Array<'next' | 'master'> {
+export function validateMetadataTargets(plugin: { metadata?: { targets?: string[] } }): Array<'next' | 'master'> {
   const raw = plugin.metadata?.targets ?? []
   for (const target of raw) {
     if (target !== 'next' && target !== 'master') {

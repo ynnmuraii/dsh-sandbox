@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,7 +8,8 @@ import { doctor } from '../doctor.js'
 import { pluginEvidenceKey, publishRunResult, type VerifyRunResultV1 } from '../evidence.js'
 import { publishUiResult, type UiResultV1 } from '../ui-evidence.js'
 import { computePluginDigest } from '../plugin-snapshot.js'
-import { handleInspect, handleStatus, handleDoctor, handleGetEvidence, handleListPlugins, ToolError } from './handlers.js'
+import { handleInspect, handleStatus, handleDoctor, handleGetEvidence, handleListPlugins, handleVerify, ToolError } from './handlers.js'
+import { loadRunResults } from '../evidence.js'
 import { resolvePluginRef } from '../plugin-ref.js'
 
 const roots: string[] = []
@@ -230,6 +231,68 @@ describe('mcp handlers parity', () => {
       const msg = (e as Error).message
       expect(msg).not.toContain('available:')
     }
+  })
+
+  it('verify PASS publishes and is retrievable via get_evidence (reconnect story)', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const deps = {
+      inspectPlugin: vi.fn(() => ({ schemaVersion: 1, plugin: { packageName: '@fixture/demo', sourcePath: pluginPath }, faces: { host: true, client: 'unknown' }, diagnostics: [], ok: true })),
+      verifyPackage: vi.fn(() => ({
+        tarball: join(root, 'dummy.tgz'),
+        steps: [
+          { id: 'install', status: 'pass' as const, durationMs: 1 },
+          { id: 'typecheck', status: 'pass' as const, durationMs: 1 },
+          { id: 'test', status: 'pass' as const, durationMs: 1 },
+          { id: 'build', status: 'pass' as const, durationMs: 1 },
+          { id: 'pack', status: 'pass' as const, durationMs: 1 },
+          { id: 'pack-smoke', status: 'pass' as const, durationMs: 1 },
+        ],
+      })),
+      verifyTarget: vi.fn(async () => {}),
+      createRunId: vi.fn(() => 'verify-20260823-0001'),
+      now: vi.fn(() => new Date('2026-08-23T10:00:00.000Z')),
+    }
+    const result = await handleVerify(root, { path: pluginPath, target: 'next' }, deps)
+    expect(result.result).toBe('pass')
+    expect(result.cleanup).toBe('pass')
+    expect(result.runId).toBe('verify-20260823-0001')
+    // persisted
+    const runs = loadRunResults({ runsRoot: join(root, '.lab', 'runs'), pluginKey: pluginEvidenceKey({ packageName: '@fixture/demo', sourcePath: pluginPath }) })
+    expect(runs.some(r => r.runId === 'verify-20260823-0001')).toBe(true)
+    // fresh handler (reconnect) via get_evidence
+    const evidence = handleGetEvidence(root, { path: pluginPath, kind: 'verify', limit: 5 })
+    expect(evidence.verify.some(r => r.runId === 'verify-20260823-0001')).toBe(true)
+    expect(evidence.verify[0]!.result).toBe('pass')
+  })
+
+  it('verify FAIL with coded step is successful tool call (not isError)', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const codedSteps = [
+      { id: 'install', status: 'pass' as const, durationMs: 1 },
+      { id: 'build', status: 'fail' as const, durationMs: 2, summary: 'build failed', code: 'pnpm.build.fail' as const, detail: 'stderr tail' },
+    ]
+    const failure = Object.assign(new Error('package failed'), { steps: codedSteps })
+    const deps = {
+      inspectPlugin: vi.fn(() => ({ schemaVersion: 1, plugin: { packageName: '@fixture/demo', sourcePath: pluginPath }, faces: { host: true, client: 'unknown' }, diagnostics: [], ok: true })),
+      verifyPackage: vi.fn(() => { throw failure }),
+      verifyTarget: vi.fn(async () => {}),
+      createRunId: vi.fn(() => 'verify-fail-0001'),
+      now: vi.fn(() => new Date('2026-08-23T10:00:01.000Z')),
+    }
+    const result = await handleVerify(root, { path: pluginPath, target: 'next' }, deps)
+    expect(result.result).toBe('fail')
+    expect(result.steps.some(s => (s as any).code === 'pnpm.build.fail')).toBe(true)
+    expect(result.steps.find(s => s.id === 'build')?.status).toBe('fail')
+  })
+
+  it('verify INVALID_TARGET when plugin declares no targets and no target arg', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    // overwrite plugin.yaml to have no targets
+    writeFileSync(join(pluginPath, '.dsh-lab', 'plugin.yaml'), 'name: demo\ntracking: local\nmaturity: experiment\n')
+    await expect(handleVerify(root, { path: pluginPath }, {})).rejects.toMatchObject({ code: 'INVALID_TARGET' })
+    // also with empty targets array
+    writeFileSync(join(pluginPath, '.dsh-lab', 'plugin.yaml'), 'name: demo\ntracking: local\nmaturity: experiment\ntargets: []\n')
+    await expect(handleVerify(root, { path: pluginPath }, {})).rejects.toMatchObject({ code: 'INVALID_TARGET' })
   })
 
   it('handler errors map to ToolError codes', () => {
