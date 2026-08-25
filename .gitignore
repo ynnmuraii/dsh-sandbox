@@ -14,6 +14,9 @@ coverage/
 plugins/*
 debug.log
 
+# Local session research/design docs — temporary, not for history
+.lab/research/
+
 # Local run evidence and session dumps (ephemeral, not for history)
 .lab/runs/
 .lab/ui-runs/
