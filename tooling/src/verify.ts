@@ -7,11 +7,10 @@ import { ROOT_PATHS, rootPath } from './context.js'
 import { inspectPlugin } from './inspect.js'
 import { createPluginSnapshot, type CreatePluginSnapshotOptions, type PluginSnapshot } from './plugin-snapshot.js'
 import { verifyPackageInWorkspace } from './package-verify.js'
-import { publishRunResult, type RunOutcome, type RunStepResult, type VerifyRunResultV1 } from './evidence.js'
+import { publishRunResult, sanitizeSummary, type LabErrorCode, type RunOutcome, type RunStepResult, type VerifyRunResultV1 } from './evidence.js'
 import type { PluginRef } from './plugin-ref.js'
 import { verifyPackedTarget } from './run.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
-
 export interface VerifyPluginOptions {
   root: string
   plugin: PluginRef
@@ -153,12 +152,29 @@ export async function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyRun
           outcome = 'fail'
           const summary = errorMessage(error)
           targets[target] = targetEvidence(target, compatibility, 'fail', summary)
-          steps.push({
+          const code = getErrorCode(error)
+          const detail = getErrorDetail(error)
+          const step: RunStepResult = {
             id: `target:${target}`,
             status: 'fail',
             durationMs: elapsed(deps, targetStarted),
             summary,
-          })
+          }
+          if (code !== undefined) {
+            const codeHolder = step as unknown as { code?: LabErrorCode }
+            codeHolder.code = code
+          }
+          if (detail !== undefined) {
+            const detailHolder = step as unknown as { detail?: string }
+            detailHolder.detail = sanitizeSummary(detail.slice(-500))
+          } else if (code !== undefined) {
+            const fallbackDetail = errorMessage(error).slice(-500)
+            if (fallbackDetail) {
+              const detailHolder = step as unknown as { detail?: string }
+              detailHolder.detail = sanitizeSummary(fallbackDetail)
+            }
+          }
+          steps.push(step)
         }
       }
     }
@@ -170,12 +186,21 @@ export async function verifyPlugin(opts: VerifyPluginOptions): Promise<VerifyRun
     } catch (error) {
       cleanupFailure = error
       outcome = 'fail'
-      steps.push({
+      const code: LabErrorCode = 'snapshot.cleanup.fail'
+      const detail = getErrorDetail(error) ?? errorMessage(error).slice(-500)
+      const step: RunStepResult = {
         id: 'cleanup',
         status: 'fail',
         durationMs: elapsed(deps, cleanupStarted),
         summary: errorMessage(error),
-      })
+      }
+      const codeHolder = step as unknown as { code?: LabErrorCode }
+      codeHolder.code = code
+      if (detail) {
+        const detailHolder = step as unknown as { detail?: string }
+        detailHolder.detail = sanitizeSummary(String(detail).slice(-500))
+      }
+      steps.push(step)
     }
 
     const finishedAt = deps.now().toISOString()
@@ -288,9 +313,24 @@ function pluginName(plugin: PluginRef): string {
 function elapsed(deps: VerifyPluginDependencies, started: number): number {
   return Math.max(0, deps.now().getTime() - started)
 }
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function getErrorCode(error: unknown): LabErrorCode | undefined {
+  if (error === null || typeof error !== 'object') return undefined
+  if (!('code' in error)) return undefined
+  const value = Reflect.get(error as object, 'code')
+  if (typeof value === 'string' && value.length > 0) return value as LabErrorCode
+  return undefined
+}
+
+function getErrorDetail(error: unknown): string | undefined {
+  if (error === null || typeof error !== 'object') return undefined
+  if (!('detail' in error)) return undefined
+  const value = Reflect.get(error as object, 'detail')
+  if (typeof value === 'string' && value.length > 0) return value
+  return undefined
 }
 
 function defaultEnvironment(): VerifyRunResultV1['environment'] {

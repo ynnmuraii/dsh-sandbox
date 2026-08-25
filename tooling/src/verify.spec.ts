@@ -189,6 +189,30 @@ describe('verifyPlugin orchestration', () => {
     expect(deps.publishResult).toHaveBeenCalledTimes(1)
   })
 
+  it('preserves LabErrorCode and detail from package failure steps into published result', async () => {
+    const events: string[] = []
+    const snapshot = fakeSnapshot(events)
+    const codedSteps = [
+      { id: 'install', status: 'pass' as const, durationMs: 1 },
+      { id: 'test', status: 'fail' as const, durationMs: 2, summary: 'test failed', code: 'pnpm.test.fail' as const, detail: 'stderr tail token=[REDACTED]' },
+      { id: 'build', status: 'skipped' as const, durationMs: 0 },
+    ]
+    const failure = Object.assign(new Error('package failed with code'), { steps: codedSteps })
+    const deps = dependencies(events, {
+      createSnapshot: vi.fn(() => {
+        events.push('snapshot')
+        return snapshot
+      }),
+      verifyPackage: vi.fn(() => {
+        events.push('package')
+        throw failure
+      }),
+    })
+    const result = await verifyPlugin(options(deps))
+    expect(result.steps).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'test', code: 'pnpm.test.fail', detail: expect.stringContaining('[REDACTED]') })]))
+    expect(result.steps.find(s => s.id === 'test')?.code).toBe('pnpm.test.fail')
+  })
+
   it('runs every selected target under all and aggregates a target failure', async () => {
     const events: string[] = []
     const deps = dependencies(events, {

@@ -410,8 +410,44 @@ describe('loadRunResults', () => {
     })).toThrow(/symlink|changed|containment|regular file/i)
     expect(seamCalled).toBe(true)
   })
-})
 
+  it('loads old persisted results without code/detail (backward compat)', () => {
+    const root = runsRoot()
+    const old = result({ steps: [{ id: 'install', status: 'pass', durationMs: 5 }] })
+    const key = pluginEvidenceKey(old.plugin)
+    // Manually write JSON without code/detail to simulate old persisted file
+    const pluginDir = join(root, key)
+    const runDir = join(pluginDir, old.runId)
+    mkdirSync(runDir, { recursive: true })
+    writeFileSync(join(runDir, 'result.json'), JSON.stringify(old))
+    const loaded = loadRunResults({ runsRoot: root, pluginKey: key })
+    expect(loaded).toHaveLength(1)
+    expect(loaded[0]!.steps[0]).toEqual({ id: 'install', status: 'pass', durationMs: 5 })
+    expect(loaded[0]!.steps[0]!.code).toBeUndefined()
+    expect(loaded[0]!.steps[0]!.detail).toBeUndefined()
+  })
+
+  it('round-trips new results with code and redacted detail', () => {
+    const root = runsRoot()
+    const withCode = result({
+      steps: [
+        { id: 'test', status: 'fail', durationMs: 10, summary: 'failed', code: 'pnpm.test.fail', detail: 'stderr token=supersecret' },
+        { id: 'build', status: 'pass', durationMs: 2 },
+      ],
+    })
+    const key = pluginEvidenceKey(withCode.plugin)
+    const publishedPath = publishRunResult({ runsRoot: root, result: withCode })
+    const raw = JSON.parse(readFileSync(publishedPath, 'utf8')) as VerifyRunResultV1
+    // detail must be sanitized (redacted) and capped, code preserved
+    expect(raw.steps[0]!.code).toBe('pnpm.test.fail')
+    expect(raw.steps[0]!.detail).toBeDefined()
+    expect(raw.steps[0]!.detail).not.toContain('supersecret')
+    expect(raw.steps[0]!.detail).toContain('[REDACTED]')
+    const loaded = loadRunResults({ runsRoot: root, pluginKey: key })
+    expect(loaded[0]!.steps[0]!.code).toBe('pnpm.test.fail')
+    expect(loaded[0]!.steps[0]!.detail).toContain('[REDACTED]')
+  })
+})
 function symlinkSyncDirectory(target: string, path: string): void {
   // Junctions are available to ordinary Windows users; POSIX uses a directory symlink.
   const type = process.platform === 'win32' ? 'junction' : 'dir'

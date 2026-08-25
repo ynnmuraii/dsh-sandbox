@@ -226,12 +226,12 @@ describe('prepareUiRuntime', () => {
     expect(plan.argv).toEqual([
       ...plan.launcher.args,
       '--profile', plan.profileName,
-      '--patch', plan.overlayPath,
+      '--patch', plan.overlayPath!,
       '--host', '127.0.0.1',
       '--port', '0',
       '--no-open',
     ])
-    expect(readFileSync(plan.overlayPath, 'utf8')).toContain(current.plugin.sourcePath.replaceAll('\\', '/'))
+    expect(readFileSync(plan.overlayPath!, 'utf8')).toContain(current.plugin.sourcePath.replaceAll('\\', '/'))
     const manifest = JSON.parse(readFileSync(join(plan.profileDir, 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>
       dsh: { profile: { bundles: string[] } }
@@ -261,7 +261,7 @@ describe('prepareUiRuntime', () => {
     expect(plan.retained.runtimeHome).toEqual(identityOf(join(sessionDir, 'home')))
     expect(plan.retained.profileDir).toEqual(identityOf(plan.profileDir))
     expect(plan.retained.overlayDir).toEqual(identityOf(join(sessionDir, 'overlay')))
-    expect(plan.retained.overlayFile).toEqual(identityOf(plan.overlayPath))
+    expect(plan.retained.overlayFile).toEqual(identityOf(plan.overlayPath!))
   })
 
   it('forwards cancellation to launcher resolution and profile installation', async () => {
@@ -376,9 +376,9 @@ describe('prepareUiRuntime', () => {
       prepareUiRuntime({ root: current.root, plugin: current.plugin, target: 'next', sessionId: otherSession }, second.deps),
     ])
 
-    for (const path of [right.sessionDir, right.runtimeHome, right.profileDir, right.overlayPath]) {
+    for (const path of [right.sessionDir, right.runtimeHome, right.profileDir, right.overlayPath!]) {
       expect(path).not.toBe(left.sessionDir)
-      expect(path.startsWith(left.sessionDir)).toBe(false)
+      expect(path!.startsWith(left.sessionDir)).toBe(false)
     }
   })
 

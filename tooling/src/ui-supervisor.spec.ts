@@ -89,13 +89,13 @@ function fixture(sessionId = SESSION, existingRoot?: string) {
     cwd: join(sessionDir, 'home'),
   }
   mkdirSync(plan.profileDir, { recursive: true })
-  mkdirSync(join(plan.overlayPath, '..'), { recursive: true })
-  writeFileSync(plan.overlayPath, 'overlay')
+  mkdirSync(join(plan.overlayPath!, '..'), { recursive: true })
+  writeFileSync(plan.overlayPath!, 'overlay')
   plan.retained = {
     runtimeHome: identityOf(plan.runtimeHome),
     profileDir: identityOf(plan.profileDir),
     overlayDir: identityOf(join(sessionDir, 'overlay')),
-    overlayFile: identityOf(plan.overlayPath),
+    overlayFile: identityOf(plan.overlayPath!),
   }
   const request: UiSupervisorRequestV1 = {
     schemaVersion: 1,
@@ -681,8 +681,8 @@ describe('runUiSupervisor', () => {
     const bundle = dependencies(current.plan)
     bundle.deps.openLog = vi.fn((sessionDir: string, maxBytes: number) => {
       const log = openBoundedSupervisorLog(sessionDir, maxBytes)
-      renameSync(current.plan.overlayPath, `${current.plan.overlayPath}.parked`)
-      writeFileSync(current.plan.overlayPath, 'forged overlay')
+      renameSync(current.plan.overlayPath!, `${current.plan.overlayPath!}.parked`)
+      writeFileSync(current.plan.overlayPath!, 'forged overlay')
       return log
     })
 
@@ -705,9 +705,8 @@ describe('runUiSupervisor', () => {
       state: 'aborted',
       cleanup: 'pass',
     })
-    expect(existsSync(current.plan.overlayPath)).toBe(false)
+    expect(existsSync(current.plan.overlayPath!)).toBe(false)
   })
-
   it('refuses to spawn after the profile directory becomes a junction outside the session', async () => {
     const current = fixture()
     const outside = mkdtempSync(join(tmpdir(), 'dsh-lab-ui-supervisor-profile-outside-'))

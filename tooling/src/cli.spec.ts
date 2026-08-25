@@ -796,3 +796,212 @@ describe('UI session CLI', () => {
     expect(verifyPlugin).not.toHaveBeenCalled()
   })
 })
+
+describe('suppressConsoleProgress completeness', () => {
+  const standalone = { sourcePath: 'A:/standalone', packageName: '@fixture/standalone' }
+  function verifyResult() {
+    return {
+      schemaVersion: 1 as const,
+      runId: 'verify-1',
+      operation: 'verify' as const,
+      result: 'pass' as const,
+      plugin: { ...standalone, digest: `sha256:${'a'.repeat(64)}` as const },
+      targets: { next: { dsh: '0.1.1-rc.2', result: 'pass' as const } },
+      lab: { contextDigest: `sha256:${'b'.repeat(64)}` },
+      environment: { node: '22.20.0', pnpm: '11.7.0', platform: process.platform },
+      steps: [{ id: 'inspect', status: 'pass' as const, durationMs: 1 }],
+      cleanup: 'pass' as const,
+      startedAt: '2026-08-23T10:00:00.000Z',
+      finishedAt: '2026-08-23T10:00:01.000Z',
+    }
+  }
+
+  it('suppresses console.warn and console.error so JSON stdout remains one document', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(standalone)
+    const result = verifyResult()
+    vi.mocked(verifyPlugin).mockImplementation(async () => {
+      console.log('log progress')
+      console.warn('warn progress')
+      console.error('error progress')
+      return result
+    })
+    expect(await runCli(['verify', '--path', 'A:/standalone', '--target', 'next', '--json'])).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    expect(JSON.parse(output.logs[0]!)).toEqual(result)
+    expect(output.errors).toHaveLength(0)
+  })
+})
+
+describe('JSON shape stability (C8)', () => {
+  const plugin = { sourcePath: 'A:/standalone', packageName: '@fixture/standalone' }
+
+  function makeInspection(): ReturnType<typeof inspectPlugin> {
+    return {
+      schemaVersion: 1,
+      plugin,
+      faces: { host: true, client: false },
+      diagnostics: [],
+      ok: true,
+    } as ReturnType<typeof inspectPlugin>
+  }
+
+  function makeStatus(): ReturnType<typeof derivePluginStatus> {
+    return {
+      schemaVersion: 1,
+      plugin: { ...plugin, digest: `sha256:${'a'.repeat(64)}` as const },
+      structure: { state: 'pass', runId: 'verify-1' },
+      bundle: { state: 'pass', runId: 'verify-1' },
+      targets: { next: { state: 'pass', runId: 'verify-1' }, master: { state: 'not-applicable' } },
+      ui: { state: 'not-applicable' },
+    } as ReturnType<typeof derivePluginStatus>
+  }
+
+  function makeVerify(): ReturnType<typeof verifyPlugin> extends Promise<infer T> ? T : never {
+    return {
+      schemaVersion: 1,
+      runId: 'verify-1',
+      operation: 'verify',
+      result: 'pass',
+      plugin: { ...plugin, digest: `sha256:${'a'.repeat(64)}` as const },
+      targets: { next: { dsh: '0.1.1-rc.2', result: 'pass' } },
+      lab: { contextDigest: `sha256:${'b'.repeat(64)}` },
+      environment: { node: '22.20.0', pnpm: '11.7.0', platform: process.platform },
+      steps: [{ id: 'inspect', status: 'pass', durationMs: 1 }],
+      cleanup: 'pass',
+      startedAt: '2026-08-23T10:00:00.000Z',
+      finishedAt: '2026-08-23T10:00:01.000Z',
+    } as unknown as ReturnType<typeof verifyPlugin> extends Promise<infer T> ? T : never
+  }
+
+  function makeUiView(): UiSessionViewV1 {
+    return {
+      schemaVersion: 1,
+      sessionId: 'ui-20260824T120000000Z-a1b2c3d4',
+      state: 'ready',
+      stale: false,
+      staleReasons: [],
+      plugin: { packageName: plugin.packageName, sourcePath: plugin.sourcePath, digest: `sha256:${'a'.repeat(64)}` },
+      target: { name: 'next', dsh: '0.1.1-rc.2' },
+      contextDigest: `sha256:${'b'.repeat(64)}`,
+      url: 'http://127.0.0.1:49152',
+      startedAt: '2026-08-24T12:00:00.000Z',
+      updatedAt: '2026-08-24T12:00:01.000Z',
+    }
+  }
+
+  function makeUiResult(): UiResultV1 {
+    return {
+      schemaVersion: 1,
+      sessionId: 'ui-20260824T120000000Z-a1b2c3d4',
+      operation: 'ui',
+      verdict: 'pass',
+      plugin: { packageName: plugin.packageName, sourcePath: plugin.sourcePath, digest: `sha256:${'a'.repeat(64)}` },
+      target: { name: 'next', dsh: '0.1.1-rc.2' },
+      lab: { contextDigest: `sha256:${'b'.repeat(64)}` },
+      summary: 'looks correct',
+      cleanup: 'pass',
+      startedAt: '2026-08-24T12:00:00.000Z',
+      finishedAt: '2026-08-24T12:00:02.000Z',
+    }
+  }
+
+  it('inspect --json returns schemaVersion 1 and required keys', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    const expected = makeInspection()
+    vi.mocked(inspectPlugin).mockReturnValue(expected)
+    expect(await runCli(['inspect', '--path', 'A:/standalone', '--json'])).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    const parsed = JSON.parse(output.logs[0]!)
+    expect(parsed.schemaVersion).toBe(1)
+    expect(parsed).toHaveProperty('plugin')
+    expect(parsed).toHaveProperty('faces')
+    expect(parsed).toHaveProperty('diagnostics')
+    expect(parsed).toHaveProperty('ok')
+  })
+
+  it('status --json returns schemaVersion 1 and required keys', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    const expected = makeStatus()
+    vi.mocked(derivePluginStatus).mockReturnValue(expected)
+    expect(await runCli(['status', '--path', 'A:/standalone', '--json'])).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    const parsed = JSON.parse(output.logs[0]!)
+    expect(parsed.schemaVersion).toBe(1)
+    expect(parsed).toHaveProperty('plugin')
+    expect(parsed).toHaveProperty('structure')
+    expect(parsed).toHaveProperty('bundle')
+    expect(parsed).toHaveProperty('targets')
+    expect(parsed).toHaveProperty('ui')
+  })
+
+  it('verify --json returns schemaVersion 1 and required keys', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    const expected = makeVerify() as unknown as Awaited<ReturnType<typeof verifyPlugin>>
+    vi.mocked(verifyPlugin).mockResolvedValue(expected)
+    expect(await runCli(['verify', '--path', 'A:/standalone', '--target', 'next', '--json'])).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    const parsed = JSON.parse(output.logs[0]!)
+    expect(parsed.schemaVersion).toBe(1)
+    expect(parsed).toHaveProperty('runId')
+    expect(parsed).toHaveProperty('operation')
+    expect(parsed).toHaveProperty('result')
+    expect(parsed).toHaveProperty('plugin')
+    expect(parsed).toHaveProperty('targets')
+    expect(parsed).toHaveProperty('lab')
+    expect(parsed).toHaveProperty('environment')
+    expect(parsed).toHaveProperty('steps')
+    expect(parsed).toHaveProperty('cleanup')
+    expect(parsed).toHaveProperty('startedAt')
+    expect(parsed).toHaveProperty('finishedAt')
+  })
+
+  it('ui start --json returns schemaVersion 1 and required UiSessionViewV1 keys', async () => {
+    const output = captureConsole()
+    vi.mocked(resolvePluginRef).mockReturnValue(plugin)
+    const expected = makeUiView()
+    vi.mocked(startUiSession).mockResolvedValue(expected)
+    expect(await runCli(['ui', 'start', '--path', 'A:/standalone', '--target', 'next', '--json'])).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    const parsed = JSON.parse(output.logs[0]!)
+    expect(parsed.schemaVersion).toBe(1)
+    expect(parsed).toHaveProperty('sessionId')
+    expect(parsed).toHaveProperty('state')
+    expect(parsed).toHaveProperty('stale')
+    expect(parsed).toHaveProperty('plugin')
+    expect(parsed).toHaveProperty('target')
+  })
+
+  it('ui status --json returns schemaVersion 1 and required keys', async () => {
+    const output = captureConsole()
+    const expected = makeUiView()
+    vi.mocked(getUiSessionStatus).mockReturnValue(expected)
+    expect(await runCli(['ui', 'status', 'ui-20260824T120000000Z-a1b2c3d4', '--json'])).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    const parsed = JSON.parse(output.logs[0]!)
+    expect(parsed.schemaVersion).toBe(1)
+    expect(parsed).toHaveProperty('sessionId')
+    expect(parsed).toHaveProperty('state')
+  })
+
+  it('ui finish --json returns schemaVersion 1 and required UiResultV1 keys', async () => {
+    const output = captureConsole()
+    const expected = makeUiResult()
+    vi.mocked(finishUiSession).mockResolvedValue(expected)
+    expect(await runCli(['ui', 'finish', 'ui-20260824T120000000Z-a1b2c3d4', '--verdict', 'pass', '--summary', 'ok', '--json'])).toBe(0)
+    expect(output.logs).toHaveLength(1)
+    const parsed = JSON.parse(output.logs[0]!)
+    expect(parsed.schemaVersion).toBe(1)
+    expect(parsed).toHaveProperty('sessionId')
+    expect(parsed).toHaveProperty('operation')
+    expect(parsed).toHaveProperty('verdict')
+    expect(parsed).toHaveProperty('plugin')
+    expect(parsed).toHaveProperty('target')
+    expect(parsed).toHaveProperty('lab')
+    expect(parsed).toHaveProperty('summary')
+    expect(parsed).toHaveProperty('cleanup')
+  })
+})

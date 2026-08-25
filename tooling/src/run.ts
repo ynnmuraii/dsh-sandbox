@@ -14,6 +14,8 @@ import { pnpm, pnpmAsync, pnpmCommand } from './proc.js'
 import { resolvePluginRef, type PluginRef } from './plugin-ref.js'
 import { verifyPlugin } from './verify.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
+import { sanitizeSummary } from './evidence.js'
+import type { LabErrorCode } from './evidence.js'
 
 export interface ProfileSpec {
   name: string
@@ -31,6 +33,7 @@ export interface DevPluginOptions {
   root: string
   plugin: PluginRef
   target: 'next' | 'master'
+  logger?: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void }
 }
 
 export interface VerifyOptions {
@@ -334,6 +337,7 @@ function devPluginName(plugin: PluginRef): string {
  */
 export async function devPlugin(opts: DevPluginOptions): Promise<void> {
   const { root, plugin, target } = opts
+  const logger = opts.logger ?? { info: console.log.bind(console), warn: console.warn.bind(console) }
   const name = devPluginName(plugin)
   assertRuntimePluginIdentity(name)
   const declaredTargets = plugin.metadata?.targets
@@ -367,9 +371,9 @@ export async function devPlugin(opts: DevPluginOptions): Promise<void> {
   const launcher = await resolveDevLauncher(root, compat, target)
   const nodeOptions = [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' ')
   const env = { ...process.env, NODE_OPTIONS: nodeOptions, DSH_HOME: rootPath(root, ROOT_PATHS.runtime).replace(/\\/g, '/') }
-  console.log(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
-  console.log(`[dev] generated overlay: ${overlayPath}`)
-  console.log(`[dev] booting materialized web profile '${bootProfileName}' with DSH_HOME=${env.DSH_HOME}`)
+  logger.info(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
+  logger.info(`[dev] generated overlay: ${overlayPath}`)
+  logger.info(`[dev] booting materialized web profile '${bootProfileName}' with DSH_HOME=${env.DSH_HOME}`)
 
   try {
     if (target !== 'master') {
@@ -422,13 +426,14 @@ export async function verifyPackedTarget(opts: {
   compat: Compatibility
   masterBin?: string
   removeProfile?: (profileDir: string) => void
+  logger?: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void }
 }): Promise<void> {
   assertRuntimePluginIdentity(opts.pluginName)
   const { root, pluginName, target, tarball, compat, masterBin } = opts
+  const logger = opts.logger ?? { info: console.log.bind(console), warn: console.warn.bind(console) }
   const removeProfile = opts.removeProfile ?? ((profileDir: string) => {
     rmSync(profileDir, { recursive: true, force: true })
   })
-
   // Ephemeral profile under the runtime home. The launcher resolves
   // `--profile <name>` under `$DSH_HOME/profiles`, so DSH_HOME is pointed at
   // the runtime dir and the profile lands at
@@ -466,32 +471,50 @@ export async function verifyPackedTarget(opts: {
     if (target !== 'master') {
       pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
     }
-    execFileSync(
-      launcher.cmd,
-      [
-        ...launcher.args,
-        'plugin',
-        '--profile',
-        profileNameValue,
-        'add',
-        `file:${tarball.replace(/\\/g, '/')}`,
-        '--config.strictDepBuilds=false',
-      ],
-      { cwd: profileDir, env, stdio: ['ignore', 'pipe', 'pipe'] },
-    )
+    try {
+      execFileSync(
+        launcher.cmd,
+        [
+          ...launcher.args,
+          'plugin',
+          '--profile',
+          profileNameValue,
+          'add',
+          `file:${tarball.replace(/\\/g, '/')}`,
+          '--config.strictDepBuilds=false',
+        ],
+        { cwd: profileDir, env, stdio: ['ignore', 'pipe', 'pipe'] },
+      )
+    } catch (e) {
+      const err = new Error(`dsh plugin add failed for '${pluginName}' under ${target}: ${sanitizeSummary(e instanceof Error ? e.message : String(e))}`, { cause: e })
+      Object.defineProperty(err, 'code', { value: 'dsh.plugin-add.fail' as LabErrorCode, enumerable: true, configurable: true })
+      Object.defineProperty(err, 'detail', { value: extractRunDetail(e), enumerable: true, configurable: true })
+      throw err
+    }
 
     // 4. Compose the profile config for THIS target WITHOUT binding a port/server
     //    (a live dsh is already bound on 3080), then assert the plugin's patch
     //    layer surfaces. The plugin's execution contract itself is proven earlier
     //    by the pack-smoke; this per-target check confirms the tarball composes
     //    into the specific target's profile.
-    const out = execFileSync(
-      launcher.cmd,
-      [...launcher.args, '--profile', profileNameValue, '--dump-config'],
-      { cwd: profileDir, env, encoding: 'utf8' },
-    ) as string
-    if (!out.includes(pluginName)) {
-      throw new Error(`plugin '${pluginName}' missing from composed profile config under ${target}`)
+    let out: string
+    try {
+      out = execFileSync(
+        launcher.cmd,
+        [...launcher.args, '--profile', profileNameValue, '--dump-config'],
+        { cwd: profileDir, env, encoding: 'utf8' },
+      ) as string
+    } catch (e) {
+      const err = new Error(`dsh dump-config failed for '${pluginName}' under ${target}: ${sanitizeSummary(e instanceof Error ? e.message : String(e))}`, { cause: e })
+      Object.defineProperty(err, 'code', { value: 'dsh.dump-config.fail' as LabErrorCode, enumerable: true, configurable: true })
+      Object.defineProperty(err, 'detail', { value: extractRunDetail(e), enumerable: true, configurable: true })
+      throw err
+    }
+    if (!out!.includes(pluginName)) {
+      const assertion = new Error(`plugin '${pluginName}' missing from composed profile config under ${target}`)
+      Object.defineProperty(assertion, 'code', { value: 'dsh.dump-config.fail' as LabErrorCode, enumerable: true, configurable: true })
+      Object.defineProperty(assertion, 'detail', { value: sanitizeSummary(out!.slice(-500)), enumerable: true, configurable: true })
+      throw assertion
     }
   } finally {
     try {
@@ -504,17 +527,40 @@ export async function verifyPackedTarget(opts: {
         } catch (rollback) {
           throw new AggregateError([e, rollback], `failed to clean verify profile '${profileDir}'`)
         }
-        console.warn(`[verify] profile cleanup deferred; moved stale profile to ${stale}`)
-        throw new Error(
+        logger.warn(`[verify] profile cleanup deferred; moved stale profile to ${stale}`)
+        const err = new Error(
           `failed to clean verify profile '${profileDir}'; moved stale profile to '${stale}': ${
             e instanceof Error ? e.message : String(e)
           }`,
           { cause: e },
         )
+        Object.defineProperty(err, 'code', { value: 'dsh.profile-cleanup.fail' as LabErrorCode, enumerable: true, configurable: true })
+        Object.defineProperty(err, 'detail', { value: extractRunDetail(e), enumerable: true, configurable: true })
+        throw err
       }
-      throw new Error(`failed to clean verify profile '${profileDir}': ${e instanceof Error ? e.message : String(e)}`, {
+      const err = new Error(`failed to clean verify profile '${profileDir}': ${e instanceof Error ? e.message : String(e)}`, {
         cause: e,
       })
+      Object.defineProperty(err, 'code', { value: 'dsh.profile-cleanup.fail' as LabErrorCode, enumerable: true, configurable: true })
+      Object.defineProperty(err, 'detail', { value: extractRunDetail(e), enumerable: true, configurable: true })
+      throw err
     }
   }
+}
+
+function extractRunDetail(error: unknown): string {
+  const raw = (() => {
+    if (error instanceof Error) {
+      const withOutput = error as Error & { stderr?: unknown; stdout?: unknown; output?: unknown }
+      if (typeof withOutput.stderr === 'string' || Buffer.isBuffer(withOutput.stderr)) return String(withOutput.stderr)
+      if (typeof withOutput.stdout === 'string' || Buffer.isBuffer(withOutput.stdout)) return String(withOutput.stdout)
+      if (Array.isArray(withOutput.output)) {
+        const combined = (withOutput.output as unknown[]).filter(v => typeof v === 'string' || Buffer.isBuffer(v as Buffer)).map(v => String(v)).join(' ')
+        if (combined) return combined
+      }
+      return error.message
+    }
+    return String(error)
+  })()
+  return sanitizeSummary(raw.slice(-500))
 }

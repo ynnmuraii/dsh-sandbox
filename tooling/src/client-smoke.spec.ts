@@ -46,7 +46,7 @@ function createUstarHeader(name: string, size: number): Buffer {
   header.write('ustar\x00', 257, 'utf8')
   header.write('00', 263, 'utf8')
   let sum = 0
-  for (let i = 0; i < 512; i++) sum += header[i]
+  for (let i = 0; i < 512; i++) sum += header[i]!
   const checksum = sum.toString(8).padStart(6, '0') + '\0 '
   header.write(checksum, 148, 'utf8')
   return header

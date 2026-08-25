@@ -19,11 +19,27 @@ import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 export type StepStatus = 'pass' | 'fail' | 'blocked' | 'skipped' | 'not-applicable'
 export type RunOutcome = 'pass' | 'fail' | 'blocked'
 
+export type LabErrorCode =
+  | 'pnpm.install.fail'
+  | 'pnpm.typecheck.fail'
+  | 'pnpm.test.fail'
+  | 'pnpm.build.fail'
+  | 'pnpm.pack.fail'
+  | 'pnpm.pack-smoke.fail'
+  | 'dsh.plugin-add.fail'
+  | 'dsh.dump-config.fail'
+  | 'dsh.profile-cleanup.fail'
+  | 'client-smoke.no-register'
+  | 'snapshot.cleanup.fail'
+  | 'verify.prerequisite.fail'
+
 export interface RunStepResult {
   id: string
   status: StepStatus
   durationMs: number
   summary?: string
+  code?: LabErrorCode
+  detail?: string
 }
 
 export interface VerifyRunResultV1 {
@@ -339,7 +355,7 @@ function validateSteps(value: unknown): void {
   if (value.length > MAX_STEPS) throw new Error(`steps cannot contain more than ${MAX_STEPS} entries`)
   for (const [index, stepValue] of value.entries()) {
     const step = asRecord(stepValue, `steps[${index}]`)
-    assertKnownKeys(step, ['id', 'status', 'durationMs', 'summary'], `steps[${index}]`)
+    assertKnownKeys(step, ['id', 'status', 'durationMs', 'summary', 'code', 'detail'], `steps[${index}]`)
     assertRequiredKeys(step, ['id', 'status', 'durationMs'], `steps[${index}]`)
     assertNonEmptyString(step.id, `steps[${index}].id`)
     assertOneOf(step.status, STEP_STATUSES, `steps[${index}].status`)
@@ -350,6 +366,17 @@ function validateSteps(value: unknown): void {
       const summary = assertString(step.summary, `steps[${index}].summary`)
       if (Array.from(summary).length > MAX_SUMMARY_LENGTH) {
         throw new Error(`steps[${index}].summary exceeds ${MAX_SUMMARY_LENGTH} characters`)
+      }
+    }
+    if (Object.hasOwn(step, 'code')) {
+      const code = assertString(step.code, `steps[${index}].code`)
+      if (code.trim().length === 0) throw new Error(`steps[${index}].code must be a non-empty string`)
+      if (Array.from(code).length > 100) throw new Error(`steps[${index}].code exceeds 100 characters`)
+    }
+    if (Object.hasOwn(step, 'detail')) {
+      const detail = assertString(step.detail, `steps[${index}].detail`)
+      if (Array.from(detail).length > MAX_SUMMARY_LENGTH) {
+        throw new Error(`steps[${index}].detail exceeds ${MAX_SUMMARY_LENGTH} characters`)
       }
     }
   }
@@ -363,6 +390,8 @@ function sanitizeResult(result: VerifyRunResultV1): VerifyRunResultV1 {
       durationMs: step.durationMs,
     }
     if (step.summary !== undefined) storedStep.summary = sanitizeSummary(step.summary)
+    if (step.code !== undefined) storedStep.code = String(step.code).trim().slice(0, 100) as LabErrorCode
+    if (step.detail !== undefined) storedStep.detail = sanitizeSummary(step.detail)
     return storedStep
   })
   return {
@@ -394,8 +423,7 @@ function sanitizeResult(result: VerifyRunResultV1): VerifyRunResultV1 {
     finishedAt: result.finishedAt,
   }
 }
-
-function sanitizeSummary(summary: string): string {
+export function sanitizeSummary(summary: string): string {
   let sanitized = summary.replace(/\r\n?|\n/g, ' ')
   sanitized = sanitized.replace(
     /\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{10,})\b/gi,

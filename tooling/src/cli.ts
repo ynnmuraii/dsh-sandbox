@@ -476,11 +476,17 @@ function uiStatusExitCode(view: UiSessionViewV1): number { return view.state ===
 
 async function suppressConsoleProgress<T>(operation: () => T | Promise<T>): Promise<T> {
   const originalLog = console.log
+  const originalWarn = console.warn
+  const originalError = console.error
   console.log = () => undefined
+  console.warn = () => undefined
+  console.error = () => undefined
   try {
     return await operation()
   } finally {
     console.log = originalLog
+    console.warn = originalWarn
+    console.error = originalError
   }
 }
 

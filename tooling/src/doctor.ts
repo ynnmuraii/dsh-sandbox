@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import type { Dirent } from 'node:fs'
 import { join } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
 import { loadCompatibility, loadCompatibilityFromFile, loadCatalogFromFile } from './schemas.js'
@@ -216,9 +217,106 @@ export async function doctor({ root }: DoctorOptions): Promise<DiagnosticResult[
     }
   }
 
+  // Runtime hygiene (warn level): orphaned ephemeral verify profiles / stale fallbacks + abandoned terminal UI sessions.
+  for (const diag of runtimeHygieneDiagnostics(root)) out.push(diag)
+
   return out
 }
 
+function runtimeHygieneDiagnostics(root: string): DiagnosticResult[] {
+  const diagnostics: DiagnosticResult[] = []
+  const runtimeRoot = rootPath(root, ROOT_PATHS.runtime)
+  if (!existsSync(runtimeRoot)) return diagnostics
+
+  const profilesDir = join(runtimeRoot, 'profiles')
+  if (existsSync(profilesDir)) {
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(profilesDir, { withFileTypes: true })
+    } catch {
+      diagnostics.push({ level: 'warn', message: `unreadable runtime profiles directory: ${profilesDir}` })
+      return diagnostics
+    }
+    for (const entry of entries) {
+      const name = entry.name
+      const isStale = name.includes('.stale-')
+      const isVerify = name.includes('-verify-')
+      if (!isStale && !isVerify) continue
+      const fullPath = join(profilesDir, name)
+      try {
+        const stat = statSync(fullPath)
+        if (!stat.isDirectory()) continue
+      } catch {
+        // cannot stat — still actionable, fall through to warn
+      }
+      if (isStale) {
+        diagnostics.push({ level: 'warn', message: `stale verify profile fallback remains at ${fullPath} (remove after verifying no process holds it)` })
+      } else {
+        diagnostics.push({ level: 'warn', message: `orphaned ephemeral verify profile remains at ${fullPath} (previous run leaked; remove if no verify is running)` })
+      }
+    }
+  }
+
+  const uiSessionsRoot = join(runtimeRoot, 'ui-sessions')
+  if (existsSync(uiSessionsRoot)) {
+    let sessionEntries: Dirent[]
+    try {
+      sessionEntries = readdirSync(uiSessionsRoot, { withFileTypes: true })
+    } catch {
+      diagnostics.push({ level: 'warn', message: `unreadable UI sessions directory: ${uiSessionsRoot}` })
+      return diagnostics
+    }
+    const terminalStates: Record<string, true> = { finished: true, aborted: true, crashed: true }
+    const now = Date.now()
+    const twentyFourHoursMs = 24 * 60 * 60 * 1000
+    for (const entry of sessionEntries) {
+      if (!entry.isDirectory()) continue
+      const sessionDir = join(uiSessionsRoot, entry.name)
+      const statePath = join(sessionDir, 'state.json')
+      if (!existsSync(statePath)) continue
+      let raw: string
+      try {
+        raw = readFileSync(statePath, 'utf8')
+      } catch {
+        diagnostics.push({ level: 'warn', message: `unreadable UI session state at ${statePath}` })
+        continue
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        diagnostics.push({ level: 'warn', message: `unreadable UI session state at ${statePath} (malformed JSON)` })
+        continue
+      }
+      let stateValue: unknown
+      if (parsed !== null && typeof parsed === 'object' && 'state' in parsed) {
+        stateValue = Reflect.get(parsed as object, 'state')
+      } else {
+        diagnostics.push({ level: 'warn', message: `unreadable UI session state at ${statePath} (missing state field)` })
+        continue
+      }
+      if (typeof stateValue !== 'string' || !(stateValue in terminalStates)) {
+        if (typeof stateValue !== 'string') {
+          diagnostics.push({ level: 'warn', message: `unreadable UI session state at ${statePath} (invalid state field)` })
+        }
+        continue
+      }
+      let mtimeMs: number
+      try {
+        const st = statSync(sessionDir)
+        mtimeMs = st.mtimeMs
+      } catch {
+        diagnostics.push({ level: 'warn', message: `unreadable UI session state at ${statePath} (cannot stat session dir)` })
+        continue
+      }
+      if (now - mtimeMs > twentyFourHoursMs) {
+        diagnostics.push({ level: 'warn', message: `abandoned terminal UI session remains at ${sessionDir} (state=${stateValue}, mtime older than 24h; remove if no longer needed)` })
+      }
+    }
+  }
+
+  return diagnostics
+}
 // Diagnostics for a cataloged `tracking: submodule` plugin repo, without
 // modifying anything: presence, meta-repo gitlink, and working-tree cleanliness.
 function submoduleDiagnostics(root: string, relPath: string): string[] {

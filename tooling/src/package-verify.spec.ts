@@ -110,7 +110,7 @@ function createUstarHeader(name: string, size: number): Buffer {
   header.write('ustar\x00', 257, 'utf8')
   header.write('00', 263, 'utf8')
   let sum = 0
-  for (let i = 0; i < 512; i++) sum += header[i]
+  for (let i = 0; i < 512; i++) sum += header[i]!
   const checksum = sum.toString(8).padStart(6, '0') + '\0 '
   header.write(checksum, 148, 'utf8')
   return header
@@ -533,8 +533,55 @@ describe('verifyPackageInWorkspace', () => {
     expect(calls.map(call => call.args[0])).toEqual(['install', 'typecheck', 'test', 'build', 'pack'])
     expect(steps.find(step => step.id === 'pack-smoke')?.status).toBe('skipped')
   })
-})
 
+  it('attaches LabErrorCode and redacted detail on failing pnpm steps', () => {
+    const workspacePath = workspace()
+    const secretError = Object.assign(new Error('test failed token=supersecret ghp_1234567890abcdef1234'), { stderr: 'stderr token=supersecret ghp_1234567890abcdef1234 tail' })
+    const runner: PackageVerifyRunner = {
+      pnpm(args, opts) {
+        if (args[0] === 'test') throw secretError
+        if (args[0] === 'pack') {
+          const out = JSON.stringify({ filename: 'fixture-demo-0.0.0.tgz' })
+          writeFileSync(join(opts.cwd!, 'fixture-demo-0.0.0.tgz'), '')
+          return out
+        }
+        return ''
+      },
+    }
+    let error: unknown
+    try {
+      verifyPackageInWorkspace({ workspacePath, allowBuilds: {}, runner })
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(Error)
+    const steps = (error as Error & { steps: Array<{ id: string; status: string; code?: string; detail?: string; summary?: string }> }).steps
+    const testStep = steps.find(s => s.id === 'test')
+    expect(testStep?.status).toBe('fail')
+    expect(testStep?.code).toBe('pnpm.test.fail')
+    expect(testStep?.detail).toBeDefined()
+    expect(testStep?.detail).not.toContain('supersecret')
+    expect(testStep?.detail).toContain('[REDACTED]')
+    expect(testStep?.summary).not.toContain('supersecret')
+  })
+
+  it('attaches verify.prerequisite.fail for blocked install on prerequisite error', () => {
+    const workspacePath = workspace()
+    let error: unknown
+    try {
+      rmSync(join(workspacePath, 'pnpm-workspace.yaml'))
+      verifyPackageInWorkspace({ workspacePath, allowBuilds: {}, runner: runner().runner })
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(Error)
+    const steps = (error as Error & { steps: Array<{ id: string; status: string; code?: string; detail?: string }> }).steps
+    const installStep = steps.find(s => s.id === 'install')
+    expect(installStep?.status).toBe('blocked')
+    expect(installStep?.code).toBe('verify.prerequisite.fail')
+    expect(installStep?.detail).toBeDefined()
+  })
+})
 function expectStructuredPrerequisiteError(run: () => unknown): void {
   let error: unknown
   try {

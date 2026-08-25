@@ -423,3 +423,109 @@ describe('upstreamWorkingTreeDirty', () => {
     }
   })
 })
+
+describe('logger injection', () => {
+  it('routes devPlugin banner through injected logger and defaults to console without throwing', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dev-logger-'))
+    const externalRoot = mkdtempSync(join(tmpdir(), 'dsh-dev-logger-external-'))
+    try {
+      mkdirSync(join(root, 'workbench'), { recursive: true })
+      writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+        'targets:',
+        '  next:',
+        '    dsh: 0.1.1-rc.2',
+        '    cordis: 4.0.1',
+        '    node: 22.20.0',
+        '    pnpm: 11.7.0',
+        '    allowBuilds:',
+        '      esbuild: true',
+        '  master:',
+        '    repository: deepseek-ai/deepseek-harness',
+        `    commit: ${'1'.repeat(40)}`,
+        '    pnpm: 11.7.0',
+        '    node: ^22.19.0',
+        '',
+      ].join('\n'))
+      mkdirSync(join(externalRoot, 'src'), { recursive: true })
+      writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
+      writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/logger-plugin"}\n')
+      const fakeLauncher = join(root, 'fake-launcher.mjs')
+      writeFileSync(fakeLauncher, "import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.DSH_DEV_CAPTURE ?? '', 'ok')\n")
+      const capturePath = join(root, 'capture.json')
+      vi.mocked(pnpm).mockReset().mockReturnValue('')
+      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [fakeLauncher] })
+      const previousCapture = process.env.DSH_DEV_CAPTURE
+      process.env.DSH_DEV_CAPTURE = capturePath
+      const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/logger-plugin' }
+      const infos: string[] = []
+      const warns: string[] = []
+      const logger = { info: (...args: unknown[]) => infos.push(args.join(' ')), warn: (...args: unknown[]) => warns.push(args.join(' ')) }
+      try {
+        await devPlugin({ root, plugin, target: 'next', logger })
+      } finally {
+        if (previousCapture === undefined) delete process.env.DSH_DEV_CAPTURE
+        else process.env.DSH_DEV_CAPTURE = previousCapture
+      }
+      expect(infos).toHaveLength(3)
+      expect(infos[0]).toMatch(/\[dev\] plugin 'logger-plugin'/)
+      expect(infos[1]).toMatch(/generated overlay/)
+      expect(infos[2]).toMatch(/booting materialized web profile/)
+      expect(warns).toHaveLength(0)
+      // Default logger (no injection) does not throw — verify by calling again without logger and ensuring no exception
+      vi.mocked(pnpm).mockReturnValue('')
+      process.env.DSH_DEV_CAPTURE = capturePath
+      try {
+        await expect(devPlugin({ root, plugin, target: 'next' })).resolves.toBeUndefined()
+      } finally {
+        if (previousCapture === undefined) delete process.env.DSH_DEV_CAPTURE
+        else process.env.DSH_DEV_CAPTURE = previousCapture
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(externalRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('routes verifyPackedTarget cleanup warning through injected logger', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-packed-target-logger-'))
+    const masterBin = join(root, 'fake-master-bin.mjs')
+    writeFileSync(masterBin, 'if (process.argv.includes("--dump-config")) console.log("demo")\n')
+    const warns: string[] = []
+    const logger = { info: (..._args: unknown[]) => {}, warn: (...args: unknown[]) => warns.push(args.join(' ')) }
+    try {
+      await expect(verifyPackedTarget({
+        root,
+        pluginName: 'demo',
+        target: 'master',
+        tarball: join(root, 'demo.tgz'),
+        masterBin,
+        compat: {
+          targets: {
+            next: { dsh: '0.1.1-rc.2', cordis: '4.0.1', node: '22.20.0', pnpm: '11.7.0' },
+            master: { repository: 'deepseek-ai/deepseek-harness', commit: '1'.repeat(40), node: '^22.19.0', pnpm: '11.7.0' },
+          },
+        },
+        removeProfile() { throw new Error('injected profile lock') },
+        logger,
+      })).rejects.toThrow(/cleanup|profile.*stale|injected profile lock/i)
+      expect(warns.some(m => /profile cleanup deferred/.test(m) && m.includes('.stale-'))).toBe(true)
+      // Default logger (no injection) also does not throw synchronously beyond the expected error
+      await expect(verifyPackedTarget({
+        root,
+        pluginName: 'demo',
+        target: 'master',
+        tarball: join(root, 'demo.tgz'),
+        masterBin,
+        compat: {
+          targets: {
+            next: { dsh: '0.1.1-rc.2', cordis: '4.0.1', node: '22.20.0', pnpm: '11.7.0' },
+            master: { repository: 'deepseek-ai/deepseek-harness', commit: '1'.repeat(40), node: '^22.19.0', pnpm: '11.7.0' },
+          },
+        },
+        removeProfile() { throw new Error('injected profile lock 2') },
+      })).rejects.toThrow(/cleanup|profile.*stale/i)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})

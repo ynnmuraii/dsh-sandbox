@@ -4,6 +4,7 @@ import { dirname, isAbsolute, relative, resolve, win32 } from 'node:path'
 import { clientBundleRequirement, verifyClientBundleInTarball } from './client-smoke.js'
 import type { ClientBundleRequirement } from './client-smoke.js'
 import { pnpm, type RunOpts } from './proc.js'
+import type { LabErrorCode, RunStepResult } from './evidence.js'
 
 export interface PackageVerifyResult {
   tarball: string
@@ -16,6 +17,16 @@ export interface PackageVerifyRunner {
 
 const STEP_IDS = ['install', 'typecheck', 'test', 'build', 'pack', 'client-smoke', 'pack-smoke'] as const
 type StepId = (typeof STEP_IDS)[number]
+
+const STEP_CODE_MAP: Record<StepId, LabErrorCode> = {
+  install: 'pnpm.install.fail',
+  typecheck: 'pnpm.typecheck.fail',
+  test: 'pnpm.test.fail',
+  build: 'pnpm.build.fail',
+  pack: 'pnpm.pack.fail',
+  'client-smoke': 'client-smoke.no-register',
+  'pack-smoke': 'pnpm.pack-smoke.fail',
+}
 
 interface WorkspacePolicy {
   [key: string]: unknown
@@ -213,6 +224,9 @@ function attachPrerequisiteSteps(error: unknown, steps: RunStepResult[]): Error 
   const install = steps.find(step => step.id === 'install')!
   install.status = 'blocked'
   install.summary = sanitizeSummary(failure.message)
+  const installWithCode = install as unknown as { code?: LabErrorCode; detail?: string }
+  installWithCode.code = 'verify.prerequisite.fail'
+  installWithCode.detail = extractDetail(failure)
   Object.defineProperty(failure, 'steps', {
     configurable: true,
     enumerable: false,
@@ -281,7 +295,6 @@ function nativePathComponents(targetPath: string): string[] {
     current = parent
   }
 }
-
 function runStep(steps: RunStepResult[], id: StepId, operation: () => void): void {
   const step = steps.find(candidate => candidate.id === id)!
   const started = process.hrtime.bigint()
@@ -291,6 +304,9 @@ function runStep(steps: RunStepResult[], id: StepId, operation: () => void): voi
   } catch (error) {
     step.status = 'fail'
     step.summary = sanitizeSummary(error instanceof Error ? error.message : String(error))
+    const stepWithCode = step as unknown as { code?: LabErrorCode; detail?: string }
+    stepWithCode.code = STEP_CODE_MAP[id]
+    stepWithCode.detail = extractDetail(error)
     step.durationMs = elapsedMs(started)
     const failure = new Error(`package verification step '${id}' failed: ${step.summary}`, {
       cause: error,
@@ -298,6 +314,28 @@ function runStep(steps: RunStepResult[], id: StepId, operation: () => void): voi
     throw failure
   }
   step.durationMs = elapsedMs(started)
+}
+
+function extractDetail(error: unknown): string {
+  const raw = (() => {
+    if (error instanceof Error) {
+      const withOutput = error as Error & { stderr?: unknown; stdout?: unknown; output?: unknown }
+      if (typeof withOutput.stderr === 'string' || Buffer.isBuffer(withOutput.stderr)) {
+        return String(withOutput.stderr)
+      }
+      if (typeof withOutput.stdout === 'string' || Buffer.isBuffer(withOutput.stdout)) {
+        return String(withOutput.stdout)
+      }
+      if (Array.isArray(withOutput.output)) {
+        const combined = (withOutput.output as unknown[]).filter(v => typeof v === 'string' || Buffer.isBuffer(v as Buffer)).map(v => String(v)).join(' ')
+        if (combined) return combined
+      }
+      return error.message
+    }
+    return String(error)
+  })()
+  const tail = raw.slice(-500)
+  return sanitizeSummary(tail)
 }
 
 function elapsedMs(started: bigint): number {
