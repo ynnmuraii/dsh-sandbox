@@ -347,16 +347,23 @@ export async function prepareDevRuntime(opts: PrepareDevRuntimeOptions): Promise
   mkdirSync(profileDir, { recursive: true })
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify(buildProfilePackageJson(spec, { dsh }), null, 2))
   writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(pin.allowBuilds ?? {}))
-  const env = {
+  // The profile `pnpm install` runs with a plain env (process + DSH_HOME only)
+  // so pnpm is never handed the tsx loader in NODE_OPTIONS — injecting it makes
+  // pnpm 11.7 demand a `.pnpmfile.mjs` in the profile workspace root and throw
+  // "Cannot find module .pnpmfile.mjs", crashing the session before the
+  // harness boots. The tsx loader is applied only to the returned child env
+  // (`plan.env`) so live TS source still loads.
+  const installEnv = { ...process.env, DSH_HOME: runtimeHome.replace(/\\/g, '/') }
+  const childEnv = {
     ...process.env,
     NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' '),
     DSH_HOME: runtimeHome.replace(/\\/g, '/'),
   }
   if (opts.installProfile !== false && target !== 'master') {
     opts.signal?.throwIfAborted()
-    pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
+    pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env: installEnv })
   }
-  return { overlayPath, profileDir, cwd: profileDir, env }
+  return { overlayPath, profileDir, cwd: profileDir, env: childEnv }
 }
 
 /**

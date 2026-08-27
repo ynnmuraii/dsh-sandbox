@@ -554,12 +554,18 @@ describe('prepareDevRuntime seam', () => {
       })
       expect(plan.cwd).toBe(join(root, '.lab', 'runtime', 'profiles', 'x-next-dev'))
       expect(plan.overlayPath).toBe(join(root, '.lab', 'runtime', 'overlays', 'x', 'cordis.patch.yml'))
+      // The child dev env (plan.env) carries the tsx loader so live TS source
+      // loads; the profile `pnpm install` env must NOT inherit it (injecting
+      // `--import=<tsx/esm>` into pnpm 11.7 makes it require a `.pnpmfile.mjs`,
+      // crashing the session before the harness even boots).
       expect(plan.env.NODE_OPTIONS).toContain(`--import=${resolveTsxLoader()}`)
       expect(plan.env.DSH_HOME).toBe(join(root, '.lab', 'runtime').replaceAll('\\', '/'))
-      expect(vi.mocked(pnpm)).toHaveBeenCalledWith(
-        ['install', '--config.strictDepBuilds=false'],
-        expect.objectContaining({ cwd: plan.profileDir, env: plan.env }),
-      )
+      const installCall = vi.mocked(pnpm).mock.calls[0]!
+      expect(installCall[0]).toEqual(['install', '--config.strictDepBuilds=false'])
+      const installEnv = installCall[1]?.env ?? {}
+      expect(installEnv).not.toBe(plan.env)
+      expect(installEnv.DSH_HOME).toBe(plan.env.DSH_HOME)
+      expect(installEnv.NODE_OPTIONS ?? '').not.toContain(`--import=${resolveTsxLoader()}`)
     } finally {
       vi.mocked(pnpm).mockReset()
       rmSync(root, { recursive: true, force: true })
