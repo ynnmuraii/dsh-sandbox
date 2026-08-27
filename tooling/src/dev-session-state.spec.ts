@@ -156,16 +156,26 @@ describe('dev session store', () => {
     expect(existsSync(requestPath)).toBe(true)
   })
 
-  it('omits a clean url from the view once a restart is latched', () => {
+  it('keeps a clean url on the view once a restart is latched', () => {
     const clean = state({ state: 'ready', supervisorPid: 12, childPid: 34, url: 'http://127.0.0.1:49152' })
     expect(viewFromDevState(clean).url).toBe('http://127.0.0.1:49152')
     const latched = latchDevRestartReasons(clean, ['plugin-manifest'], '2026-08-24T12:00:02.000Z')
     const view = viewFromDevState(latched)
     expect(view.restartRequired).toBe(true)
     expect(view.restartReasons).toEqual(['plugin-manifest'])
-    expect(view.url).toBeUndefined()
+    expect(view.url).toBe('http://127.0.0.1:49152')
     expect(view.restartHash).toBe(clean.restartHash)
     expect(view.orphan).toBeUndefined()
+  })
+
+  it('keeps the loopback url in the view for a ready session latched as source-changed', () => {
+    const clean = state({ state: 'ready', supervisorPid: 12, childPid: 34, url: 'http://127.0.0.1:49152' })
+    const latched = latchDevRestartReasons(clean, ['source-changed'], '2026-08-24T12:00:02.000Z')
+    const view = viewFromDevState(latched)
+    expect(view.state).toBe('ready')
+    expect(view.restartRequired).toBe(true)
+    expect(view.restartReasons).toEqual(['source-changed'])
+    expect(view.url).toBe('http://127.0.0.1:49152')
   })
 
   it('does not create a session outside the runtime root when dev-sessions is a symlink', () => {

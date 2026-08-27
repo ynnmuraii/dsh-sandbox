@@ -210,7 +210,7 @@ describe('startDevSession', () => {
 
   it('marks the session crashed and rethrows when the supervisor cannot spawn', async () => {
     const deps = serviceDeps({ spawnSupervisor: vi.fn(() => { throw new Error('spawn boom') }) })
-    await expect(startDevSession({ root: f.root, plugin: f.plugin, target: 'next', startupTimeoutMs: 5 }, deps.deps)).rejects.toThrow(/spawn boom/)
+    await expect(startDevSession({ root: f.root, plugin: f.plugin, target: 'next', startupTimeoutMs: 1000 }, deps.deps)).rejects.toThrow(/spawn boom/)
     const sessionId = readdirSync(join(runtimeRoot(f.root), 'dev-sessions'))[0]!
     const state = readDevSession({ runtimeRoot: runtimeRoot(f.root), sessionId })
     expect(state.state).toBe('crashed')
@@ -220,9 +220,41 @@ describe('startDevSession', () => {
 
   it('returns the stopped view after a post-deadline stop completes instead of throwing', async () => {
     const deps = deadlineStopSupervisor(f)
-    const view = await startDevSession({ root: f.root, plugin: f.plugin, target: 'next', startupTimeoutMs: 5 }, deps.deps)
+    const view = await startDevSession({ root: f.root, plugin: f.plugin, target: 'next', startupTimeoutMs: 1000 }, deps.deps)
     expect(view.state).toBe('stopped')
     expect(view.cleanup).toBe('pass')
+  })
+
+  it('polls the ready state instead of crashing when the supervisor advances before the pid write lands', async () => {
+    const deps = serviceDeps({
+      spawnSupervisor: vi.fn(() => ({ pid: 7001, unref: vi.fn() })),
+      sleep: ms => new Promise(r => setTimeout(r, Math.min(ms, 2))),
+      now: advancingNow(),
+      writeSession: vi.fn(opts => {
+        // Simulate the detached supervisor racing ahead: it transitions the
+        // session to ready between the orchestrator's post-spawn read and its
+        // supervisorPid write. The starting->starting write then fails a
+        // transition check against the now-ready state.
+        const sessionDir = join(runtimeRoot(f.root), 'dev-sessions', opts.state.sessionId)
+        writeFileSync(join(sessionDir, 'state.json'), JSON.stringify({
+          ...opts.state,
+          state: 'ready',
+          supervisorPid: 7001,
+          childPid: 7002,
+          url: 'http://127.0.0.1:49152',
+          updatedAt: '2026-08-24T12:00:01.000Z',
+        }, null, 2) + '\n')
+        return writeDevSession(opts)
+      }),
+    })
+    const view = await startDevSession({ root: f.root, plugin: f.plugin, target: 'next', startupTimeoutMs: 1000 }, deps.deps)
+    expect(view.state).toBe('ready')
+    expect(view.url).toBe('http://127.0.0.1:49152')
+  })
+
+  it('rejects a startup timeout outside the direct-API range 1000..600000', async () => {
+    await expect(startDevSession({ root: f.root, plugin: f.plugin, target: 'next', startupTimeoutMs: 999 }, readyDeps(f))).rejects.toThrow(/1000|600000/i)
+    await expect(startDevSession({ root: f.root, plugin: f.plugin, target: 'next', startupTimeoutMs: 0 }, readyDeps(f))).rejects.toThrow(/1000|600000/i)
   })
 })
 
@@ -230,7 +262,7 @@ describe('getDevSessionStatus', () => {
   let f: ReturnType<typeof fixture>
   beforeEach(() => { f = fixture() })
 
-  it('latches each restart component monotonically and hides a stale URL', () => {
+  it('latches each restart component monotonically and keeps the live ready url', () => {
     createDevState(f, SESSION, 'ready')
     const initial = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
     expect(initial).toMatchObject({ state: 'ready', restartRequired: false, restartReasons: [] })
@@ -240,7 +272,7 @@ describe('getDevSessionStatus', () => {
     const manifestView = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
     expect(manifestView.restartRequired).toBe(true)
     expect(manifestView.restartReasons).toContain('plugin-manifest')
-    expect(manifestView).not.toHaveProperty('url')
+    expect(manifestView.url).toBe('http://127.0.0.1:49152')
 
     writeFileSync(join(f.plugin.sourcePath, '.dsh-lab', 'plugin.yaml'), 'name: x\ntracking: local\nmaturity: experimental\ntargets:\n  - next\n')
     const metadataView = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
@@ -249,16 +281,16 @@ describe('getDevSessionStatus', () => {
     writeCompatibility(f.root, '0.1.1-rc.3')
     const targetView = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
     expect(targetView.restartReasons).toEqual(['plugin-manifest', 'plugin-metadata', 'target-pin'])
-    expect(targetView).not.toHaveProperty('url')
+    expect(targetView.url).toBe('http://127.0.0.1:49152')
 
     writeFileSync(join(f.plugin.sourcePath, 'src', 'index.ts'), 'export const live = false\n')
     const sourceView = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
     expect(sourceView.restartReasons).toEqual(['plugin-manifest', 'plugin-metadata', 'source-changed', 'target-pin'])
-    expect(sourceView).not.toHaveProperty('url')
+    expect(sourceView.url).toBe('http://127.0.0.1:49152')
 
     const again = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
     expect(again.restartReasons).toEqual(['plugin-manifest', 'plugin-metadata', 'source-changed', 'target-pin'])
-    expect(again).not.toHaveProperty('url')
+    expect(again.url).toBe('http://127.0.0.1:49152')
   })
 
   it('treats dev sessions as live source: a source edit latches source-changed and requires stop/start', () => {
@@ -266,7 +298,7 @@ describe('getDevSessionStatus', () => {
     writeFileSync(join(f.plugin.sourcePath, 'src', 'index.ts'), 'export const live = false\n')
     const view = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
     expect(view).toMatchObject({ state: 'ready', restartRequired: true, restartReasons: ['source-changed'] })
-    expect(view.url).toBeUndefined()
+    expect(view.url).toBe('http://127.0.0.1:49152')
   })
   it('classifies a vanished live source tree as source-changed, not plugin-manifest', () => {
     createDevState(f, SESSION, 'ready')
@@ -275,6 +307,16 @@ describe('getDevSessionStatus', () => {
     expect(view.restartRequired).toBe(true)
     expect(view.restartReasons).toContain('source-changed')
     expect(view.restartReasons).not.toContain('plugin-manifest')
+  })
+
+  it('classifies both a vanished manifest and a vanished source tree as plugin-manifest', () => {
+    createDevState(f, SESSION, 'ready')
+    rmSync(join(f.plugin.sourcePath, 'package.json'))
+    rmSync(join(f.plugin.sourcePath, 'src'), { recursive: true, force: true })
+    const view = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
+    expect(view.restartRequired).toBe(true)
+    expect(view.restartReasons).toEqual(['plugin-manifest'])
+    expect(view.restartReasons).not.toContain('source-changed')
   })
 
   it('reports a ready session whose supervisor/child died as an orphan', () => {
@@ -371,8 +413,15 @@ describe('stopDevSession', () => {
   it('times out when the supervisor never reaches stopped', async () => {
     createDevState(f, SESSION, 'ready')
     const deps = serviceDeps({ now: advancingNow() })
-    await expect(stopDevSession({ root: f.root, sessionId: SESSION, stopTimeoutMs: 5 }, deps.deps)).rejects.toThrow(/cleanup( timed out| failed)|cleanup-incomplete/i)
+    await expect(stopDevSession({ root: f.root, sessionId: SESSION, stopTimeoutMs: 1000 }, deps.deps)).rejects.toThrow(/cleanup( timed out| failed)|cleanup-incomplete/i)
     expect(readDevControl({ runtimeRoot: runtimeRoot(f.root), sessionId: SESSION })).toBeDefined()
     expect(readDevSession({ runtimeRoot: runtimeRoot(f.root), sessionId: SESSION }).state).toBe('ready')
+  })
+
+  it('rejects a stop timeout outside the direct-API range 1000..600000', async () => {
+    createDevState(f, SESSION, 'ready')
+    const deps = serviceDeps({ now: advancingNow() })
+    await expect(stopDevSession({ root: f.root, sessionId: SESSION, stopTimeoutMs: 999 }, deps.deps)).rejects.toThrow(/1000|600000/i)
+    await expect(stopDevSession({ root: f.root, sessionId: SESSION, stopTimeoutMs: 0 }, deps.deps)).rejects.toThrow(/1000|600000/i)
   })
 })

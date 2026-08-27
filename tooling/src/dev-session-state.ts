@@ -188,7 +188,7 @@ export function viewFromDevState(state: DevSessionStateV1): DevSessionViewV1 {
     restartRequired: state.restartRequired, restartReasons: reasons, restartHash: state.restartHash,
     plugin: state.plugin, target: state.target, startedAt: state.startedAt, updatedAt: state.updatedAt,
   }
-  if (reasons.length === 0 && state.state === 'ready' && state.url !== undefined) view.url = state.url
+  if (state.state === 'ready' && state.url !== undefined) view.url = state.url
   if (state.error !== undefined) view.error = state.error
   if (state.cleanup !== undefined) view.cleanup = state.cleanup
   return view

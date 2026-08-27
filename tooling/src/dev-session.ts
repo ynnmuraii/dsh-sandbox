@@ -137,12 +137,22 @@ export async function startDevSession(opts: StartDevOptions, deps: DevServiceDep
       throw new Error('dev supervisor did not return a valid process')
     }
     supervisor.unref()
+    // A fast supervisor can advance the session (ready, a newer updatedAt, or a
+    // claimed pid) between our read and write. Only attempt the starting->
+    // starting pid write when the state is still starting and no pid was
+    // claimed; a transition/immutable/backward-timestamp rejection caused by
+    // that concurrent progress is benign — the poll loop observes the newer
+    // state — while a real IO/corruption failure still propagates.
     const afterSpawn = readOwnedSession(runtimeRoot, sessionId, ownedSession)
-    if (afterSpawn.state === 'starting') {
-      writeOwnedSession(ownedSession, {
-        runtimeRoot,
-        state: { ...afterSpawn, supervisorPid: supervisor.pid, updatedAt: afterSpawn.updatedAt },
-      })
+    if (afterSpawn.state === 'starting' && afterSpawn.supervisorPid === undefined) {
+      try {
+        writeOwnedSession(ownedSession, {
+          runtimeRoot,
+          state: { ...afterSpawn, supervisorPid: supervisor.pid, updatedAt: afterSpawn.updatedAt },
+        }, deps.writeSession)
+      } catch (error) {
+        if (!isSupervisorProgressConflict(error)) throw error
+      }
     }
   } catch (error) {
     const message = sanitizeServiceError(error)
@@ -199,12 +209,13 @@ export function getDevSessionStatus(
       const currentBaseline = computeDevRestartBaseline({ pluginSourcePath: state.plugin.sourcePath, targetPin })
       newReasons = restartReasonsForBaseline(currentBaseline, state.restartBaseline)
     } catch (error) {
-      // A required restart input vanished. Narrow the classification by which
-      // required path is gone: a missing src/** directory is a source change
-      // (source-changed), a missing plugin manifest is a manifest change. Any
-      // non-missing read failure is surfaced, never masked as a plugin change.
+      // A required restart input vanished. The plugin manifest is authoritative:
+      // when it is gone the missing input is a manifest change (plugin-manifest)
+      // even if the source tree also vanished; only a present manifest with a
+      // vanished src/** tree is a source change (source-changed). Any non-missing
+      // read failure is surfaced, never masked as a plugin change.
       if (!isMissingPathError(error)) throw error
-      newReasons = existsSync(join(state.plugin.sourcePath, 'src')) ? ['plugin-manifest'] : ['source-changed']
+      newReasons = existsSync(join(state.plugin.sourcePath, 'package.json')) ? ['source-changed'] : ['plugin-manifest']
     }
     if (newReasons.length > 0) {
       const newlyObserved = newReasons.filter(reason => !(state.restartReasons ?? []).includes(reason))
@@ -409,6 +420,10 @@ function isRegularFile(path: string): boolean {
 function isMissingPathError(error: unknown): boolean {
   return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT'
 }
+function isSupervisorProgressConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /invalid dev session transition|is immutable|updatedAt must not move backward|latched restart reason .* cannot be removed/.test(message)
+}
 
 function validateRootAndTarget(root: string, target: 'next' | 'master'): void {
   if (typeof root !== 'string' || !root.trim()) throw new Error('root must be a non-empty path')
@@ -417,7 +432,8 @@ function validateRootAndTarget(root: string, target: 'next' | 'master'): void {
 
 function validateTimeout(value: number | undefined, field: string): number {
   const timeout = value ?? DEFAULT_TIMEOUT_MS
-  if (!Number.isInteger(timeout) || timeout < 0) throw new Error(`${field} must be a non-negative integer`)
+  if (!Number.isInteger(timeout) || timeout < 1000) throw new Error(`${field} must be an integer between 1000 and 600000`)
+  if (timeout > 600000) throw new Error(`${field} must be an integer between 1000 and 600000`)
   return timeout
 }
 

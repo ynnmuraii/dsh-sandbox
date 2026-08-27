@@ -140,10 +140,9 @@ function clearOwnedControl(runtimeRoot: string, sessionId: string, ownedSession:
 }
 
 function writeState(runtimeRoot: string, state: DevSessionStateV1, ownedSession: OwnedUiDirectory): void {
-  const updatedAt = nextTimestamp(state.updatedAt, state.updatedAt)
   ownedSession.assertCurrent()
   try {
-    writeDevSession({ runtimeRoot, state: { ...state, updatedAt }, ownedSession })
+    writeDevSession({ runtimeRoot, state, ownedSession })
   } finally {
     ownedSession.assertCurrent()
   }

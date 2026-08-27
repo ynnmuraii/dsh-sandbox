@@ -387,8 +387,8 @@ export function buildServer(root: string, options?: McpServerOptions): McpServer
     async args => {
       try {
         const typed = args as { plugin?: string; path?: string; target: 'next' | 'master'; startupTimeoutMs?: number }
-                  const result = await handleDevStart(root, typed, options?.devDeps)
-          return success(result, { sessionId: result.sessionId, exitCode: result.state === 'ready' && !result.restartRequired ? 0 : 2 })
+        const result = await handleDevStart(root, typed, options?.devDeps)
+        return success(result, { sessionId: result.sessionId, exitCode: result.state === 'ready' && !result.restartRequired ? 0 : 2 })
       } catch (e) {
         const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
         const message = e instanceof Error ? e.message : String(e)
@@ -414,15 +414,15 @@ export function buildServer(root: string, options?: McpServerOptions): McpServer
     },
     async args => {
       try {
-                  const typed = args as { sessionId: string }
-          // Only inject the status liveness/clock deps when both keys are
-          // actually supplied; a partial devDeps with unrelated keys must not
-          // degrade dev_status to a broken (undefined `now`/`processAlive`) deps.
-          const statusDeps = options?.devDeps !== undefined && typeof options.devDeps.now === 'function' && typeof options.devDeps.processAlive === 'function'
-            ? { now: options.devDeps.now, processAlive: options.devDeps.processAlive }
-            : undefined
-          const result = handleDevStatus(root, typed, statusDeps)
-          return success(result, { sessionId: result.sessionId, restartRequired: result.restartRequired, exitCode: result.state === 'ready' && !result.restartRequired ? 0 : 2 })
+        const typed = args as { sessionId: string }
+        // Only inject the status liveness/clock deps when both keys are
+        // actually supplied; a partial devDeps with unrelated keys must not
+        // degrade dev_status to a broken (undefined `now`/`processAlive`) deps.
+        const statusDeps = options?.devDeps !== undefined && typeof options.devDeps.now === 'function' && typeof options.devDeps.processAlive === 'function'
+          ? { now: options.devDeps.now, processAlive: options.devDeps.processAlive }
+          : undefined
+        const result = handleDevStatus(root, typed, statusDeps)
+        return success(result, { sessionId: result.sessionId, restartRequired: result.restartRequired, exitCode: result.state === 'ready' && !result.restartRequired ? 0 : 2 })
       } catch (e) {
         const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
         const message = e instanceof Error ? e.message : String(e)
@@ -450,8 +450,8 @@ export function buildServer(root: string, options?: McpServerOptions): McpServer
     async args => {
       try {
         const typed = args as { sessionId: string; stopTimeoutMs?: number }
-                  const result = await handleDevStop(root, typed, options?.devDeps)
-          return success(result, { sessionId: result.sessionId, cleanup: result.cleanup, exitCode: result.state === 'stopped' ? 0 : 2 })
+        const result = await handleDevStop(root, typed, options?.devDeps)
+        return success(result, { sessionId: result.sessionId, cleanup: result.cleanup, exitCode: result.state === 'stopped' ? 0 : 2 })
       } catch (e) {
         const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
         const message = e instanceof Error ? e.message : String(e)

@@ -142,12 +142,14 @@ export function buildSourceOverlay(name: string, entryPath: string): string {
 }
 
 // Render the full source-dev overlay. Beyond inserting the plugin's source
-// entry (buildSourceOverlay), it re-enables the shared Cordis module HMR row
-// and points its module `root` at the plugin's source directory, so edits to
-// src/index.ts are watched and reloaded while `lab dev` runs (criterion 6).
-// The web bundle previously disabled the shared hmr row (`disabled: true`);
-// because later patch layers win per row, this overlay — applied last via
-// `--patch` — overrides `disabled` back to false and scopes the watched root.
+// entry (buildSourceOverlay), it scopes the shared Cordis module HMR row by
+// pointing its module `root` at the plugin's source directory. The web bundle
+// previously disabled the shared hmr row (`disabled: true`); because later
+// patch layers win per row, this overlay — applied last via `--patch` —
+// re-enables that row and scopes its watched root. Phase 5 v1 upstream Web HMR
+// is unavailable (disabled/untested), so a dev session does not hot-reload
+// src/**; an edit latches `restartRequired` (source-changed) and stop→start
+// loads the new source.
 export function buildDevOverlay(name: string, entryPath: string, sourceRoot: string): string {
   const root = sourceRoot.replace(/\\/g, '/').replace(/'/g, "''")
   const insert = buildSourceOverlay(name, entryPath)
