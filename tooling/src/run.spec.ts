@@ -35,6 +35,15 @@ vi.mock('./proc.js', async importOriginal => {
     pnpmCommand: vi.fn(actual.pnpmCommand),
   }
 })
+// Materialize a fake installed `@deepseek-ai/dsh` under a prepared profile so
+// `resolveProfileDshLauncher(profileDir)` resolves to a runnable node script
+// (the CLI `next` path boots the profile-installed bin directly, not `pnpm`).
+function writeProfileDshBin(profileDir: string, body: string): void {
+  const pkgDir = join(profileDir, 'node_modules', '@deepseek-ai', 'dsh')
+  mkdirSync(pkgDir, { recursive: true })
+  writeFileSync(join(pkgDir, 'package.json'), '{"bin":{"dsh":"bin.js"}}\n')
+  writeFileSync(join(pkgDir, 'bin.js'), body)
+}
 
 describe('resolveSourceOverlay', () => {
   it('produces an absolute path to the plugin entry', () => {
@@ -281,14 +290,12 @@ describe('path-first live development', () => {
       writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
       writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/external-plugin"}\n')
       const before = readdirSync(externalRoot, { recursive: true }).map(String).sort()
-      const fakeLauncher = join(root, 'fake-launcher.mjs')
-      writeFileSync(fakeLauncher, [
-        "import { writeFileSync } from 'node:fs'",
-        "writeFileSync(process.env.DSH_DEV_CAPTURE, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), home: process.env.DSH_HOME, nodeOptions: process.env.NODE_OPTIONS }))",
+      writeProfileDshBin(join(root, '.lab', 'runtime', 'profiles', 'external-plugin-next-dev'), [
+        "const { writeFileSync } = require('node:fs')",
+        "writeFileSync(process.env.DSH_DEV_CAPTURE, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), home: process.env.DSH_HOME, nodeOptions: process.env.NODE_OPTIONS, script: process.argv[1] }))",
         '',
       ].join('\n'))
       vi.mocked(pnpm).mockReset().mockReturnValue('')
-      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [fakeLauncher] })
       const previousCapture = process.env.DSH_DEV_CAPTURE
       process.env.DSH_DEV_CAPTURE = capturePath
       const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/external-plugin' }
@@ -313,10 +320,10 @@ describe('path-first live development', () => {
       expect(boot.argv).toEqual(['--profile', 'external-plugin-next-dev', '--patch', overlay])
       expect(boot.home).toBe(runtime.replaceAll('\\', '/'))
       expect(boot.nodeOptions).toContain(`--import=${resolveTsxLoader()}`)
+      expect(String(boot.script).replaceAll('\\', '/')).toContain(join('node_modules', '@deepseek-ai', 'dsh', 'bin.js').replaceAll('\\', '/'))
       expect(readdirSync(externalRoot, { recursive: true }).map(String).sort()).toEqual(before)
       expect(existsSync(join(externalRoot, '.dsh-lab'))).toBe(false)
     } finally {
-      vi.mocked(pnpmCommand).mockReset()
       rmSync(root, { recursive: true, force: true })
       rmSync(externalRoot, { recursive: true, force: true })
     }
@@ -452,11 +459,9 @@ describe('logger injection', () => {
       mkdirSync(join(externalRoot, 'src'), { recursive: true })
       writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
       writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/logger-plugin"}\n')
-      const fakeLauncher = join(root, 'fake-launcher.mjs')
-      writeFileSync(fakeLauncher, "import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.DSH_DEV_CAPTURE ?? '', 'ok')\n")
+      writeProfileDshBin(join(root, '.lab', 'runtime', 'profiles', 'logger-plugin-next-dev'), "const { writeFileSync } = require('node:fs')\nwriteFileSync(process.env.DSH_DEV_CAPTURE ?? '', 'ok')\n")
       const capturePath = join(root, 'capture.json')
       vi.mocked(pnpm).mockReset().mockReturnValue('')
-      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [fakeLauncher] })
       const previousCapture = process.env.DSH_DEV_CAPTURE
       process.env.DSH_DEV_CAPTURE = capturePath
       const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/logger-plugin' }
@@ -616,9 +621,7 @@ describe('prepareDevRuntime seam', () => {
       mkdirSync(join(externalRoot, 'src'), { recursive: true })
       writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
       writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/banner-plugin"}\n')
-      const fakeLauncher = join(root, 'fake.mjs')
-      writeFileSync(fakeLauncher, 'export {}\n')
-      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [fakeLauncher] })
+      writeProfileDshBin(join(root, '.lab', 'runtime', 'profiles', 'banner-plugin-next-dev'), '// no-op\n')
       const order: string[] = []
       vi.mocked(pnpm).mockReset().mockImplementation(() => { order.push('install'); return '' })
       const logger = { info: () => { order.push('banner') }, warn: () => {} }
@@ -627,7 +630,6 @@ describe('prepareDevRuntime seam', () => {
       expect(order).toEqual(['banner', 'banner', 'banner', 'install'])
     } finally {
       vi.mocked(pnpm).mockReset()
-      vi.mocked(pnpmCommand).mockReset()
       rmSync(root, { recursive: true, force: true })
       rmSync(externalRoot, { recursive: true, force: true })
     }
@@ -646,7 +648,6 @@ describe('prepareDevRuntime seam', () => {
       mkdirSync(join(externalRoot, 'src'), { recursive: true })
       writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
       writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/fail-plugin"}\n')
-      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [join(root, 'fake.mjs')] })
       const infos: string[] = []
       const logger = { info: (...args: unknown[]) => infos.push(args.join(' ')), warn: () => {} }
       vi.mocked(pnpm).mockReset().mockImplementation(() => { throw new Error('install boom') })

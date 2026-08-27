@@ -252,17 +252,20 @@ export async function resolveUiLauncher(root: string, target: Target, compat: Co
   return resolveLauncher(root, compat, target)
 }
 
-// `pnpmCommand` is also the test seam for a directly executable launcher. In
-// production the resolved pnpm entry needs `exec dsh`; an injected node script
-// already represents dsh and must receive only dsh's own flags.
-async function resolveDevLauncher(root: string, compat: Compatibility, target: Target): Promise<Command> {
-  const launcher = await resolveLauncher(root, compat, target)
-  if (target !== 'next' || launcher.cmd !== process.execPath) return launcher
-  const entry = launcher.args[0]
-  if (entry !== undefined && !/pnpm\.(?:cjs|mjs)$/i.test(entry)) {
-    return { cmd: launcher.cmd, args: launcher.args.slice(0, -2) }
+// Resolve the foreground `lab dev` launcher for a target. `next` boots the
+// profile-installed dsh bin directly (no `pnpm exec` wrapper, which pnpm 11.7
+// rejects when the tsx loader is in NODE_OPTIONS — it demands a `.pnpmfile.mjs`
+// and crashes); `master` boots the built upstream bin. `next` therefore needs
+// the materialized runtime plan so the installed bin can be resolved from the
+// profile. This keeps a single launcher rule for the dev path — the dev
+// supervisor resolves the identical `next` launcher via
+// `resolveProfileDshLauncher`.
+async function resolveDevPluginLauncher(opts: { root: string; compat: Compatibility; target: Target; plan?: DevRuntimePlan }): Promise<Command> {
+  if (opts.target === 'next') {
+    if (!opts.plan) throw new Error('next target requires a prepared runtime plan before resolving the dev launcher')
+    return resolveProfileDshLauncher(opts.plan.profileDir)
   }
-  return launcher
+  return resolveLauncher(opts.root, opts.compat, opts.target)
 }
 
 // Run a launcher command against the materialized profile, isolating it to the
@@ -422,7 +425,6 @@ export async function devPlugin(opts: DevPluginOptions): Promise<void> {
   const runtimeHome = rootPath(root, ROOT_PATHS.runtime)
   const bootProfileName = profileName(name, target, 'dev')
   const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
-  const launcher = await resolveDevLauncher(root, compat, target)
   const overlayPath = join(runtimeHome, 'overlays', name, 'cordis.patch.yml')
   const devHome = runtimeHome.replace(/\\/g, '/')
   logger.info(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
@@ -439,6 +441,11 @@ export async function devPlugin(opts: DevPluginOptions): Promise<void> {
       overlayDir: join(runtimeHome, 'overlays', name),
       installProfile: target !== 'master',
     })
+    // `next` boots the profile-installed dsh bin directly (resolved after the
+    // profile is installed); `master` boots the built upstream launcher. This
+    // keeps the tsx loader in the child env for live TS source without pnpm in
+    // the launch loop.
+    const launcher = await resolveDevPluginLauncher({ root, compat, target, plan })
     bootProfile(launcher, plan.profileDir, bootProfileName, plan.env, ['--patch', plan.overlayPath])
   } catch (e) {
     throw new Error(`dsh boot failed for profile '${target}': ${(e as Error).message}`, { cause: e })
