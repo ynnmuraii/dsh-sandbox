@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { lstatSync } from 'node:fs'
+import { existsSync, lstatSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { PluginRef } from './plugin-ref.js'
@@ -199,12 +199,12 @@ export function getDevSessionStatus(
       const currentBaseline = computeDevRestartBaseline({ pluginSourcePath: state.plugin.sourcePath, targetPin })
       newReasons = restartReasonsForBaseline(currentBaseline, state.restartBaseline)
     } catch (error) {
-      // Only a vanished lived plugin manifest is a restart signal; a metadata
-      // file that disappeared is already folded into EMPTY_DIGEST. Compatibility
-      // loss is surfaced by currentDevTargetPin above, so this cannot mask a
-      // config error as a plugin change.
+      // A required restart input vanished. Narrow the classification by which
+      // required path is gone: a missing src/** directory is a source change
+      // (source-changed), a missing plugin manifest is a manifest change. Any
+      // non-missing read failure is surfaced, never masked as a plugin change.
       if (!isMissingPathError(error)) throw error
-      newReasons = ['plugin-manifest']
+      newReasons = existsSync(join(state.plugin.sourcePath, 'src')) ? ['plugin-manifest'] : ['source-changed']
     }
     if (newReasons.length > 0) {
       const newlyObserved = newReasons.filter(reason => !(state.restartReasons ?? []).includes(reason))

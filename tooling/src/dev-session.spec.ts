@@ -268,6 +268,14 @@ describe('getDevSessionStatus', () => {
     expect(view).toMatchObject({ state: 'ready', restartRequired: true, restartReasons: ['source-changed'] })
     expect(view.url).toBeUndefined()
   })
+  it('classifies a vanished live source tree as source-changed, not plugin-manifest', () => {
+    createDevState(f, SESSION, 'ready')
+    rmSync(join(f.plugin.sourcePath, 'src'), { recursive: true, force: true })
+    const view = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
+    expect(view.restartRequired).toBe(true)
+    expect(view.restartReasons).toContain('source-changed')
+    expect(view.restartReasons).not.toContain('plugin-manifest')
+  })
 
   it('reports a ready session whose supervisor/child died as an orphan', () => {
     createDevState(f, SESSION, 'ready')
