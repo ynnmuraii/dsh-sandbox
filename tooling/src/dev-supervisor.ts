@@ -21,6 +21,7 @@ import {
   prepareDevRuntime,
   profileName,
   resolveUiLauncher,
+  resolveProfileDshLauncher,
   type DevRuntimePlan,
   type DevRuntimePlugin,
 } from './run.js'
@@ -639,7 +640,12 @@ export function defaultDevSupervisorDependencies(): DevSupervisorDependencies {
         installProfile: opts.target !== 'master',
         ...(opts.signal === undefined ? {} : { signal: opts.signal }),
       })
-      const launcher = await deps.resolveLauncher(opts.root, opts.target, compat, opts.signal)
+      // pnpm is install-time only: for `next` boot the installed profile dsh bin
+      // directly (no `pnpm exec` wrapper, which pnpm 11.7 rejects when the tsx
+      // loader is in NODE_OPTIONS); `master` keeps the direct built-upstream bin.
+      const launcher = opts.target === 'next'
+        ? resolveProfileDshLauncher(base.profileDir)
+        : await deps.resolveLauncher(opts.root, opts.target, compat, opts.signal)
       return { ...base, launcher }
     },
     resolveLauncher: (root, target, compat, signal) => resolveUiLauncher(root, target, compat, signal),

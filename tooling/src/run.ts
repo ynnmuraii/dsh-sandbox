@@ -1,5 +1,5 @@
-import { join, relative, resolve } from 'node:path'
-import { mkdirSync, writeFileSync, existsSync, rmSync, renameSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
+import { mkdirSync, writeFileSync, existsSync, rmSync, renameSync, readFileSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
@@ -270,6 +270,41 @@ async function resolveDevLauncher(root: string, compat: Compatibility, target: T
 // The launcher's OWN flags come first: `--profile <name>` must precede any
 // inner/`--patch` arguments, and the `web` subcommand alias is never used (it
 // would hard-code profile "web" and bypass our materialized profile).
+// Resolve the installed `@deepseek-ai/dsh` bin out of a materialized profile so
+// the runtime launches the real CLI directly — no `pnpm exec` wrapper. pnpm is
+// install-time only; running `pnpm exec dsh` with the tsx loader in NODE_OPTIONS
+// makes pnpm 11.7 demand a `.pnpmfile.mjs` and crash, whereas the direct bin
+// keeps the loader in the child env for live TS source without pnpm in the loop.
+export function resolveProfileDshLauncher(profileDir: string): { cmd: string; args: string[] } {
+  const pkgDir = join(profileDir, 'node_modules', '@deepseek-ai', 'dsh')
+  const manifestPath = join(pkgDir, 'package.json')
+  if (!existsSync(manifestPath)) {
+    throw new Error(`installed dsh package not found at ${manifestPath}; the profile must be installed before launching the dev session`)
+  }
+  let bin: unknown
+  try {
+    bin = JSON.parse(readFileSync(manifestPath, 'utf8')).bin
+  } catch (e) {
+    throw new Error(`cannot parse dsh manifest ${manifestPath}: ${(e as Error).message}`)
+  }
+  const binValue = typeof bin === 'string'
+    ? bin
+    : bin !== null && typeof bin === 'object'
+      ? (bin as Record<string, unknown>).dsh ?? Object.values(bin as Record<string, unknown>)[0]
+      : undefined
+  if (typeof binValue !== 'string' || binValue.length === 0) {
+    throw new Error(`@deepseek-ai/dsh at ${pkgDir} exposes no usable bin (bin=${JSON.stringify(bin)})`)
+  }
+  const binPath = resolve(pkgDir, binValue)
+  const pkgRoot = resolve(pkgDir)
+  const contained = binPath === pkgRoot || binPath.startsWith(pkgRoot + sep)
+  const stats = statSync(binPath, { throwIfNoEntry: false })
+  if (!contained) throw new Error(`dsh bin ${binPath} escapes the package dir ${pkgRoot}`)
+  if (stats === undefined) throw new Error(`dsh bin does not exist: ${binPath}`)
+  if (!stats.isFile()) throw new Error(`dsh bin is not a regular file: ${binPath}`)
+  return { cmd: process.execPath, args: [binPath] }
+}
+
 function bootProfile(
   launcher: Command,
   profileDir: string,

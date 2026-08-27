@@ -18,6 +18,7 @@ import {
   verifyPackedTarget,
   buildUpstream,
   resolveUiLauncher,
+  resolveProfileDshLauncher,
   devPlugin,
   prepareDevRuntime,
   type DevRuntimePlugin,
@@ -529,6 +530,36 @@ describe('logger injection', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('resolveProfileDshLauncher', () => {
+  it('launches the installed profile dsh bin via the node executable (object bin)', () => {
+    const pkgs = mkdtempSync(join(tmpdir(), 'dsh-launcher-object-'))
+    const pkgDir = join(pkgs, 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(join(pkgDir, 'lib'), { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '1.0.0', bin: { dsh: 'lib/bin.js' } }))
+    writeFileSync(join(pkgDir, 'lib', 'bin.js'), 'export {}\n')
+    const launcher = resolveProfileDshLauncher(pkgs)
+    expect(launcher.cmd).toBe(process.execPath)
+    expect(launcher.args).toEqual([join(pkgDir, 'lib', 'bin.js')])
+    rmSync(pkgs, { recursive: true, force: true })
+  })
+  it('supports a string bin entry and keeps the resolved path as one arg', () => {
+    const pkgs = mkdtempSync(join(tmpdir(), 'dsh-launcher-string-'))
+    const pkgDir = join(pkgs, 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(join(pkgDir, 'bin'), { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '1.0.0', bin: 'bin/dsh.js' }))
+    writeFileSync(join(pkgDir, 'bin', 'dsh.js'), 'export {}\n')
+    const launcher = resolveProfileDshLauncher(pkgs)
+    expect(launcher.cmd).toBe(process.execPath)
+    expect(launcher.args).toEqual([join(pkgDir, 'bin', 'dsh.js')])
+    rmSync(pkgs, { recursive: true, force: true })
+  })
+  it('throws an actionable error for a missing or malformed manifest', () => {
+    const pkgs = mkdtempSync(join(tmpdir(), 'dsh-launcher-missing-'))
+    expect(() => resolveProfileDshLauncher(pkgs)).toThrow(/installed dsh package not found/)
+    rmSync(pkgs, { recursive: true, force: true })
   })
 })
 
