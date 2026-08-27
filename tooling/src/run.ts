@@ -161,40 +161,6 @@ export function buildDevOverlay(name: string, entryPath: string, sourceRoot: str
   ].join('\n')
 }
 
-// Materialize a pinned profile package.json (and workspace marker) into the
-// runtime dir, reading the target's pin from the compatibility manifest. The
-// materialized location is `.lab/runtime/profiles/<name>-<target>-<kind>`, so the
-// master source reference is computed as a path back to `upstream/` from
-// there (and forward-slash normalized for the `file:` spec).
-function materializeProfile(opts: {
-  root: string
-  name: string
-  target: Target
-  profileKind: 'dev' | 'verify'
-  runId?: string
-  bundles?: string[]
-}): string {
-  const { root, name, target, profileKind, runId, bundles = PROFILE_BUNDLES } = opts
-  const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
-  const profile = profileName(name, target, profileKind, runId)
-  const profileDir = join(root, ROOT_PATHS.runtime, 'profiles', profile)
-  let dsh: string
-  if (target === 'master') {
-    dsh = `file:${relative(profileDir, rootPath(root, ROOT_PATHS.upstream)).replace(/\\/g, '/')}`
-  } else {
-    const pin = compat.targets.next.dsh
-    if (!pin) {
-      throw new CompatibilityError('next target requires a pinned dsh version')
-    }
-    dsh = pin
-  }
-  const spec: ProfileSpec = { name: `@dsh-lab/profile-${profile}`, bundles }
-  mkdirSync(profileDir, { recursive: true })
-  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(buildProfilePackageJson(spec, { dsh }), null, 2))
-  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(compat.targets[target].allowBuilds ?? {}))
-  return profileDir
-}
-
 // Whether the upstream checkout has a modified tracked working tree
 // (`git status --porcelain` non-empty). A pinned HEAD whose tracked files were
 // touched is not a faithful source run, so both `verify --target master` and
@@ -330,6 +296,69 @@ function devPluginName(plugin: PluginRef): string {
   return parts.at(-1) ?? plugin.packageName
 }
 
+export interface DevRuntimePlugin {
+  packageName: string
+  sourcePath: string
+  runtimeName: string
+}
+
+export interface DevRuntimePlan {
+  overlayPath: string
+  profileDir: string
+  cwd: string
+  env: NodeJS.ProcessEnv
+}
+
+export interface PrepareDevRuntimeOptions {
+  root: string
+  plugin: DevRuntimePlugin
+  target: 'next' | 'master'
+  runtimeHome: string
+  profileName: string
+  overlayDir?: string
+  installProfile?: boolean
+  signal?: AbortSignal
+}
+
+// Materialize the dev profile + source overlay and compute the boot
+// environment for a foreground `lab dev` run. Extracted from `devPlugin` so
+// the CLI-dev flow stays byte-identical while a supervisor can prepare an
+// isolated runtime (Tasks 4/5).
+export async function prepareDevRuntime(opts: PrepareDevRuntimeOptions): Promise<DevRuntimePlan> {
+  const { root, plugin, target, runtimeHome, profileName } = opts
+  const sourcePath = resolve(plugin.sourcePath)
+  const sourceEntry = resolve(sourcePath, 'src', 'index.ts')
+  const sourceRoot = resolve(sourcePath, 'src')
+  const entryPath = pathToFileURL(sourceEntry).href
+  const overlayDir = opts.overlayDir ?? join(runtimeHome, 'overlays', plugin.runtimeName)
+  const overlayPath = join(overlayDir, 'cordis.patch.yml')
+  const profileDir = join(runtimeHome, 'profiles', profileName)
+
+  mkdirSync(overlayDir, { recursive: true })
+  writeFileSync(overlayPath, buildDevOverlay(plugin.runtimeName, entryPath, sourceRoot))
+
+  const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
+  const pin = compat.targets[target]
+  if (!pin) throw new CompatibilityError(`compatibility manifest has no ${target} target`)
+  const dsh = target === 'master'
+    ? `file:${relative(profileDir, rootPath(root, ROOT_PATHS.upstream)).replace(/\\/g, '/')}`
+    : (pin.dsh ?? (() => { throw new CompatibilityError('next target requires a pinned dsh version') })())
+  const spec: ProfileSpec = { name: `@dsh-lab/profile-${profileName}`, bundles: DEV_WEB_BUNDLES }
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(buildProfilePackageJson(spec, { dsh }), null, 2))
+  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(pin.allowBuilds ?? {}))
+  const env = {
+    ...process.env,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' '),
+    DSH_HOME: runtimeHome.replace(/\\/g, '/'),
+  }
+  if (opts.installProfile !== false && target !== 'master') {
+    opts.signal?.throwIfAborted()
+    pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
+  }
+  return { overlayPath, profileDir, cwd: profileDir, env }
+}
+
 /**
  * Run live source development for either a catalog plugin or an arbitrary
  * standalone plugin directory. All generated profiles, overlays, and runtime
@@ -348,38 +377,27 @@ export async function devPlugin(opts: DevPluginOptions): Promise<void> {
     throw new Error('master target requires the pinned upstream checkout (see Task 8)')
   }
   const entryPath = pathToFileURL(resolve(plugin.sourcePath, 'src', 'index.ts')).href
-  const sourceRoot = resolve(plugin.sourcePath, 'src')
-
-  // Emit an absolute overlay into the runtime dir. The overlay both inserts the
-  // plugin source entry AND re-enables Cordis module HMR with a module `root`
-  // at the plugin's src dir, so edits there reload live during `lab dev`.
-  const overlayDir = join(root, ROOT_PATHS.runtime, 'overlays', name)
-  const overlayPath = join(overlayDir, 'cordis.patch.yml')
-  mkdirSync(overlayDir, { recursive: true })
-  writeFileSync(overlayPath, buildDevOverlay(name, entryPath, sourceRoot))
-
-  // Materialize the pinned profile (carrying the full WEB bundle stack so a
-  // real web composition boots), then boot THE ACTUAL profile by name with the
-  // source overlay and watch source for HMR. DSH_HOME is pointed at the lab
-  // runtime home so the boot is fully isolated from the user's real ~/.dsh.
-  // The `--profile <name>-<target>` flag boots the materialized web profile
-  // (NOT the `web` built-in alias); master boots the pinned upstream's built
-  // CLI directly (no `dsh` bin exists on dsh-root).
-  const profileDir = materializeProfile({ root, name, target, profileKind: 'dev', bundles: DEV_WEB_BUNDLES })
+  const runtimeHome = rootPath(root, ROOT_PATHS.runtime)
   const bootProfileName = profileName(name, target, 'dev')
   const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
   const launcher = await resolveDevLauncher(root, compat, target)
-  const nodeOptions = [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' ')
-  const env = { ...process.env, NODE_OPTIONS: nodeOptions, DSH_HOME: rootPath(root, ROOT_PATHS.runtime).replace(/\\/g, '/') }
+  const overlayPath = join(runtimeHome, 'overlays', name, 'cordis.patch.yml')
+  const devHome = runtimeHome.replace(/\\/g, '/')
   logger.info(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
   logger.info(`[dev] generated overlay: ${overlayPath}`)
-  logger.info(`[dev] booting materialized web profile '${bootProfileName}' with DSH_HOME=${env.DSH_HOME}`)
+  logger.info(`[dev] booting materialized web profile '${bootProfileName}' with DSH_HOME=${devHome}`)
 
   try {
-    if (target !== 'master') {
-      pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
-    }
-    bootProfile(launcher, profileDir, bootProfileName, env, ['--patch', overlayPath])
+    const plan = await prepareDevRuntime({
+      root,
+      plugin: { packageName: plugin.packageName, sourcePath: plugin.sourcePath, runtimeName: name },
+      target,
+      runtimeHome,
+      profileName: bootProfileName,
+      overlayDir: join(runtimeHome, 'overlays', name),
+      installProfile: target !== 'master',
+    })
+    bootProfile(launcher, plan.profileDir, bootProfileName, plan.env, ['--patch', plan.overlayPath])
   } catch (e) {
     throw new Error(`dsh boot failed for profile '${target}': ${(e as Error).message}`, { cause: e })
   }

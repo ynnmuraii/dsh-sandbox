@@ -19,6 +19,8 @@ import {
   buildUpstream,
   resolveUiLauncher,
   devPlugin,
+  prepareDevRuntime,
+  type DevRuntimePlugin,
 } from './run.js'
 import { pnpm, pnpmAsync, pnpmCommand } from './proc.js'
 import type { PluginRef } from './plugin-ref.js'
@@ -526,6 +528,104 @@ describe('logger injection', () => {
       })).rejects.toThrow(/cleanup|profile.*stale/i)
     } finally {
       rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('prepareDevRuntime seam', () => {
+  it('prepares the CLI profile/overlay/env for a foreground dev run', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-seam-'))
+    try {
+      mkdirSync(join(root, 'workbench'), { recursive: true })
+      writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+        'targets:', '  next:', '    dsh: 0.1.1-rc.2', '    cordis: 4.0.1', '    node: 22.20.0',
+        '    pnpm: 11.7.0', '    allowBuilds:', '      esbuild: true',
+        '  master:', '    repository: deepseek-ai/deepseek-harness', `    commit: ${'1'.repeat(40)}`, '    pnpm: 11.7.0', '    node: ^22.19.0', '',
+      ].join('\n'))
+      const plugin: DevRuntimePlugin = { packageName: '@f/x', sourcePath: join(root, 'plugin'), runtimeName: 'x' }
+      mkdirSync(join(plugin.sourcePath, 'src'), { recursive: true })
+      writeFileSync(join(plugin.sourcePath, 'src', 'index.ts'), 'export const live = true\n')
+      vi.mocked(pnpm).mockReset().mockReturnValue('')
+      const plan = await prepareDevRuntime({
+        root, plugin, target: 'next',
+        runtimeHome: join(root, '.lab', 'runtime'),
+        profileName: 'x-next-dev',
+        installProfile: true,
+      })
+      expect(plan.cwd).toBe(join(root, '.lab', 'runtime', 'profiles', 'x-next-dev'))
+      expect(plan.overlayPath).toBe(join(root, '.lab', 'runtime', 'overlays', 'x', 'cordis.patch.yml'))
+      expect(plan.env.NODE_OPTIONS).toContain(`--import=${resolveTsxLoader()}`)
+      expect(plan.env.DSH_HOME).toBe(join(root, '.lab', 'runtime').replaceAll('\\', '/'))
+      expect(vi.mocked(pnpm)).toHaveBeenCalledWith(
+        ['install', '--config.strictDepBuilds=false'],
+        expect.objectContaining({ cwd: plan.profileDir, env: plan.env }),
+      )
+    } finally {
+      vi.mocked(pnpm).mockReset()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('emits all three dev banners before the profile install', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-seam-banner-'))
+    const externalRoot = mkdtempSync(join(tmpdir(), 'dsh-seam-banner-plugin-'))
+    try {
+      mkdirSync(join(root, 'workbench'), { recursive: true })
+      writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+        'targets:', '  next:', '    dsh: 0.1.1-rc.2', '    cordis: 4.0.1', '    node: 22.20.0',
+        '    pnpm: 11.7.0', '    allowBuilds:', '      esbuild: true',
+        '  master:', '    repository: deepseek-ai/deepseek-harness', `    commit: ${'1'.repeat(40)}`, '    pnpm: 11.7.0', '    node: ^22.19.0', '',
+      ].join('\n'))
+      mkdirSync(join(externalRoot, 'src'), { recursive: true })
+      writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
+      writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/banner-plugin"}\n')
+      const fakeLauncher = join(root, 'fake.mjs')
+      writeFileSync(fakeLauncher, 'export {}\n')
+      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [fakeLauncher] })
+      const order: string[] = []
+      vi.mocked(pnpm).mockReset().mockImplementation(() => { order.push('install'); return '' })
+      const logger = { info: () => { order.push('banner') }, warn: () => {} }
+      const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/banner-plugin' }
+      await devPlugin({ root, plugin, target: 'next', logger })
+      expect(order).toEqual(['banner', 'banner', 'banner', 'install'])
+    } finally {
+      vi.mocked(pnpm).mockReset()
+      vi.mocked(pnpmCommand).mockReset()
+      rmSync(root, { recursive: true, force: true })
+      rmSync(externalRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('wraps a foreground dev install failure in the dsh boot envelope', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-seam-fail-'))
+    const externalRoot = mkdtempSync(join(tmpdir(), 'dsh-seam-fail-plugin-'))
+    try {
+      mkdirSync(join(root, 'workbench'), { recursive: true })
+      writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+        'targets:', '  next:', '    dsh: 0.1.1-rc.2', '    cordis: 4.0.1', '    node: 22.20.0',
+        '    pnpm: 11.7.0', '    allowBuilds:', '      esbuild: true',
+        '  master:', '    repository: deepseek-ai/deepseek-harness', `    commit: ${'1'.repeat(40)}`, '    pnpm: 11.7.0', '    node: ^22.19.0', '',
+      ].join('\n'))
+      mkdirSync(join(externalRoot, 'src'), { recursive: true })
+      writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
+      writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/fail-plugin"}\n')
+      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [join(root, 'fake.mjs')] })
+      const infos: string[] = []
+      const logger = { info: (...args: unknown[]) => infos.push(args.join(' ')), warn: () => {} }
+      vi.mocked(pnpm).mockReset().mockImplementation(() => { throw new Error('install boom') })
+      const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/fail-plugin' }
+      await expect(devPlugin({ root, plugin, target: 'next', logger })).rejects.toThrow(
+        /dsh boot failed for profile 'next'.*install boom/,
+      )
+      expect(infos).toHaveLength(3)
+      expect(infos[0]).toMatch(/\[dev\] plugin 'fail-plugin' \(next\)/)
+      expect(infos[1]).toMatch(/generated overlay/)
+      expect(infos[2]).toMatch(/booting materialized web profile 'fail-plugin-next-dev' with DSH_HOME=/)
+    } finally {
+      vi.mocked(pnpm).mockReset()
+      vi.mocked(pnpmCommand).mockReset()
+      rmSync(root, { recursive: true, force: true })
+      rmSync(externalRoot, { recursive: true, force: true })
     }
   })
 })
