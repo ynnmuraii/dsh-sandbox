@@ -40,13 +40,24 @@ runtime above, while `dsh_lab.dev_start/status/stop` drives live dev sessions.
 `dsh_lab.dev_start` boots a detached supervisor against the plugin's live source
 path (no bundle gate) and returns a `dev-YYYYMMDDTHHMMSSZ-xxxxxxxx` handle plus
 a bounded loopback URL (`http://127.0.0.1:<port>`); it blocks only until the
-session leaves `starting`, then reports a `restartRequired` latch that is set
-solely by a changed plugin manifest/metadata digest or a changed target pin —
-edits under `src/**` never set it, and the supervisor never auto-restarts.
+session leaves `starting`, then reports a `restartRequired` latch that is set by
+a changed plugin manifest/metadata digest, a changed target pin, or any edit
+under `src/**` (which latches the reason `source-changed`). The latch is
+one-way and never auto-restarts: to pick up a source edit, stop the session and
+`dev_start` again with the new source.
 `dsh_lab.dev_status` re-reads that latch and liveness, and `dsh_lab.dev_stop`
 cooperatively stops the session, verifies cleanup, and returns the retained
 `stopped` tombstone. Dev sessions are read-only with respect to the plugin: all
 writes stay under `.lab/runtime`.
+
+> **Phase 5 is honest v1 without live reload (HMR).** Upstream DSH Web hot-module
+> reload is disabled and untested for the Web bundle (`cordis.patch.yml` sets
+> `- id: hmr / disabled: true` with a TODO to re-enable it once its reload
+> lifecycle is tested). The lab does not patch DSH, so a dev session does not
+> hot-reload `src/**`; an edit instead latches `restartRequired` with reason
+> `source-changed`, and stop→start loads the new source. When the official DSH
+> release provides a tested reload lifecycle, the lab can remove the restart
+> requirement.
 
 - **Author guide & recipes** — [context/lab-author-guide.md](context/lab-author-guide.md)
 - **Root context library** — [context/](context/) (plugin shared-context snapshots derive from it)
