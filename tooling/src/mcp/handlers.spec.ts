@@ -548,7 +548,7 @@ function devReadyStartDependencies(root: string, pluginPath: string): { deps: De
         schemaVersion: 1, sessionId, state: 'ready',
         plugin: { packageName: '@fixture/demo', sourcePath: resolve(pluginPath), runtimeName: 'demo' },
         target: { name: 'next', dsh: NEXT },
-        restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c') },
+        restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c'), sourceTree: digestString('src') },
         restartHash: digestString('d'), restartRequired: false,
         supervisorPid: 99, childPid: 100, url: 'http://127.0.0.1:49152',
         startedAt: '2026-08-24T12:00:00.000Z', updatedAt: '2026-08-24T12:00:00.000Z',

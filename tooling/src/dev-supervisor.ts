@@ -580,8 +580,8 @@ export function validateDevSupervisorRequest(value: unknown): asserts value is D
   assertRuntimePluginIdentity(parsedPlugin.runtimeName as string)
   const baseline = request.restartBaseline
   if (baseline === null || typeof baseline !== 'object' || Array.isArray(baseline)) throw new Error('request.restartBaseline must be an object')
-  exactKeys(baseline as Record<string, unknown>, ['pluginManifest', 'pluginMetadata', 'targetPin'])
-  for (const key of ['pluginManifest', 'pluginMetadata', 'targetPin'] as const) {
+  exactKeys(baseline as Record<string, unknown>, ['pluginManifest', 'pluginMetadata', 'targetPin', 'sourceTree'])
+  for (const key of ['pluginManifest', 'pluginMetadata', 'targetPin', 'sourceTree'] as const) {
     const digest = (baseline as Record<string, unknown>)[key]
     if (typeof digest !== 'string' || !SHA256_PATTERN.test(digest)) throw new Error(`request.restartBaseline.${key} must be a sha256 digest`)
   }

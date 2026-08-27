@@ -38,7 +38,7 @@ function request(): DevSupervisorRequestV1 {
     schemaVersion: 1, root: 'A:/forge', sessionId: SESSION,
     plugin: { packageName: '@f/x', sourcePath: 'A:/p', runtimeName: 'x' }, target: 'next',
     startedAt: '2026-08-24T12:00:00.000Z',
-    restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c') },
+    restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c'), sourceTree: digestString('src') },
   }
 }
 
@@ -127,7 +127,7 @@ describe('runDevSupervisor stop-before-spawn leaves a stopped tombstone', () => 
       schemaVersion: 1, sessionId, state: 'starting',
       plugin: { packageName: '@f/x', sourcePath: 'A:/p', runtimeName: 'x' },
       target: { name: 'next', dsh: '0.1.1-rc.2' },
-      restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c') },
+      restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c'), sourceTree: digestString('src') },
       restartHash: digestString('d'), restartRequired: false,
       startedAt: '2026-08-24T12:00:00.000Z', updatedAt: '2026-08-24T12:00:00.000Z',
     }

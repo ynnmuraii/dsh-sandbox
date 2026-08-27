@@ -81,7 +81,7 @@ function readyDeps(f: ReturnType<typeof fixture>): DevServiceDependencies {
         schemaVersion: 1, sessionId, state: 'ready',
         plugin: { packageName: f.plugin.packageName, sourcePath: f.plugin.sourcePath, runtimeName: 'x' },
         target: { name: 'next', dsh: NEXT },
-        restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c') },
+        restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c'), sourceTree: digestString('src') },
         restartHash: digestString('d'), restartRequired: false,
         supervisorPid: 99, childPid: 100, url: 'http://127.0.0.1:49152',
         startedAt: '2026-08-24T12:00:00.000Z', updatedAt: '2026-08-24T12:00:00.000Z',
@@ -251,17 +251,22 @@ describe('getDevSessionStatus', () => {
     expect(targetView.restartReasons).toEqual(['plugin-manifest', 'plugin-metadata', 'target-pin'])
     expect(targetView).not.toHaveProperty('url')
 
+    writeFileSync(join(f.plugin.sourcePath, 'src', 'index.ts'), 'export const live = false\n')
+    const sourceView = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
+    expect(sourceView.restartReasons).toEqual(['plugin-manifest', 'plugin-metadata', 'source-changed', 'target-pin'])
+    expect(sourceView).not.toHaveProperty('url')
+
     const again = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
-    expect(again.restartReasons).toEqual(['plugin-manifest', 'plugin-metadata', 'target-pin'])
+    expect(again.restartReasons).toEqual(['plugin-manifest', 'plugin-metadata', 'source-changed', 'target-pin'])
     expect(again).not.toHaveProperty('url')
   })
 
-  it('treats dev sessions as live source: edits to src never trigger a restart reason', () => {
+  it('treats dev sessions as live source: a source edit latches source-changed and requires stop/start', () => {
     createDevState(f, SESSION, 'ready')
     writeFileSync(join(f.plugin.sourcePath, 'src', 'index.ts'), 'export const live = false\n')
     const view = getDevSessionStatus({ root: f.root, sessionId: SESSION }, statusDeps())
-    expect(view).toMatchObject({ state: 'ready', restartRequired: false, restartReasons: [] })
-    expect(view.url).toBe('http://127.0.0.1:49152')
+    expect(view).toMatchObject({ state: 'ready', restartRequired: true, restartReasons: ['source-changed'] })
+    expect(view.url).toBeUndefined()
   })
 
   it('reports a ready session whose supervisor/child died as an orphan', () => {

@@ -32,6 +32,7 @@ function state(overrides: Partial<DevSessionStateV1> = {}): DevSessionStateV1 {
       pluginManifest: digestString('a'),
       pluginMetadata: digestString('b'),
       targetPin: digestString('c'),
+      sourceTree: digestString('src'),
     },
     restartHash: digestString('d'),
     restartRequired: false,

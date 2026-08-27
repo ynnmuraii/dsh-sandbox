@@ -47,7 +47,7 @@ export interface DevSessionViewV1 {
 export const DEV_SESSION_ID_PATTERN = /^dev-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/
-const REASONS: readonly DevRestartReason[] = ['plugin-manifest', 'plugin-metadata', 'target-pin']
+const REASONS: readonly DevRestartReason[] = ['plugin-manifest', 'plugin-metadata', 'target-pin', 'source-changed']
 const PHASES: readonly DevSessionPhase[] = ['starting', 'ready', 'crashed', 'stopping', 'stopped']
 
 export function createDevSessionId(now = new Date(), randomHex = () => randomBytes(4).toString('hex')): string {
@@ -213,7 +213,7 @@ function validateDevState(value: unknown): asserts value is DevSessionStateV1 {
   validateTimestamp(s.startedAt, 'state.startedAt')
   validateTimestamp(s.updatedAt, 'state.updatedAt')
   if (Date.parse(s.updatedAt) < Date.parse(s.startedAt)) throw new Error('updatedAt must not be earlier than startedAt')
-  for (const k of ['pluginManifest', 'pluginMetadata', 'targetPin'] as const) {
+  for (const k of ['pluginManifest', 'pluginMetadata', 'targetPin', 'sourceTree'] as const) {
     if (!SHA256_PATTERN.test(s.restartBaseline?.[k] ?? '')) throw new Error(`restartBaseline.${k} must be a sha256 digest`)
   }
   if (!SHA256_PATTERN.test(s.restartHash)) throw new Error('restartHash must be a sha256 digest')

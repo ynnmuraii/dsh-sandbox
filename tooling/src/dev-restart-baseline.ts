@@ -1,13 +1,15 @@
 import { createHash, type Hash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { computePluginDigest } from './plugin-snapshot.js'
 
-export type DevRestartReason = 'plugin-manifest' | 'plugin-metadata' | 'target-pin'
+export type DevRestartReason = 'plugin-manifest' | 'plugin-metadata' | 'target-pin' | 'source-changed'
 
 export interface DevRestartBaseline {
   pluginManifest: `sha256:${string}`
   pluginMetadata: `sha256:${string}`
   targetPin: `sha256:${string}`
+  sourceTree: `sha256:${string}`
 }
 
 export interface ComputeRestartInput {
@@ -48,6 +50,10 @@ export function computeDevRestartBaseline(input: ComputeRestartInput): DevRestar
     pluginManifest: digestRequiredFile(join(pluginSourcePath, 'package.json')),
     pluginMetadata: digestOptionalFile(join(pluginSourcePath, '.dsh-lab', 'plugin.yaml')),
     targetPin: digestString(targetPin),
+    // Required source: an unreadable/absent src directory throws (never
+    // silently digested as empty), so a source read failure surfaces as a hard
+    // error rather than a false "no source change" signal.
+    sourceTree: computePluginDigest(join(pluginSourcePath, 'src')).digest,
   }
 }
 
@@ -57,6 +63,7 @@ export function aggregateRestartHash(baseline: DevRestartBaseline): `sha256:${st
     ['pluginManifest', baseline.pluginManifest],
     ['pluginMetadata', baseline.pluginMetadata],
     ['targetPin', baseline.targetPin],
+    ['sourceTree', baseline.sourceTree],
   ] as const) {
     const byte = Buffer.from(`${key}:${value}`, 'utf8')
     const len = Buffer.allocUnsafe(8)
@@ -72,5 +79,6 @@ export function restartReasonsForBaseline(current: DevRestartBaseline, baseline:
   if (current.pluginManifest !== baseline.pluginManifest) reasons.push('plugin-manifest')
   if (current.pluginMetadata !== baseline.pluginMetadata) reasons.push('plugin-metadata')
   if (current.targetPin !== baseline.targetPin) reasons.push('target-pin')
+  if (current.sourceTree !== baseline.sourceTree) reasons.push('source-changed')
   return reasons.sort((a, b) => a.localeCompare(b))
 }

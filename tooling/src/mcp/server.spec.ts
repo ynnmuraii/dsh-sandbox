@@ -490,7 +490,7 @@ function devReadyDeps(root: string, pluginPath: string, restartRequired = false)
         schemaVersion: 1, sessionId, state: 'ready',
         plugin: { packageName: '@fixture/demo', sourcePath: resolve(pluginPath), runtimeName: 'demo' },
         target: { name: 'next', dsh: NEXT },
-        restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c') },
+        restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c'), sourceTree: digestString('src') },
         restartHash: digestString('d'), restartRequired,
         ...(restartRequired ? { restartReasons: ['plugin-manifest' as const] } : {}),
         supervisorPid: 99, childPid: 100, url: 'http://127.0.0.1:49152',
@@ -571,14 +571,15 @@ describe('mcp dev session tools', () => {
     expect(result._meta?.dshLab).toMatchObject({ sessionId: DEV_SESSION, restartRequired: false, exitCode: 0 })
     await handler.close().catch(() => {})
   })
-  it('dev_status exits 2 and carries restartRequired when a ready session is restartRequired', async () => {
+  it('dev_status latches source-changed and exits 2 after a live src edit', async () => {
     const { root, pluginPath } = mkRootWithPlugin()
-    createDevState(root, pluginPath, DEV_SESSION, 'ready', { restartRequired: true, restartReasons: ['plugin-manifest'] })
+    createDevState(root, pluginPath, DEV_SESSION, 'ready')
+    writeFileSync(join(pluginPath, 'src', 'index.ts'), 'export const name = "demo-edited"\n')
     const handler = createMcpHandler(() => buildServer(root, { devDeps: { now: () => DEV_NOW, processAlive: () => true } }))
-    const json = await rpc(handler, { jsonrpc: '2.0', id: 712, method: 'tools/call', params: { name: 'dsh_lab.dev_status', arguments: { sessionId: DEV_SESSION } } })
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 714, method: 'tools/call', params: { name: 'dsh_lab.dev_status', arguments: { sessionId: DEV_SESSION } } })
     const result = (json.result ?? json) as { isError?: boolean; structuredContent?: Record<string, unknown>; _meta?: { dshLab?: Record<string, unknown> } }
     expect(result.isError).toBeUndefined()
-    expect(result.structuredContent).toMatchObject({ sessionId: DEV_SESSION, state: 'ready', restartRequired: true })
+    expect(result.structuredContent).toMatchObject({ sessionId: DEV_SESSION, state: 'ready', restartRequired: true, restartReasons: ['source-changed'] })
     expect(result._meta?.dshLab).toMatchObject({ sessionId: DEV_SESSION, restartRequired: true, exitCode: 2 })
     await handler.close().catch(() => {})
   })
