@@ -1,5 +1,5 @@
-import { join, relative, resolve } from 'node:path'
-import { mkdirSync, writeFileSync, existsSync, rmSync, renameSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
+import { mkdirSync, writeFileSync, existsSync, rmSync, renameSync, readFileSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
@@ -142,12 +142,14 @@ export function buildSourceOverlay(name: string, entryPath: string): string {
 }
 
 // Render the full source-dev overlay. Beyond inserting the plugin's source
-// entry (buildSourceOverlay), it re-enables the shared Cordis module HMR row
-// and points its module `root` at the plugin's source directory, so edits to
-// src/index.ts are watched and reloaded while `lab dev` runs (criterion 6).
-// The web bundle previously disabled the shared hmr row (`disabled: true`);
-// because later patch layers win per row, this overlay — applied last via
-// `--patch` — overrides `disabled` back to false and scopes the watched root.
+// entry (buildSourceOverlay), it scopes the shared Cordis module HMR row by
+// pointing its module `root` at the plugin's source directory. The web bundle
+// previously disabled the shared hmr row (`disabled: true`); because later
+// patch layers win per row, this overlay — applied last via `--patch` —
+// re-enables that row and scopes its watched root. Phase 5 v1 upstream Web HMR
+// is unavailable (disabled/untested), so a dev session does not hot-reload
+// src/**; an edit latches `restartRequired` (source-changed) and stop→start
+// loads the new source.
 export function buildDevOverlay(name: string, entryPath: string, sourceRoot: string): string {
   const root = sourceRoot.replace(/\\/g, '/').replace(/'/g, "''")
   const insert = buildSourceOverlay(name, entryPath)
@@ -159,40 +161,6 @@ export function buildDevOverlay(name: string, entryPath: string, sourceRoot: str
     `      - '${root}'`,
     insert,
   ].join('\n')
-}
-
-// Materialize a pinned profile package.json (and workspace marker) into the
-// runtime dir, reading the target's pin from the compatibility manifest. The
-// materialized location is `.lab/runtime/profiles/<name>-<target>-<kind>`, so the
-// master source reference is computed as a path back to `upstream/` from
-// there (and forward-slash normalized for the `file:` spec).
-function materializeProfile(opts: {
-  root: string
-  name: string
-  target: Target
-  profileKind: 'dev' | 'verify'
-  runId?: string
-  bundles?: string[]
-}): string {
-  const { root, name, target, profileKind, runId, bundles = PROFILE_BUNDLES } = opts
-  const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
-  const profile = profileName(name, target, profileKind, runId)
-  const profileDir = join(root, ROOT_PATHS.runtime, 'profiles', profile)
-  let dsh: string
-  if (target === 'master') {
-    dsh = `file:${relative(profileDir, rootPath(root, ROOT_PATHS.upstream)).replace(/\\/g, '/')}`
-  } else {
-    const pin = compat.targets.next.dsh
-    if (!pin) {
-      throw new CompatibilityError('next target requires a pinned dsh version')
-    }
-    dsh = pin
-  }
-  const spec: ProfileSpec = { name: `@dsh-lab/profile-${profile}`, bundles }
-  mkdirSync(profileDir, { recursive: true })
-  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(buildProfilePackageJson(spec, { dsh }), null, 2))
-  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(compat.targets[target].allowBuilds ?? {}))
-  return profileDir
 }
 
 // Whether the upstream checkout has a modified tracked working tree
@@ -286,17 +254,20 @@ export async function resolveUiLauncher(root: string, target: Target, compat: Co
   return resolveLauncher(root, compat, target)
 }
 
-// `pnpmCommand` is also the test seam for a directly executable launcher. In
-// production the resolved pnpm entry needs `exec dsh`; an injected node script
-// already represents dsh and must receive only dsh's own flags.
-async function resolveDevLauncher(root: string, compat: Compatibility, target: Target): Promise<Command> {
-  const launcher = await resolveLauncher(root, compat, target)
-  if (target !== 'next' || launcher.cmd !== process.execPath) return launcher
-  const entry = launcher.args[0]
-  if (entry !== undefined && !/pnpm\.(?:cjs|mjs)$/i.test(entry)) {
-    return { cmd: launcher.cmd, args: launcher.args.slice(0, -2) }
+// Resolve the foreground `lab dev` launcher for a target. `next` boots the
+// profile-installed dsh bin directly (no `pnpm exec` wrapper, which pnpm 11.7
+// rejects when the tsx loader is in NODE_OPTIONS — it demands a `.pnpmfile.mjs`
+// and crashes); `master` boots the built upstream bin. `next` therefore needs
+// the materialized runtime plan so the installed bin can be resolved from the
+// profile. This keeps a single launcher rule for the dev path — the dev
+// supervisor resolves the identical `next` launcher via
+// `resolveProfileDshLauncher`.
+async function resolveDevPluginLauncher(opts: { root: string; compat: Compatibility; target: Target; plan?: DevRuntimePlan }): Promise<Command> {
+  if (opts.target === 'next') {
+    if (!opts.plan) throw new Error('next target requires a prepared runtime plan before resolving the dev launcher')
+    return resolveProfileDshLauncher(opts.plan.profileDir)
   }
-  return launcher
+  return resolveLauncher(opts.root, opts.compat, opts.target)
 }
 
 // Run a launcher command against the materialized profile, isolating it to the
@@ -304,6 +275,41 @@ async function resolveDevLauncher(root: string, compat: Compatibility, target: T
 // The launcher's OWN flags come first: `--profile <name>` must precede any
 // inner/`--patch` arguments, and the `web` subcommand alias is never used (it
 // would hard-code profile "web" and bypass our materialized profile).
+// Resolve the installed `@deepseek-ai/dsh` bin out of a materialized profile so
+// the runtime launches the real CLI directly — no `pnpm exec` wrapper. pnpm is
+// install-time only; running `pnpm exec dsh` with the tsx loader in NODE_OPTIONS
+// makes pnpm 11.7 demand a `.pnpmfile.mjs` and crash, whereas the direct bin
+// keeps the loader in the child env for live TS source without pnpm in the loop.
+export function resolveProfileDshLauncher(profileDir: string): { cmd: string; args: string[] } {
+  const pkgDir = join(profileDir, 'node_modules', '@deepseek-ai', 'dsh')
+  const manifestPath = join(pkgDir, 'package.json')
+  if (!existsSync(manifestPath)) {
+    throw new Error(`installed dsh package not found at ${manifestPath}; the profile must be installed before launching the dev session`)
+  }
+  let bin: unknown
+  try {
+    bin = JSON.parse(readFileSync(manifestPath, 'utf8')).bin
+  } catch (e) {
+    throw new Error(`cannot parse dsh manifest ${manifestPath}: ${(e as Error).message}`)
+  }
+  const binValue = typeof bin === 'string'
+    ? bin
+    : bin !== null && typeof bin === 'object'
+      ? (bin as Record<string, unknown>).dsh ?? Object.values(bin as Record<string, unknown>)[0]
+      : undefined
+  if (typeof binValue !== 'string' || binValue.length === 0) {
+    throw new Error(`@deepseek-ai/dsh at ${pkgDir} exposes no usable bin (bin=${JSON.stringify(bin)})`)
+  }
+  const binPath = resolve(pkgDir, binValue)
+  const pkgRoot = resolve(pkgDir)
+  const contained = binPath === pkgRoot || binPath.startsWith(pkgRoot + sep)
+  const stats = statSync(binPath, { throwIfNoEntry: false })
+  if (!contained) throw new Error(`dsh bin ${binPath} escapes the package dir ${pkgRoot}`)
+  if (stats === undefined) throw new Error(`dsh bin does not exist: ${binPath}`)
+  if (!stats.isFile()) throw new Error(`dsh bin is not a regular file: ${binPath}`)
+  return { cmd: process.execPath, args: [binPath] }
+}
+
 function bootProfile(
   launcher: Command,
   profileDir: string,
@@ -330,6 +336,76 @@ function devPluginName(plugin: PluginRef): string {
   return parts.at(-1) ?? plugin.packageName
 }
 
+export interface DevRuntimePlugin {
+  packageName: string
+  sourcePath: string
+  runtimeName: string
+}
+
+export interface DevRuntimePlan {
+  overlayPath: string
+  profileDir: string
+  cwd: string
+  env: NodeJS.ProcessEnv
+}
+
+export interface PrepareDevRuntimeOptions {
+  root: string
+  plugin: DevRuntimePlugin
+  target: 'next' | 'master'
+  runtimeHome: string
+  profileName: string
+  overlayDir?: string
+  installProfile?: boolean
+  signal?: AbortSignal
+}
+
+// Materialize the dev profile + source overlay and compute the boot
+// environment for a foreground `lab dev` run. Extracted from `devPlugin` so
+// the CLI-dev flow stays byte-identical while a supervisor can prepare an
+// isolated runtime (Tasks 4/5).
+export async function prepareDevRuntime(opts: PrepareDevRuntimeOptions): Promise<DevRuntimePlan> {
+  const { root, plugin, target, runtimeHome, profileName } = opts
+  const sourcePath = resolve(plugin.sourcePath)
+  const sourceEntry = resolve(sourcePath, 'src', 'index.ts')
+  const sourceRoot = resolve(sourcePath, 'src')
+  const entryPath = pathToFileURL(sourceEntry).href
+  const overlayDir = opts.overlayDir ?? join(runtimeHome, 'overlays', plugin.runtimeName)
+  const overlayPath = join(overlayDir, 'cordis.patch.yml')
+  const profileDir = join(runtimeHome, 'profiles', profileName)
+
+  mkdirSync(overlayDir, { recursive: true })
+  writeFileSync(overlayPath, buildDevOverlay(plugin.runtimeName, entryPath, sourceRoot))
+
+  const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
+  const pin = compat.targets[target]
+  if (!pin) throw new CompatibilityError(`compatibility manifest has no ${target} target`)
+  const dsh = target === 'master'
+    ? `file:${relative(profileDir, rootPath(root, ROOT_PATHS.upstream)).replace(/\\/g, '/')}`
+    : (pin.dsh ?? (() => { throw new CompatibilityError('next target requires a pinned dsh version') })())
+  const spec: ProfileSpec = { name: `@dsh-lab/profile-${profileName}`, bundles: DEV_WEB_BUNDLES }
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(buildProfilePackageJson(spec, { dsh }), null, 2))
+  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(pin.allowBuilds ?? {}))
+  // The profile `pnpm install` runs with a plain env (process + DSH_HOME only)
+  // so pnpm is never handed the tsx loader in NODE_OPTIONS — injecting it makes
+  // pnpm 11.7 demand a `.pnpmfile.mjs` in the profile workspace root and throw
+  // "Cannot find module .pnpmfile.mjs", crashing the session before the
+  // harness boots. The tsx loader is applied only to the returned child env
+  // (`plan.env`) so live TS source still loads.
+  const installEnv = { ...process.env, DSH_HOME: runtimeHome.replace(/\\/g, '/') }
+  const childEnv = {
+    ...process.env,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' '),
+    DSH_HOME: runtimeHome.replace(/\\/g, '/'),
+  }
+  if (opts.installProfile !== false && target !== 'master') {
+    opts.signal?.throwIfAborted()
+    pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env: installEnv })
+  }
+  return { overlayPath, profileDir, cwd: profileDir, env: childEnv }
+}
+
 /**
  * Run live source development for either a catalog plugin or an arbitrary
  * standalone plugin directory. All generated profiles, overlays, and runtime
@@ -348,38 +424,31 @@ export async function devPlugin(opts: DevPluginOptions): Promise<void> {
     throw new Error('master target requires the pinned upstream checkout (see Task 8)')
   }
   const entryPath = pathToFileURL(resolve(plugin.sourcePath, 'src', 'index.ts')).href
-  const sourceRoot = resolve(plugin.sourcePath, 'src')
-
-  // Emit an absolute overlay into the runtime dir. The overlay both inserts the
-  // plugin source entry AND re-enables Cordis module HMR with a module `root`
-  // at the plugin's src dir, so edits there reload live during `lab dev`.
-  const overlayDir = join(root, ROOT_PATHS.runtime, 'overlays', name)
-  const overlayPath = join(overlayDir, 'cordis.patch.yml')
-  mkdirSync(overlayDir, { recursive: true })
-  writeFileSync(overlayPath, buildDevOverlay(name, entryPath, sourceRoot))
-
-  // Materialize the pinned profile (carrying the full WEB bundle stack so a
-  // real web composition boots), then boot THE ACTUAL profile by name with the
-  // source overlay and watch source for HMR. DSH_HOME is pointed at the lab
-  // runtime home so the boot is fully isolated from the user's real ~/.dsh.
-  // The `--profile <name>-<target>` flag boots the materialized web profile
-  // (NOT the `web` built-in alias); master boots the pinned upstream's built
-  // CLI directly (no `dsh` bin exists on dsh-root).
-  const profileDir = materializeProfile({ root, name, target, profileKind: 'dev', bundles: DEV_WEB_BUNDLES })
+  const runtimeHome = rootPath(root, ROOT_PATHS.runtime)
   const bootProfileName = profileName(name, target, 'dev')
   const compat = loadCompatibilityFromFile(rootPath(root, ROOT_PATHS.compatibility))
-  const launcher = await resolveDevLauncher(root, compat, target)
-  const nodeOptions = [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' ')
-  const env = { ...process.env, NODE_OPTIONS: nodeOptions, DSH_HOME: rootPath(root, ROOT_PATHS.runtime).replace(/\\/g, '/') }
+  const overlayPath = join(runtimeHome, 'overlays', name, 'cordis.patch.yml')
+  const devHome = runtimeHome.replace(/\\/g, '/')
   logger.info(`[dev] plugin '${name}' (${target}) -> ${entryPath}`)
   logger.info(`[dev] generated overlay: ${overlayPath}`)
-  logger.info(`[dev] booting materialized web profile '${bootProfileName}' with DSH_HOME=${env.DSH_HOME}`)
+  logger.info(`[dev] booting materialized web profile '${bootProfileName}' with DSH_HOME=${devHome}`)
 
   try {
-    if (target !== 'master') {
-      pnpm(['install', '--config.strictDepBuilds=false'], { cwd: profileDir, env })
-    }
-    bootProfile(launcher, profileDir, bootProfileName, env, ['--patch', overlayPath])
+    const plan = await prepareDevRuntime({
+      root,
+      plugin: { packageName: plugin.packageName, sourcePath: plugin.sourcePath, runtimeName: name },
+      target,
+      runtimeHome,
+      profileName: bootProfileName,
+      overlayDir: join(runtimeHome, 'overlays', name),
+      installProfile: target !== 'master',
+    })
+    // `next` boots the profile-installed dsh bin directly (resolved after the
+    // profile is installed); `master` boots the built upstream launcher. This
+    // keeps the tsx loader in the child env for live TS source without pnpm in
+    // the launch loop.
+    const launcher = await resolveDevPluginLauncher({ root, compat, target, plan })
+    bootProfile(launcher, plan.profileDir, bootProfileName, plan.env, ['--patch', plan.overlayPath])
   } catch (e) {
     throw new Error(`dsh boot failed for profile '${target}': ${(e as Error).message}`, { cause: e })
   }

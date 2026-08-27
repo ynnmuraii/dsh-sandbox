@@ -6,6 +6,9 @@ import { statusExitCode, UI_SESSION_ID_PATTERN } from '../cli.js'
 import { NAME_RE } from '../create.js'
 import {
   handleCreatePlugin,
+  handleDevStart,
+  handleDevStatus,
+  handleDevStop,
   handleDoctor,
   handleGetEvidence,
   handleInspect,
@@ -21,6 +24,8 @@ import {
 } from './handlers.js'
 import type { VerifyPluginDependencies } from '../verify.js'
 import type { UiServiceDependencies } from '../ui.js'
+import { DEV_SESSION_ID_PATTERN } from '../dev-session-state.js'
+import type { DevServiceDependencies } from '../dev-session.js'
 
 type DshLabMeta = Record<string, unknown>
 
@@ -50,7 +55,7 @@ function toolError(code: string, message: string, exitCode: number): CallToolRes
 function toolErrorExitCode(error: unknown): number {
   if (
     error instanceof ToolError &&
-    (error.code === 'UI_STALE' || error.code === 'UI_CLEANUP_INCOMPLETE')
+    (error.code === 'UI_STALE' || error.code === 'UI_CLEANUP_INCOMPLETE' || error.code === 'DEV_CLEANUP_INCOMPLETE')
   ) {
     return 2
   }
@@ -67,6 +72,7 @@ export function doctorMeta(diagnostics: readonly { level: string; message: strin
 export interface McpServerOptions {
   verifyDeps?: Partial<VerifyPluginDependencies>
   uiDeps?: Partial<UiServiceDependencies>
+  devDeps?: Partial<DevServiceDependencies>
   allowAuthoring?: boolean
 }
 
@@ -360,6 +366,99 @@ export function buildServer(root: string, options?: McpServerOptions): McpServer
     },
   )
 
+  server.registerTool(
+    'dsh_lab.dev_start',
+    {
+      description:
+        "Start an isolated dev session for a plugin against a pinned target. Creates a detached supervisor that boots the DSH harness with the plugin's live source path (no bundle gate). BOUNDED LONG-RUNNING: blocks up to startupTimeoutMs (default 120000, range 1000..600000, poll 25ms) waiting for state to leave 'starting'; typically <5s, returns as soon as state is 'ready', 'crashed', or 'stopped'. Returns DevSessionViewV1 { schemaVersion:1, sessionId:'dev-YYYYMMDDTHHMMSSZ-xxxxxxxx', state:'starting'|'ready'|'crashed'|'stopping'|'stopped', restartRequired:boolean, restartReasons:('plugin-manifest'|'plugin-metadata'|'target-pin'|'source-changed')[] — latch and never un-latch, restartHash:'sha256:…', plugin:{packageName,sourcePath,runtimeName}, target:{name:'next',dsh:string}|{name:'master',commit:string}, url?:string (present when ready and no restart reasons), error?:string, cleanup?:'pass'|'fail', orphan?:true, startedAt, updatedAt }. Use sessionId as the explicit handle for dev_status/dev_stop.",
+      inputSchema: z
+        .object({
+          plugin: z.string().min(1).describe('Catalog plugin name (enumerate via dsh_lab.list_plugins)').optional(),
+          path: z.string().min(1).describe('Absolute path to a standalone plugin directory — exactly one of plugin or path is required').optional(),
+          target: z.enum(['next', 'master']).describe('Target pin to boot against (required)'),
+          startupTimeoutMs: z.number().int().min(1000).max(600000).optional().default(120000).describe('Max ms to wait for ready (poll 25ms); default 120000'),
+        })
+        .strict()
+        .refine(
+          data => (data.plugin !== undefined) !== (data.path !== undefined),
+          { message: 'exactly one of plugin or path is required' },
+        ),
+    },
+    async args => {
+      try {
+        const typed = args as { plugin?: string; path?: string; target: 'next' | 'master'; startupTimeoutMs?: number }
+        const result = await handleDevStart(root, typed, options?.devDeps)
+        return success(result, { sessionId: result.sessionId, exitCode: result.state === 'ready' && !result.restartRequired ? 0 : 2 })
+      } catch (e) {
+        const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+        const message = e instanceof Error ? e.message : String(e)
+        return toolError(code, message, toolErrorExitCode(e))
+      }
+    },
+  )
+
+  server.registerTool(
+    'dsh_lab.dev_status',
+    {
+      description:
+        "Get live status of a dev session by sessionId. Synchronous read of .lab/runtime/dev-sessions/<sessionId>/state.json plus liveness, restart-latch, and orphan checks. Returns DevSessionViewV1 { sessionId, state:'starting'|'ready'|'crashed'|'stopping'|'stopped', restartRequired, restartReasons:('plugin-manifest'|'plugin-metadata'|'target-pin'|'source-changed')[] — latch and never un-latch, restartHash, plugin, target, url?, error?, cleanup?, orphan?:true, startedAt, updatedAt }. restartRequired:true means a lived plugin manifest/metadata digest, the source tree digest, or the target pin changed since session start. Editing src/** latches source-changed (stop then start to load new source). orphan:true means the supervisor/child pid is gone — the view is still returned (not an error) but manual cleanup of the session dir at .lab/runtime/dev-sessions/<id> may be needed. sessionId pattern ^dev-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$.",
+      inputSchema: z
+        .object({
+          sessionId: z
+            .string()
+            .min(1)
+            .regex(DEV_SESSION_ID_PATTERN, 'invalid or unsafe session id')
+            .describe('Dev session handle minted by dsh_lab.dev_start (pattern dev-YYYYMMDDTHHMMSSZ-xxxxxxxx)'),
+        })
+        .strict(),
+    },
+    async args => {
+      try {
+        const typed = args as { sessionId: string }
+        // Only inject the status liveness/clock deps when both keys are
+        // actually supplied; a partial devDeps with unrelated keys must not
+        // degrade dev_status to a broken (undefined `now`/`processAlive`) deps.
+        const statusDeps = options?.devDeps !== undefined && typeof options.devDeps.now === 'function' && typeof options.devDeps.processAlive === 'function'
+          ? { now: options.devDeps.now, processAlive: options.devDeps.processAlive }
+          : undefined
+        const result = handleDevStatus(root, typed, statusDeps)
+        return success(result, { sessionId: result.sessionId, restartRequired: result.restartRequired, exitCode: result.state === 'ready' && !result.restartRequired ? 0 : 2 })
+      } catch (e) {
+        const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+        const message = e instanceof Error ? e.message : String(e)
+        return toolError(code, message, toolErrorExitCode(e))
+      }
+    },
+  )
+
+  server.registerTool(
+    'dsh_lab.dev_stop',
+    {
+      description:
+        "Stop a dev session (cooperative stop). Writes a stop control, waits for the supervisor to reach state 'stopped' (typically seconds) and verifies cleanup. Returns DevSessionViewV1 { sessionId, state:'stopped' (or an already-terminal 'crashed' view for a crashed session), restartRequired, restartReasons, restartHash, plugin, target, url?, error?, cleanup, orphan?, startedAt, updatedAt }. Idempotent: a 'stopped' session returns its stored tombstone. Unknown sessionId → isError DEV_NOT_FOUND. Cleanup-incomplete → DEV_CLEANUP_INCOMPLETE (exit 2).",
+      inputSchema: z
+        .object({
+          sessionId: z
+            .string()
+            .min(1)
+            .regex(DEV_SESSION_ID_PATTERN, 'invalid or unsafe session id')
+            .describe('Dev session handle minted by dsh_lab.dev_start (pattern dev-YYYYMMDDTHHMMSSZ-xxxxxxxx)'),
+          stopTimeoutMs: z.number().int().min(1000).max(600000).optional().default(120000).describe('Max ms to wait for stop cleanup (default 120000)'),
+        })
+        .strict(),
+    },
+    async args => {
+      try {
+        const typed = args as { sessionId: string; stopTimeoutMs?: number }
+        const result = await handleDevStop(root, typed, options?.devDeps)
+        return success(result, { sessionId: result.sessionId, cleanup: result.cleanup, exitCode: result.state === 'stopped' ? 0 : 2 })
+      } catch (e) {
+        const code = e instanceof ToolError ? e.code : 'INTERNAL_ERROR'
+        const message = e instanceof Error ? e.message : String(e)
+        return toolError(code, message, toolErrorExitCode(e))
+      }
+    },
+  )
   if (options?.allowAuthoring === true) {
     server.registerTool(
       'dsh_lab.create_plugin',

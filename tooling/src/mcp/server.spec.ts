@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createMcpHandler } from '@modelcontextprotocol/server'
 import { buildServer, doctorMeta } from './server.js'
 import { handleInspect } from './handlers.js'
@@ -11,6 +11,9 @@ import { createUiSession, type UiSessionStateV1 } from '../ui-session.js'
 import { loadCatalogFromFile } from '../schemas.js'
 import { computePluginDigest } from '../plugin-snapshot.js'
 import { computeContextDigest } from '../status.js'
+import { clearDevControl, createOwnedDevSession, readDevControl, readDevSession, writeDevSession, type DevSessionStateV1 } from '../dev-session-state.js'
+import type { DevServiceDependencies } from '../dev-session.js'
+import { aggregateRestartHash, computeDevRestartBaseline, digestString } from '../dev-restart-baseline.js'
 
 const roots: string[] = []
 const NEXT = '0.1.1-rc.2'
@@ -119,8 +122,8 @@ describe('mcp server integration via createMcpHandler', () => {
     const json = await rpc(handler, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
     const tools = json.result?.tools ?? json.tools
     const names = (tools as Array<{ name: string }>).map(t => t.name)
-    expect(names).toEqual(expect.arrayContaining(['dsh_lab.inspect', 'dsh_lab.status', 'dsh_lab.doctor', 'dsh_lab.get_evidence', 'dsh_lab.list_plugins', 'dsh_lab.verify', 'dsh_lab.ui_start', 'dsh_lab.ui_status', 'dsh_lab.ui_finish', 'dsh_lab.ui_abort']))
-    expect(names).toHaveLength(10)
+    expect(names).toEqual(expect.arrayContaining(['dsh_lab.inspect', 'dsh_lab.status', 'dsh_lab.doctor', 'dsh_lab.get_evidence', 'dsh_lab.list_plugins', 'dsh_lab.verify', 'dsh_lab.ui_start', 'dsh_lab.ui_status', 'dsh_lab.ui_finish', 'dsh_lab.ui_abort', 'dsh_lab.dev_start', 'dsh_lab.dev_status', 'dsh_lab.dev_stop']))
+    expect(names).toHaveLength(13)
     await handler.close().catch(() => {})
   })
 
@@ -314,7 +317,7 @@ describe('mcp UI server integration', () => {
     const json = await rpc(handler, { jsonrpc: '2.0', id: 19, method: 'tools/list', params: {} })
     const tools = json.result?.tools ?? json.tools
     const names = (tools as Array<{ name: string }>).map(tool => tool.name)
-    expect(names).toHaveLength(10)
+    expect(names).toHaveLength(13)
     expect(names).toEqual(
       expect.arrayContaining([
         'dsh_lab.inspect',
@@ -327,6 +330,9 @@ describe('mcp UI server integration', () => {
         'dsh_lab.ui_status',
         'dsh_lab.ui_finish',
         'dsh_lab.ui_abort',
+        'dsh_lab.dev_start',
+        'dsh_lab.dev_status',
+        'dsh_lab.dev_stop',
       ]),
     )
     await handler.close().catch(() => {})
@@ -357,12 +363,12 @@ describe('mcp UI server integration', () => {
 describe('mcp authoring gating', () => {
   const AUTH_TOOLS = ['dsh_lab.create_plugin', 'dsh_lab.sync_context']
 
-  it('default server lists 10 and rejects authoring tools without mutation', async () => {
+  it('default server lists 13 and rejects authoring tools without mutation', async () => {
     const { root } = mkAuthoringRoot()
     const handler = createMcpHandler(() => buildServer(root))
     const json = await rpc(handler, { jsonrpc: '2.0', id: 100, method: 'tools/list', params: {} })
     const names = ((json.result?.tools ?? json.tools) as Array<{ name: string }>).map(t => t.name)
-    expect(names).toHaveLength(10)
+    expect(names).toHaveLength(13)
     expect(names).not.toContain('dsh_lab.create_plugin')
     expect(names).not.toContain('dsh_lab.sync_context')
     const call = await rpc(handler, { jsonrpc: '2.0', id: 101, method: 'tools/call', params: { name: 'dsh_lab.create_plugin', arguments: { name: 'acme-test' } } })
@@ -371,12 +377,12 @@ describe('mcp authoring gating', () => {
     await handler.close().catch(() => {})
   })
 
-  it('gated server lists 12 including authoring tools', async () => {
+  it('gated server lists 15 including authoring tools', async () => {
     const { root } = mkAuthoringRoot()
     const handler = createMcpHandler(() => buildServer(root, { allowAuthoring: true }))
     const json = await rpc(handler, { jsonrpc: '2.0', id: 200, method: 'tools/list', params: {} })
     const names = ((json.result?.tools ?? json.tools) as Array<{ name: string }>).map(t => t.name)
-    expect(names).toHaveLength(12)
+    expect(names).toHaveLength(15)
     expect(names).toEqual(expect.arrayContaining(AUTH_TOOLS))
     await handler.close().catch(() => {})
   })
@@ -446,6 +452,193 @@ describe('mcp authoring gating', () => {
     const nongitResult = (nongit.result ?? nongit) as { isError?: boolean; content?: Array<{ text: string }> }
     expect(nongitResult.isError).toBe(true)
     expect(nongitResult.content?.[0]?.text).toContain('NOT_A_PLUGIN_REPO')
+    await handler.close().catch(() => {})
+  })
+})
+const DEV_SESSION = 'dev-20260824T120000000Z-a1b2c3d4'
+const DEV_NOW = '2026-08-24T12:00:04.000Z'
+
+function devRuntimeRoot(root: string): string {
+  return join(root, '.lab', 'runtime')
+}
+
+function devState(pluginPath: string, sessionId: string, phase: 'ready' | 'crashed' | 'stopped', extras: Partial<DevSessionStateV1> = {}): DevSessionStateV1 {
+  const baseline = computeDevRestartBaseline({ pluginSourcePath: resolve(pluginPath), targetPin: NEXT })
+  const base: DevSessionStateV1 = {
+    schemaVersion: 1, sessionId, state: phase,
+    plugin: { packageName: '@fixture/demo', sourcePath: resolve(pluginPath), runtimeName: 'demo' },
+    target: { name: 'next', dsh: NEXT },
+    restartBaseline: baseline, restartHash: aggregateRestartHash(baseline), restartRequired: false,
+    startedAt: '2026-08-24T12:00:00.000Z', updatedAt: '2026-08-24T12:00:00.000Z',
+  }
+  if (phase === 'ready') return { ...base, supervisorPid: 7001, childPid: 7002, url: 'http://127.0.0.1:49152', ...extras }
+  if (phase === 'crashed') return { ...base, error: 'fixture child crashed', ...extras }
+  if (phase === 'stopped') return { ...base, cleanup: 'pass', ...extras }
+  return { ...base, ...extras }
+}
+
+function createDevState(root: string, pluginPath: string, sessionId: string, phase: 'ready' | 'crashed' | 'stopped', extras: Partial<DevSessionStateV1> = {}): void {
+  createOwnedDevSession({ runtimeRoot: devRuntimeRoot(root), state: devState(pluginPath, sessionId, phase, extras) })
+}
+
+function devReadyDeps(root: string, pluginPath: string, restartRequired = false): DevServiceDependencies {
+  return {
+    spawnSupervisor: vi.fn((requestPath: string) => {
+      const sessionDir = requestPath.replace(/[\\/]request\.json$/, '')
+      const sessionId = sessionDir.split(/[\\/]/).pop()!
+      writeFileSync(join(sessionDir, 'state.json'), JSON.stringify({
+        schemaVersion: 1, sessionId, state: 'ready',
+        plugin: { packageName: '@fixture/demo', sourcePath: resolve(pluginPath), runtimeName: 'demo' },
+        target: { name: 'next', dsh: NEXT },
+        restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c'), sourceTree: digestString('src') },
+        restartHash: digestString('d'), restartRequired,
+        ...(restartRequired ? { restartReasons: ['plugin-manifest' as const] } : {}),
+        supervisorPid: 99, childPid: 100, url: 'http://127.0.0.1:49152',
+        startedAt: '2026-08-24T12:00:00.000Z', updatedAt: '2026-08-24T12:00:00.000Z',
+      }, null, 2) + '\n')
+      return { pid: 99, unref: vi.fn() }
+    }),
+    sleep: ms => new Promise(r => setTimeout(r, Math.min(ms, 2))),
+    now: () => '2026-08-24T12:00:00.000Z',
+    processAlive: () => true,
+    writeSession: vi.fn(),
+    afterSessionCreate: vi.fn(),
+    beforeRequestWrite: vi.fn(),
+  }
+}
+
+function devStopDeps(root: string, sessionId: string): DevServiceDependencies {
+  const runtimeRootValue = devRuntimeRoot(root)
+  return {
+    spawnSupervisor: vi.fn(),
+    sleep: vi.fn(async () => {
+      const control = readDevControl({ runtimeRoot: runtimeRootValue, sessionId })
+      if (control?.action !== 'stop') return
+      const state = readDevSession({ runtimeRoot: runtimeRootValue, sessionId })
+      const { supervisorPid: _s, childPid: _c, url: _u, error: _e, ...stoppingBase } = state
+      writeDevSession({ runtimeRoot: runtimeRootValue, state: { ...stoppingBase, state: 'stopping', cleanup: 'pass', updatedAt: DEV_NOW } })
+      writeDevSession({ runtimeRoot: runtimeRootValue, state: { ...stoppingBase, state: 'stopped', cleanup: 'pass', updatedAt: DEV_NOW } })
+      clearDevControl({ runtimeRoot: runtimeRootValue, sessionId })
+    }),
+    now: () => DEV_NOW,
+    processAlive: () => true,
+    writeSession: vi.fn(opts => writeDevSession(opts)),
+  }
+}
+
+describe('mcp dev session tools', () => {
+  it('tools/list advertises the three dev tools', async () => {
+    const { root } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 700, method: 'tools/list', params: {} })
+    const names = ((json.result?.tools ?? json.tools) as Array<{ name: string }>).map(t => t.name)
+    expect(names).toEqual(expect.arrayContaining(['dsh_lab.dev_start', 'dsh_lab.dev_status', 'dsh_lab.dev_stop']))
+    await handler.close().catch(() => {})
+  })
+
+  it('dev_start returns a ready view with _meta.dshLab { sessionId, exitCode: 0 }', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root, { devDeps: devReadyDeps(root, pluginPath) }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 701, method: 'tools/call', params: { name: 'dsh_lab.dev_start', arguments: { path: pluginPath, target: 'next' } } })
+    const result = (json.result ?? json) as { isError?: boolean; structuredContent?: Record<string, unknown>; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({ state: 'ready', restartRequired: false, url: 'http://127.0.0.1:49152', plugin: { packageName: '@fixture/demo' } })
+    const sc = result.structuredContent
+    const sessionId = typeof sc?.sessionId === 'string' ? sc?.sessionId : undefined
+    expect(sessionId).toMatch(/^dev-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/)
+    expect(result._meta?.dshLab).toMatchObject({ sessionId, exitCode: 0 })
+    await handler.close().catch(() => {})
+  })
+  it('dev_start exits 2 when ready but restartRequired', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root, { devDeps: devReadyDeps(root, pluginPath, true) }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 711, method: 'tools/call', params: { name: 'dsh_lab.dev_start', arguments: { path: pluginPath, target: 'next' } } })
+    const result = (json.result ?? json) as { isError?: boolean; structuredContent?: Record<string, unknown>; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({ state: 'ready', restartRequired: true })
+    expect(result._meta?.dshLab).toMatchObject({ exitCode: 2 })
+    await handler.close().catch(() => {})
+  })
+
+  it('dev_status returns a ready view with _meta.dshLab exitCode 0', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    createDevState(root, pluginPath, DEV_SESSION, 'ready')
+    const handler = createMcpHandler(() => buildServer(root, { devDeps: { now: () => DEV_NOW, processAlive: () => true } }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 702, method: 'tools/call', params: { name: 'dsh_lab.dev_status', arguments: { sessionId: DEV_SESSION } } })
+    const result = (json.result ?? json) as { isError?: boolean; structuredContent?: Record<string, unknown>; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({ sessionId: DEV_SESSION, state: 'ready', restartRequired: false })
+    expect(result._meta?.dshLab).toMatchObject({ sessionId: DEV_SESSION, restartRequired: false, exitCode: 0 })
+    await handler.close().catch(() => {})
+  })
+  it('dev_status latches source-changed and exits 2 after a live src edit', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    createDevState(root, pluginPath, DEV_SESSION, 'ready')
+    writeFileSync(join(pluginPath, 'src', 'index.ts'), 'export const name = "demo-edited"\n')
+    const handler = createMcpHandler(() => buildServer(root, { devDeps: { now: () => DEV_NOW, processAlive: () => true } }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 714, method: 'tools/call', params: { name: 'dsh_lab.dev_status', arguments: { sessionId: DEV_SESSION } } })
+    const result = (json.result ?? json) as { isError?: boolean; structuredContent?: Record<string, unknown>; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({ sessionId: DEV_SESSION, state: 'ready', restartRequired: true, restartReasons: ['source-changed'] })
+    expect(result._meta?.dshLab).toMatchObject({ sessionId: DEV_SESSION, restartRequired: true, exitCode: 2 })
+    await handler.close().catch(() => {})
+  })
+
+  it('dev_status is not degraded when devDeps supplies only unrelated keys', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    createDevState(root, pluginPath, DEV_SESSION, 'ready')
+    const handler = createMcpHandler(() => buildServer(root, { devDeps: { spawnSupervisor: vi.fn(), sleep: vi.fn() } }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 713, method: 'tools/call', params: { name: 'dsh_lab.dev_status', arguments: { sessionId: DEV_SESSION } } })
+    const result = (json.result ?? json) as { isError?: boolean; structuredContent?: { sessionId?: unknown; state?: unknown } }
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent?.sessionId).toBe(DEV_SESSION)
+    expect(result.structuredContent?.state).toMatch(/^(starting|ready|crashed|stopping|stopped)$/)
+    await handler.close().catch(() => {})
+  })
+
+  it('dev_stop drains a ready session with _meta.dshLab { sessionId, exitCode: 0 }', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    createDevState(root, pluginPath, DEV_SESSION, 'ready')
+    const handler = createMcpHandler(() => buildServer(root, { devDeps: devStopDeps(root, DEV_SESSION) }))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 703, method: 'tools/call', params: { name: 'dsh_lab.dev_stop', arguments: { sessionId: DEV_SESSION } } })
+    const result = (json.result ?? json) as { isError?: boolean; structuredContent?: Record<string, unknown>; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({ sessionId: DEV_SESSION, state: 'stopped', cleanup: 'pass' })
+    expect(result._meta?.dshLab).toMatchObject({ sessionId: DEV_SESSION, cleanup: 'pass', exitCode: 0 })
+    await handler.close().catch(() => {})
+  })
+
+  it('dev_status unknown session is isError DEV_NOT_FOUND with _meta.dshLab exitCode 1', async () => {
+    const { root } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 704, method: 'tools/call', params: { name: 'dsh_lab.dev_status', arguments: { sessionId: DEV_SESSION } } })
+    const result = (json.result ?? json) as { isError?: boolean; content?: Array<{ text: string }>; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBe(true)
+    expect(result.content?.[0]?.text).toContain('DEV_NOT_FOUND')
+    expect(result._meta?.dshLab).toMatchObject({ code: 'DEV_NOT_FOUND', exitCode: 1 })
+    await handler.close().catch(() => {})
+  })
+
+  it('invalid dev sessionId is rejected at the schema boundary before any fs read', async () => {
+    const { root } = mkRootWithPlugin()
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 705, method: 'tools/call', params: { name: 'dsh_lab.dev_status', arguments: { sessionId: 'not-a-valid-session' } } })
+    const result = (json.result ?? json) as { isError?: boolean; content?: Array<{ text: string }> }
+    expect(result.isError).toBe(true)
+    expect(result.content?.[0]?.text).toContain('Input validation error')
+    expect(existsSync(join(root, '.lab'))).toBe(false)
+    await handler.close().catch(() => {})
+  })
+
+  it('dev_stop cleanup-incomplete carries _meta.dshLab { code: DEV_CLEANUP_INCOMPLETE, exitCode: 2 }', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    createDevState(root, pluginPath, DEV_SESSION, 'crashed', { cleanup: 'fail' })
+    const handler = createMcpHandler(() => buildServer(root))
+    const json = await rpc(handler, { jsonrpc: '2.0', id: 706, method: 'tools/call', params: { name: 'dsh_lab.dev_stop', arguments: { sessionId: DEV_SESSION } } })
+    const result = (json.result ?? json) as { isError?: boolean; content?: Array<{ text: string }>; _meta?: { dshLab?: Record<string, unknown> } }
+    expect(result.isError).toBe(true)
+    expect(result.content?.[0]?.text).toContain('DEV_CLEANUP_INCOMPLETE')
+    expect(result._meta?.dshLab).toMatchObject({ code: 'DEV_CLEANUP_INCOMPLETE', exitCode: 2 })
     await handler.close().catch(() => {})
   })
 })

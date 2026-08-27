@@ -27,6 +27,27 @@ vision agent/harness owns browser workflow and visual decisions. Screenshots and
 browser artifacts are transient and not retained by the lab; finalized evidence
 is a minimal verdict, short summary, and identities.
 
+### MCP dev sessions
+
+The `dsh_lab.dev_start/status/stop` MCP tools expose the live-source dev path as
+a supervised, reconnect-tolerant control plane. `dev_start` boots a detached
+supervisor against the plugin's live source (no bundle gate) and returns a
+`dev-*` handle plus a bounded loopback URL; `dev_status` re-reads liveness and
+the one-way `restartRequired` latch (set by a changed plugin
+manifest/metadata digest, target pin, or any `src/**` edit — the latter latches
+the reason `source-changed`; never auto-restarted, so stop→start to load new
+source); `dev_stop` cooperatively stops the session, verifies cleanup, and
+retains a `stopped` tombstone. Dev sessions are read-only with respect to the
+plugin — all writes stay under `.lab/runtime` — and the CLI `lab dev`
+foreground path is unchanged.
+
+> **Phase 5 v1 has no live reload (HMR).** Upstream DSH Web HMR is disabled and
+> untested (`cordis.patch.yml` sets `- id: hmr / disabled: true`), and the lab
+> does not patch DSH. A dev session therefore does not hot-reload `src/**`; an
+> edit latches `restartRequired` with reason `source-changed` and stop→start
+> loads the new source. Once the official DSH release provides a tested reload
+> lifecycle, the lab can drop the restart requirement.
+
 ## Source of truth
 
 `context/*` is the single source of truth for shared rules and the portable agent skill — edit there, never in generated projections or plugin snapshots:

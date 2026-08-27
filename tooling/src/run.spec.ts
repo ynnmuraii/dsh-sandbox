@@ -18,7 +18,10 @@ import {
   verifyPackedTarget,
   buildUpstream,
   resolveUiLauncher,
+  resolveProfileDshLauncher,
   devPlugin,
+  prepareDevRuntime,
+  type DevRuntimePlugin,
 } from './run.js'
 import { pnpm, pnpmAsync, pnpmCommand } from './proc.js'
 import type { PluginRef } from './plugin-ref.js'
@@ -32,6 +35,15 @@ vi.mock('./proc.js', async importOriginal => {
     pnpmCommand: vi.fn(actual.pnpmCommand),
   }
 })
+// Materialize a fake installed `@deepseek-ai/dsh` under a prepared profile so
+// `resolveProfileDshLauncher(profileDir)` resolves to a runnable node script
+// (the CLI `next` path boots the profile-installed bin directly, not `pnpm`).
+function writeProfileDshBin(profileDir: string, body: string): void {
+  const pkgDir = join(profileDir, 'node_modules', '@deepseek-ai', 'dsh')
+  mkdirSync(pkgDir, { recursive: true })
+  writeFileSync(join(pkgDir, 'package.json'), '{"bin":{"dsh":"bin.js"}}\n')
+  writeFileSync(join(pkgDir, 'bin.js'), body)
+}
 
 describe('resolveSourceOverlay', () => {
   it('produces an absolute path to the plugin entry', () => {
@@ -278,14 +290,12 @@ describe('path-first live development', () => {
       writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
       writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/external-plugin"}\n')
       const before = readdirSync(externalRoot, { recursive: true }).map(String).sort()
-      const fakeLauncher = join(root, 'fake-launcher.mjs')
-      writeFileSync(fakeLauncher, [
-        "import { writeFileSync } from 'node:fs'",
-        "writeFileSync(process.env.DSH_DEV_CAPTURE, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), home: process.env.DSH_HOME, nodeOptions: process.env.NODE_OPTIONS }))",
+      writeProfileDshBin(join(root, '.lab', 'runtime', 'profiles', 'external-plugin-next-dev'), [
+        "const { writeFileSync } = require('node:fs')",
+        "writeFileSync(process.env.DSH_DEV_CAPTURE, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), home: process.env.DSH_HOME, nodeOptions: process.env.NODE_OPTIONS, script: process.argv[1] }))",
         '',
       ].join('\n'))
       vi.mocked(pnpm).mockReset().mockReturnValue('')
-      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [fakeLauncher] })
       const previousCapture = process.env.DSH_DEV_CAPTURE
       process.env.DSH_DEV_CAPTURE = capturePath
       const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/external-plugin' }
@@ -310,10 +320,10 @@ describe('path-first live development', () => {
       expect(boot.argv).toEqual(['--profile', 'external-plugin-next-dev', '--patch', overlay])
       expect(boot.home).toBe(runtime.replaceAll('\\', '/'))
       expect(boot.nodeOptions).toContain(`--import=${resolveTsxLoader()}`)
+      expect(String(boot.script).replaceAll('\\', '/')).toContain(join('node_modules', '@deepseek-ai', 'dsh', 'bin.js').replaceAll('\\', '/'))
       expect(readdirSync(externalRoot, { recursive: true }).map(String).sort()).toEqual(before)
       expect(existsSync(join(externalRoot, '.dsh-lab'))).toBe(false)
     } finally {
-      vi.mocked(pnpmCommand).mockReset()
       rmSync(root, { recursive: true, force: true })
       rmSync(externalRoot, { recursive: true, force: true })
     }
@@ -449,11 +459,9 @@ describe('logger injection', () => {
       mkdirSync(join(externalRoot, 'src'), { recursive: true })
       writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
       writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/logger-plugin"}\n')
-      const fakeLauncher = join(root, 'fake-launcher.mjs')
-      writeFileSync(fakeLauncher, "import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.DSH_DEV_CAPTURE ?? '', 'ok')\n")
+      writeProfileDshBin(join(root, '.lab', 'runtime', 'profiles', 'logger-plugin-next-dev'), "const { writeFileSync } = require('node:fs')\nwriteFileSync(process.env.DSH_DEV_CAPTURE ?? '', 'ok')\n")
       const capturePath = join(root, 'capture.json')
       vi.mocked(pnpm).mockReset().mockReturnValue('')
-      vi.mocked(pnpmCommand).mockReturnValue({ cmd: process.execPath, args: [fakeLauncher] })
       const previousCapture = process.env.DSH_DEV_CAPTURE
       process.env.DSH_DEV_CAPTURE = capturePath
       const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/logger-plugin' }
@@ -526,6 +534,136 @@ describe('logger injection', () => {
       })).rejects.toThrow(/cleanup|profile.*stale/i)
     } finally {
       rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('resolveProfileDshLauncher', () => {
+  it('launches the installed profile dsh bin via the node executable (object bin)', () => {
+    const pkgs = mkdtempSync(join(tmpdir(), 'dsh-launcher-object-'))
+    const pkgDir = join(pkgs, 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(join(pkgDir, 'lib'), { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '1.0.0', bin: { dsh: 'lib/bin.js' } }))
+    writeFileSync(join(pkgDir, 'lib', 'bin.js'), 'export {}\n')
+    const launcher = resolveProfileDshLauncher(pkgs)
+    expect(launcher.cmd).toBe(process.execPath)
+    expect(launcher.args).toEqual([join(pkgDir, 'lib', 'bin.js')])
+    rmSync(pkgs, { recursive: true, force: true })
+  })
+  it('supports a string bin entry and keeps the resolved path as one arg', () => {
+    const pkgs = mkdtempSync(join(tmpdir(), 'dsh-launcher-string-'))
+    const pkgDir = join(pkgs, 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(join(pkgDir, 'bin'), { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '1.0.0', bin: 'bin/dsh.js' }))
+    writeFileSync(join(pkgDir, 'bin', 'dsh.js'), 'export {}\n')
+    const launcher = resolveProfileDshLauncher(pkgs)
+    expect(launcher.cmd).toBe(process.execPath)
+    expect(launcher.args).toEqual([join(pkgDir, 'bin', 'dsh.js')])
+    rmSync(pkgs, { recursive: true, force: true })
+  })
+  it('throws an actionable error for a missing or malformed manifest', () => {
+    const pkgs = mkdtempSync(join(tmpdir(), 'dsh-launcher-missing-'))
+    expect(() => resolveProfileDshLauncher(pkgs)).toThrow(/installed dsh package not found/)
+    rmSync(pkgs, { recursive: true, force: true })
+  })
+})
+
+describe('prepareDevRuntime seam', () => {
+  it('prepares the CLI profile/overlay/env for a foreground dev run', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-seam-'))
+    try {
+      mkdirSync(join(root, 'workbench'), { recursive: true })
+      writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+        'targets:', '  next:', '    dsh: 0.1.1-rc.2', '    cordis: 4.0.1', '    node: 22.20.0',
+        '    pnpm: 11.7.0', '    allowBuilds:', '      esbuild: true',
+        '  master:', '    repository: deepseek-ai/deepseek-harness', `    commit: ${'1'.repeat(40)}`, '    pnpm: 11.7.0', '    node: ^22.19.0', '',
+      ].join('\n'))
+      const plugin: DevRuntimePlugin = { packageName: '@f/x', sourcePath: join(root, 'plugin'), runtimeName: 'x' }
+      mkdirSync(join(plugin.sourcePath, 'src'), { recursive: true })
+      writeFileSync(join(plugin.sourcePath, 'src', 'index.ts'), 'export const live = true\n')
+      vi.mocked(pnpm).mockReset().mockReturnValue('')
+      const plan = await prepareDevRuntime({
+        root, plugin, target: 'next',
+        runtimeHome: join(root, '.lab', 'runtime'),
+        profileName: 'x-next-dev',
+        installProfile: true,
+      })
+      expect(plan.cwd).toBe(join(root, '.lab', 'runtime', 'profiles', 'x-next-dev'))
+      expect(plan.overlayPath).toBe(join(root, '.lab', 'runtime', 'overlays', 'x', 'cordis.patch.yml'))
+      // The child dev env (plan.env) carries the tsx loader so live TS source
+      // loads; the profile `pnpm install` env must NOT inherit it (injecting
+      // `--import=<tsx/esm>` into pnpm 11.7 makes it require a `.pnpmfile.mjs`,
+      // crashing the session before the harness even boots).
+      expect(plan.env.NODE_OPTIONS).toContain(`--import=${resolveTsxLoader()}`)
+      expect(plan.env.DSH_HOME).toBe(join(root, '.lab', 'runtime').replaceAll('\\', '/'))
+      const installCall = vi.mocked(pnpm).mock.calls[0]!
+      expect(installCall[0]).toEqual(['install', '--config.strictDepBuilds=false'])
+      const installEnv = installCall[1]?.env ?? {}
+      expect(installEnv).not.toBe(plan.env)
+      expect(installEnv.DSH_HOME).toBe(plan.env.DSH_HOME)
+      expect(installEnv.NODE_OPTIONS ?? '').not.toContain(`--import=${resolveTsxLoader()}`)
+    } finally {
+      vi.mocked(pnpm).mockReset()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('emits all three dev banners before the profile install', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-seam-banner-'))
+    const externalRoot = mkdtempSync(join(tmpdir(), 'dsh-seam-banner-plugin-'))
+    try {
+      mkdirSync(join(root, 'workbench'), { recursive: true })
+      writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+        'targets:', '  next:', '    dsh: 0.1.1-rc.2', '    cordis: 4.0.1', '    node: 22.20.0',
+        '    pnpm: 11.7.0', '    allowBuilds:', '      esbuild: true',
+        '  master:', '    repository: deepseek-ai/deepseek-harness', `    commit: ${'1'.repeat(40)}`, '    pnpm: 11.7.0', '    node: ^22.19.0', '',
+      ].join('\n'))
+      mkdirSync(join(externalRoot, 'src'), { recursive: true })
+      writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
+      writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/banner-plugin"}\n')
+      writeProfileDshBin(join(root, '.lab', 'runtime', 'profiles', 'banner-plugin-next-dev'), '// no-op\n')
+      const order: string[] = []
+      vi.mocked(pnpm).mockReset().mockImplementation(() => { order.push('install'); return '' })
+      const logger = { info: () => { order.push('banner') }, warn: () => {} }
+      const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/banner-plugin' }
+      await devPlugin({ root, plugin, target: 'next', logger })
+      expect(order).toEqual(['banner', 'banner', 'banner', 'install'])
+    } finally {
+      vi.mocked(pnpm).mockReset()
+      rmSync(root, { recursive: true, force: true })
+      rmSync(externalRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('wraps a foreground dev install failure in the dsh boot envelope', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-seam-fail-'))
+    const externalRoot = mkdtempSync(join(tmpdir(), 'dsh-seam-fail-plugin-'))
+    try {
+      mkdirSync(join(root, 'workbench'), { recursive: true })
+      writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+        'targets:', '  next:', '    dsh: 0.1.1-rc.2', '    cordis: 4.0.1', '    node: 22.20.0',
+        '    pnpm: 11.7.0', '    allowBuilds:', '      esbuild: true',
+        '  master:', '    repository: deepseek-ai/deepseek-harness', `    commit: ${'1'.repeat(40)}`, '    pnpm: 11.7.0', '    node: ^22.19.0', '',
+      ].join('\n'))
+      mkdirSync(join(externalRoot, 'src'), { recursive: true })
+      writeFileSync(join(externalRoot, 'src', 'index.ts'), 'export const live = true\n')
+      writeFileSync(join(externalRoot, 'package.json'), '{"name":"@fixture/fail-plugin"}\n')
+      const infos: string[] = []
+      const logger = { info: (...args: unknown[]) => infos.push(args.join(' ')), warn: () => {} }
+      vi.mocked(pnpm).mockReset().mockImplementation(() => { throw new Error('install boom') })
+      const plugin: PluginRef = { sourcePath: externalRoot, packageName: '@fixture/fail-plugin' }
+      await expect(devPlugin({ root, plugin, target: 'next', logger })).rejects.toThrow(
+        /dsh boot failed for profile 'next'.*install boom/,
+      )
+      expect(infos).toHaveLength(3)
+      expect(infos[0]).toMatch(/\[dev\] plugin 'fail-plugin' \(next\)/)
+      expect(infos[1]).toMatch(/generated overlay/)
+      expect(infos[2]).toMatch(/booting materialized web profile 'fail-plugin-next-dev' with DSH_HOME=/)
+    } finally {
+      vi.mocked(pnpm).mockReset()
+      vi.mocked(pnpmCommand).mockReset()
+      rmSync(root, { recursive: true, force: true })
+      rmSync(externalRoot, { recursive: true, force: true })
     }
   })
 })

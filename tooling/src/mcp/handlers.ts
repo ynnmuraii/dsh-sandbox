@@ -12,6 +12,8 @@ import { inferVerifyTarget, UI_SESSION_ID_PATTERN, validateMetadataTargets } fro
 import { createPlugin, NAME_RE } from '../create.js'
 import { syncContext, type SyncedResult } from '../sync.js'
 import { abortUiSession, finishUiSession, getUiSessionStatus, startUiSession, UiProtocolOutcomeError, type UiServiceDependencies, type UiSessionViewV1 } from '../ui.js'
+import { DevProtocolOutcomeError, getDevSessionStatus, startDevSession, stopDevSession, type DevServiceDependencies } from '../dev-session.js'
+import { DEV_SESSION_ID_PATTERN, type DevSessionViewV1 } from '../dev-session-state.js'
 
 export class ToolError extends Error {
   code: string
@@ -367,5 +369,99 @@ export async function handleUiAbort(
     const lower = msg.toLowerCase()
     if (lower.includes('invalid or unsafe sessionid')) throw new ToolError(msg, 'INVALID_SELECTOR')
     throw new ToolError(msg, 'UI_ABORT_FAILED')
+  }
+}
+function validateDevSessionIdOrThrow(sessionId: string): void {
+  if (!DEV_SESSION_ID_PATTERN.test(sessionId)) {
+    throw new ToolError(`invalid or unsafe sessionId ${JSON.stringify(sessionId)}`, 'INVALID_SELECTOR')
+  }
+}
+
+function isDevProtocolOutcomeError(error: unknown): error is DevProtocolOutcomeError {
+  return error instanceof DevProtocolOutcomeError || (error !== null && typeof error === 'object' && (error as { name?: unknown }).name === 'DevProtocolOutcomeError' && (error as { outcome?: unknown }).outcome === 'cleanup-incomplete')
+}
+
+function mapDevNotFoundError(error: unknown): ToolError | undefined {
+  const msg = error instanceof Error ? error.message : String(error)
+  const lower = msg.toLowerCase()
+  if (lower.includes('enoent') || lower.includes('no such file') || lower.includes('not found') || lower.includes('is not a regular directory') || lower.includes('is not a unique regular file')) {
+    return new ToolError(msg, 'DEV_NOT_FOUND')
+  }
+  return undefined
+}
+
+export async function handleDevStart(
+  root: string,
+  args: { plugin?: string; path?: string; target: 'next' | 'master'; startupTimeoutMs?: number },
+  deps?: Partial<DevServiceDependencies>,
+): Promise<DevSessionViewV1> {
+  const ref = resolvePlugin(root, args.plugin, args.path)
+  try {
+    const view = await startDevSession(
+      { root, plugin: ref, target: args.target, ...(args.startupTimeoutMs !== undefined ? { startupTimeoutMs: args.startupTimeoutMs } : {}) },
+      deps as DevServiceDependencies | undefined,
+    )
+    return view
+  } catch (e) {
+    if (isDevProtocolOutcomeError(e)) {
+      throw new ToolError((e as Error).message, 'DEV_CLEANUP_INCOMPLETE')
+    }
+    // DEV_NOT_FOUND is only for a missing session dir on status/stop; a missing
+    // plugin source entry or compatibility manifest during start is a start
+    // failure (DEV_START_FAILED), not a not-found session. The target mapping is
+    // narrowed to the exact target-validation errors so a coincidental 'target'
+    // substring in another message is not misclassified as INVALID_TARGET.
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (/invalid target|does not declare target|target requires a pinned/.test(lower)) throw new ToolError(msg, 'INVALID_TARGET')
+    if (lower.includes('startuptimeoutms') || lower.includes('timeout')) throw new ToolError(msg, 'INVALID_ARGS')
+    throw new ToolError(msg, 'DEV_START_FAILED')
+  }
+}
+
+export function handleDevStatus(
+  root: string,
+  args: { sessionId: string },
+  deps?: Pick<DevServiceDependencies, 'now' | 'processAlive'>,
+): DevSessionViewV1 {
+  validateDevSessionIdOrThrow(args.sessionId)
+  try {
+    return getDevSessionStatus({ root, sessionId: args.sessionId }, deps as Pick<DevServiceDependencies, 'now' | 'processAlive'> | undefined)
+  } catch (e) {
+    if (isDevProtocolOutcomeError(e)) {
+      throw new ToolError((e as Error).message, 'DEV_CLEANUP_INCOMPLETE')
+    }
+    const notFound = mapDevNotFoundError(e)
+    if (notFound !== undefined) throw notFound
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (lower.includes('invalid or unsafe sessionid')) throw new ToolError(msg, 'INVALID_SELECTOR')
+    throw new ToolError(msg, 'DEV_STATUS_FAILED')
+  }
+}
+
+export async function handleDevStop(
+  root: string,
+  args: { sessionId: string; stopTimeoutMs?: number },
+  deps?: Partial<DevServiceDependencies>,
+): Promise<DevSessionViewV1> {
+  validateDevSessionIdOrThrow(args.sessionId)
+  try {
+    const view = await stopDevSession(
+      { root, sessionId: args.sessionId, ...(args.stopTimeoutMs !== undefined ? { stopTimeoutMs: args.stopTimeoutMs } : {}) },
+      deps as DevServiceDependencies | undefined,
+    )
+    return view
+  } catch (e) {
+    if (isDevProtocolOutcomeError(e)) {
+      throw new ToolError((e as Error).message, 'DEV_CLEANUP_INCOMPLETE')
+    }
+    const notFound = mapDevNotFoundError(e)
+    if (notFound !== undefined) throw notFound
+    const msg = e instanceof Error ? e.message : String(e)
+    const lower = msg.toLowerCase()
+    if (lower.includes('invalid or unsafe sessionid')) throw new ToolError(msg, 'INVALID_SELECTOR')
+    if (lower.includes('already stopping')) throw new ToolError(msg, 'DEV_STOP_FAILED')
+    throw new ToolError(msg, 'DEV_STOP_FAILED')
   }
 }

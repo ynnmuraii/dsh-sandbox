@@ -8,11 +8,14 @@ import { doctor } from '../doctor.js'
 import { pluginEvidenceKey, publishRunResult, type VerifyRunResultV1 } from '../evidence.js'
 import { publishUiResult, type UiResultV1 } from '../ui-evidence.js'
 import { computePluginDigest } from '../plugin-snapshot.js'
-import { handleInspect, handleStatus, handleDoctor, handleGetEvidence, handleListPlugins, handleUiAbort, handleUiFinish, handleUiStart, handleUiStatus, handleVerify, ToolError } from './handlers.js'
+import { handleDevStart, handleDevStatus, handleDevStop, handleInspect, handleStatus, handleDoctor, handleGetEvidence, handleListPlugins, handleUiAbort, handleUiFinish, handleUiStart, handleUiStatus, handleVerify, ToolError } from './handlers.js'
 import { loadRunResults } from '../evidence.js'
 import { resolvePluginRef } from '../plugin-ref.js'
 import { clearUiControl, createUiSession, readUiControl, readUiSession, writeUiSession, type UiSessionPhase, type UiSessionStateV1 } from '../ui-session.js'
 import type { UiServiceDependencies } from '../ui.js'
+import { clearDevControl, createOwnedDevSession, readDevControl, readDevSession, writeDevSession, type DevSessionPhase, type DevSessionStateV1 } from '../dev-session-state.js'
+import type { DevServiceDependencies } from '../dev-session.js'
+import { aggregateRestartHash, computeDevRestartBaseline, digestString } from '../dev-restart-baseline.js'
 
 const roots: string[] = []
 const NEXT = '0.1.1-rc.2'
@@ -502,5 +505,155 @@ describe('mcp UI handlers', () => {
     createUiState(root, pluginPath, UI_SESSION, 'aborted')
     const view = await handleUiAbort(root, { sessionId: UI_SESSION }, {})
     expect(view).toMatchObject({ sessionId: UI_SESSION, state: 'aborted', cleanup: 'pass' })
+  })
+})
+const DEV_SESSION = 'dev-20260824T120000000Z-a1b2c3d4'
+const DEV_NOW = '2026-08-24T12:00:04.000Z'
+
+function devRuntimeRoot(root: string): string {
+  return join(root, '.lab', 'runtime')
+}
+
+function devState(pluginPath: string, sessionId: string, phase: DevSessionPhase, extras: Partial<DevSessionStateV1> = {}): DevSessionStateV1 {
+  const baseline = computeDevRestartBaseline({ pluginSourcePath: resolve(pluginPath), targetPin: NEXT })
+  const base: DevSessionStateV1 = {
+    schemaVersion: 1,
+    sessionId,
+    state: phase,
+    plugin: { packageName: '@fixture/demo', sourcePath: resolve(pluginPath), runtimeName: 'demo' },
+    target: { name: 'next', dsh: NEXT },
+    restartBaseline: baseline,
+    restartHash: aggregateRestartHash(baseline),
+    restartRequired: false,
+    startedAt: '2026-08-24T12:00:00.000Z',
+    updatedAt: '2026-08-24T12:00:00.000Z',
+  }
+  if (phase === 'ready') return { ...base, supervisorPid: 7001, childPid: 7002, url: 'http://127.0.0.1:49152', ...extras }
+  if (phase === 'crashed') return { ...base, error: 'fixture child crashed', ...extras }
+  if (phase === 'stopped' || phase === 'stopping') return { ...base, cleanup: 'pass', ...extras }
+  return { ...base, ...extras }
+}
+
+function createDevState(root: string, pluginPath: string, sessionId: string, phase: DevSessionPhase, extras: Partial<DevSessionStateV1> = {}): void {
+  createOwnedDevSession({ runtimeRoot: devRuntimeRoot(root), state: devState(pluginPath, sessionId, phase, extras) })
+}
+
+function devReadyStartDependencies(root: string, pluginPath: string): { deps: DevServiceDependencies; unref: () => void } {
+  const unref = vi.fn()
+  const deps: DevServiceDependencies = {
+    spawnSupervisor: vi.fn((requestPath: string) => {
+      const sessionDir = requestPath.replace(/[\\/]request\.json$/, '')
+      const sessionId = sessionDir.split(/[\\/]/).pop()!
+      writeFileSync(join(sessionDir, 'state.json'), JSON.stringify({
+        schemaVersion: 1, sessionId, state: 'ready',
+        plugin: { packageName: '@fixture/demo', sourcePath: resolve(pluginPath), runtimeName: 'demo' },
+        target: { name: 'next', dsh: NEXT },
+        restartBaseline: { pluginManifest: digestString('a'), pluginMetadata: digestString('b'), targetPin: digestString('c'), sourceTree: digestString('src') },
+        restartHash: digestString('d'), restartRequired: false,
+        supervisorPid: 99, childPid: 100, url: 'http://127.0.0.1:49152',
+        startedAt: '2026-08-24T12:00:00.000Z', updatedAt: '2026-08-24T12:00:00.000Z',
+      }, null, 2) + '\n')
+      return { pid: 99, unref }
+    }),
+    sleep: ms => new Promise(r => setTimeout(r, Math.min(ms, 2))),
+    now: () => '2026-08-24T12:00:00.000Z',
+    processAlive: () => true,
+    writeSession: vi.fn(),
+    afterSessionCreate: vi.fn(),
+    beforeRequestWrite: vi.fn(),
+  }
+  return { deps, unref }
+}
+
+function devStopResponder(root: string, sessionId: string): { deps: DevServiceDependencies } {
+  const runtimeRootValue = devRuntimeRoot(root)
+  const deps: DevServiceDependencies = {
+    spawnSupervisor: vi.fn(),
+    sleep: vi.fn(async () => {
+      const control = readDevControl({ runtimeRoot: runtimeRootValue, sessionId })
+      if (control?.action !== 'stop') return
+      const state = readDevSession({ runtimeRoot: runtimeRootValue, sessionId })
+      const { supervisorPid: _s, childPid: _c, url: _u, error: _e, ...stoppingBase } = state
+      writeDevSession({ runtimeRoot: runtimeRootValue, state: { ...stoppingBase, state: 'stopping', cleanup: 'pass', updatedAt: DEV_NOW } })
+      writeDevSession({ runtimeRoot: runtimeRootValue, state: { ...stoppingBase, state: 'stopped', cleanup: 'pass', updatedAt: DEV_NOW } })
+      clearDevControl({ runtimeRoot: runtimeRootValue, sessionId })
+    }),
+    now: () => DEV_NOW,
+    processAlive: () => true,
+    writeSession: vi.fn(opts => writeDevSession(opts)),
+  }
+  return { deps }
+}
+
+describe('mcp dev handlers', () => {
+  it('maps a missing session dir to DEV_NOT_FOUND and validates the sessionId pattern', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-mcp-'))
+    try {
+      expect(() => handleDevStatus(root, { sessionId: DEV_SESSION })).toThrow(/ENOENT|not found|DEV_NOT_FOUND/)
+      expect(() => handleDevStatus(root, { sessionId: '../../etc' })).toThrowError(expect.objectContaining({ code: 'INVALID_SELECTOR' }))
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  it('handleDevStart maps a missing plugin source entry to DEV_START_FAILED, not DEV_NOT_FOUND', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    rmSync(join(pluginPath, 'src', 'index.ts'))
+    await expect(handleDevStart(root, { path: pluginPath, target: 'next' }, {})).rejects.toMatchObject({ code: 'DEV_START_FAILED' })
+  })
+
+  it('handleDevStart maps a missing compatibility manifest to DEV_START_FAILED, not DEV_NOT_FOUND', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    rmSync(join(root, 'workbench', 'compatibility.yaml'))
+    await expect(handleDevStart(root, { path: pluginPath, target: 'next' }, {})).rejects.toMatchObject({ code: 'DEV_START_FAILED' })
+  })
+
+  it('handleDevStart reaches a ready view via injected deps and unrefs the supervisor', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    const bundle = devReadyStartDependencies(root, pluginPath)
+    const view = await handleDevStart(root, { path: pluginPath, target: 'next' }, bundle.deps)
+    expect(view).toMatchObject({
+      schemaVersion: 1,
+      state: 'ready',
+      restartRequired: false,
+      restartReasons: [],
+      url: 'http://127.0.0.1:49152',
+      plugin: { packageName: '@fixture/demo', sourcePath: resolve(pluginPath), runtimeName: 'demo' },
+      target: { name: 'next', dsh: NEXT },
+    })
+    expect(view.sessionId).toMatch(/^dev-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/)
+    expect(bundle.unref).toHaveBeenCalledTimes(1)
+  })
+
+  it('handleDevStart rejects a plugin that does not declare the target as INVALID_TARGET', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    writeFileSync(join(pluginPath, '.dsh-lab', 'plugin.yaml'), 'name: demo\ntracking: local\nmaturity: experiment\n')
+    await expect(handleDevStart(root, { path: pluginPath, target: 'next' }, {})).rejects.toMatchObject({ code: 'INVALID_TARGET' })
+  })
+
+  it('handleDevStatus maps a fixture ready state to a dev view', () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    createDevState(root, pluginPath, DEV_SESSION, 'ready')
+    const view = handleDevStatus(root, { sessionId: DEV_SESSION }, { now: () => DEV_NOW, processAlive: () => true })
+    expect(view).toMatchObject({
+      sessionId: DEV_SESSION,
+      state: 'ready',
+      restartRequired: false,
+      restartReasons: [],
+      url: 'http://127.0.0.1:49152',
+      plugin: { packageName: '@fixture/demo' },
+      target: { name: 'next', dsh: NEXT },
+    })
+  })
+
+  it('handleDevStop drains an active session to a stopped tombstone', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    createDevState(root, pluginPath, DEV_SESSION, 'ready')
+    const bundle = devStopResponder(root, DEV_SESSION)
+    const view = await handleDevStop(root, { sessionId: DEV_SESSION }, bundle.deps)
+    expect(view).toMatchObject({ sessionId: DEV_SESSION, state: 'stopped', cleanup: 'pass' })
+  })
+
+  it('handleDevStop maps cleanup-incomplete to DEV_CLEANUP_INCOMPLETE', async () => {
+    const { root, pluginPath } = mkRootWithPlugin()
+    createDevState(root, pluginPath, DEV_SESSION, 'crashed', { cleanup: 'fail' })
+    await expect(handleDevStop(root, { sessionId: DEV_SESSION }, {})).rejects.toMatchObject({ code: 'DEV_CLEANUP_INCOMPLETE' })
   })
 })
