@@ -81,15 +81,48 @@ export type UiProcessTreeDependencies = Omit<ProcessTreeDependencies, 'treeAlive
 const SESSION_ID = /^ui-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{8}$/
 const ISO = /^\d{4}-\d{2}-\d{2}T/
 
-/** Parse only the complete, upstream readiness line and return its loopback URL. */
+// Parse one readiness URL: plain http, no userinfo, no fragment, valid port.
+// Since 0.1.2-alpha.2 dsh authenticates the URL it prints, so a path and a
+// query are expected shapes of that line rather than malformations.
+function parseReadyUrl(value: string): URL | undefined {
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'http:' || url.hash !== '') return undefined
+    if (url.username !== '' || url.password !== '') return undefined
+    if (!validPort(Number(url.port))) return undefined
+    return url
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Parse only the complete, upstream readiness line and return its loopback URL
+ * without any query. 0.1.2-alpha.2 prints
+ * `dsh web: http://127.0.0.1:<port>/?token=<token>` (and the same token on the
+ * optional LAN URL), so an optional path and query are accepted; the line stays
+ * anchored, the port stays validated, and non-loopback or malformed lines are
+ * still rejected.
+ */
 export function parseDshReadyUrl(line: string): string | undefined {
   if (typeof line !== 'string') return undefined
-  const match = /^dsh web: (http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4}))(?: \(LAN: (http:\/\/[^ ]+)\))?$/.exec(line)
+  const match = /^dsh web: (http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})[^ ]*)(?: \(LAN: (http:\/\/[^ ]+)\))?$/.exec(line)
   if (!match) return undefined
+  const raw = match[1]
+  const lan = match[3]
+  if (raw === undefined) return undefined
   const port = Number(match[2])
   if (!validPort(port)) return undefined
-  if (match[3] !== undefined && !validLanUrl(match[3])) return undefined
-  return match[1]
+  const loopback = parseReadyUrl(raw)
+  if (loopback === undefined || loopback.hostname !== '127.0.0.1' || Number(loopback.port) !== port) return undefined
+  if (lan !== undefined) {
+    const parsedLan = parseReadyUrl(lan)
+    if (parsedLan === undefined || parsedLan.hostname === '') return undefined
+  }
+  // Session state and UI evidence are persisted: record the loopback URL but
+  // never the alpha2 auth token that rides in its query.
+  const query = raw.indexOf('?')
+  return query === -1 ? raw : raw.slice(0, query)
 }
 
 export async function runUiSupervisor(
@@ -764,13 +797,6 @@ function exactKeys(value: Record<string, unknown>, required: readonly string[]):
   for (const key of required) if (!Object.hasOwn(value, key)) throw new Error(`missing request field ${key}`)
 }
 
-function validLanUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    const port = Number(url.port)
-    return url.protocol === 'http:' && url.hostname.length > 0 && url.port !== '' && validPort(port) && !url.username && !url.password && (url.pathname === '/' || url.pathname === '') && url.search === '' && url.hash === ''
-  } catch { return false }
-}
 function validPort(port: number): boolean { return Number.isInteger(port) && port >= 1 && port <= 65535 }
 function assertPid(pid: number): void { if (!Number.isInteger(pid) || pid <= 0) throw new Error(`pid must be a positive integer, got ${String(pid)}`) }
 function sanitizeDiagnostic(value: string): string {

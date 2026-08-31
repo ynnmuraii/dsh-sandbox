@@ -261,6 +261,9 @@ describe('shared reuse (no duplication)', () => {
     expect(typeof mod.openBoundedSupervisorLog).toBe('function')
     expect(typeof mod.stopOwnedChildTree).toBe('function')
     expect(parseDshReadyUrl('dsh web: http://127.0.0.1:49152')).toBe('http://127.0.0.1:49152')
+    // The dev path shares the UI parser, so alpha2's authenticated URL must
+    // parse there too — and without leaking its token into session state.
+    expect(parseDshReadyUrl('dsh web: http://127.0.0.1:62995/?token=test-token')).toBe('http://127.0.0.1:62995/')
     expect(parseDshReadyUrl('nope')).toBeUndefined()
   })
 })

@@ -162,8 +162,21 @@ describe('parseDshReadyUrl', () => {
   it.each([
     ['dsh web: http://127.0.0.1:49152', 'http://127.0.0.1:49152'],
     ['dsh web: http://127.0.0.1:8080 (LAN: http://192.168.1.2:8080)', 'http://127.0.0.1:8080'],
-  ])('captures only the loopback URL from %j', (line, expected) => {
+    // 0.1.2-alpha.2 authenticates the URL it prints, so a path and a token
+    // query are expected shapes on both the loopback and the LAN URL.
+    ['dsh web: http://127.0.0.1:8000/path', 'http://127.0.0.1:8000/path'],
+    ['dsh web: http://127.0.0.1:62995/?token=cqGqX7kyjRgp6cBaBUSXXczOleHEIJw-_UnV-5xOXsE', 'http://127.0.0.1:62995/'],
+    ['dsh web: http://127.0.0.1:4567/?token=test-token (LAN: http://192.168.1.5:4567/?token=test-token)', 'http://127.0.0.1:4567/'],
+    ['dsh web: http://127.0.0.1:4567/web/?token=test-token', 'http://127.0.0.1:4567/web/'],
+  ])('captures only the token-free loopback URL from %j', (line, expected) => {
     expect(parseDshReadyUrl(line)).toBe(expected)
+  })
+
+  it('never returns the alpha2 auth token that rides in the readiness query', () => {
+    const line = 'dsh web: http://127.0.0.1:62995/?token=cqGqX7kyjRgp6cBaBUSXXczOleHEIJw-_UnV-5xOXsE'
+    const url = parseDshReadyUrl(line)
+    expect(url).toBe('http://127.0.0.1:62995/')
+    expect(url).not.toContain('token')
   })
 
   it.each([
@@ -174,8 +187,10 @@ describe('parseDshReadyUrl', () => {
     'dsh web: http://user@127.0.0.1:8000',
     'dsh web: http://127.0.0.1:0',
     'dsh web: http://127.0.0.1:65536',
-    'dsh web: http://127.0.0.1:8000/path',
     'dsh web: http://127.0.0.1:8000 (broken)',
+    'dsh web: http://127.0.0.1:8000/?token=x#frag',
+    'dsh web: http://127.0.0.1:8000/?token=x (LAN: https://192.168.1.5:8000/)',
+    'dsh web: http://127.0.0.1:8000/?token=x (LAN: http://192.168.1.5/)',
   ])('rejects unsafe or malformed readiness line %j', line => {
     expect(parseDshReadyUrl(line)).toBeUndefined()
   })
