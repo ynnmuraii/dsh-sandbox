@@ -8,7 +8,7 @@ targets:
       esbuild: true
   master:
     repository: deepseek-ai/deepseek-harness
-    commit: b150a551b8d465e31e418e1b2eaf5e79bbb7d28e
+    commit: 0a53fb55bea101816fa226bb964ae2bed71c343b
     pnpm: 11.7.0
     node: ^22.19.0
     allowBuilds:
