@@ -6,16 +6,15 @@ How compatibility targets are managed. Version pinning and per-target claims for
 
 ## Targets
 
-Two daily compatibility targets:
-
-- **next** — npm `next` tag, recorded as exact pins (`dsh`, `cordis`, `node`).
+- **next** — the pinned npm `alpha` line (`@deepseek-ai/dsh@0.1.2-alpha.2` with `@deepseek-ai/cordis@4.0.2`), recorded as exact pins (`dsh`, `cordis`, `node`). It is **not** the npm `next` dist-tag: that tag still points at the previous line. `next` names the lab's pinned pre-release line, not a tag that is re-resolved at install time.
 - **master** — pinned upstream `master` of `deepseek-ai/deepseek-harness`, recorded as an exact commit during setup (plus `pnpm`).
 
 **Rules.**
 
-- The `next` npm tag is resolved only by the target-update command; normal install/test use recorded exact versions and lockfiles.
+- The `next` pin changes only deliberately (a target update or an explicit repin); normal install/test use the recorded exact versions and lockfiles.
 - `upstream/deepseek-harness` is a pinned submodule and is never updated automatically.
 - A new target's incompatibility is reported as an observable compatibility failure — never hidden by source-import or a local upstream patch.
+- Every profile the lab generates carries `dsh.profile.patchReload: "startup"` (dev, verify, and UI alike). `live` is upstream's default for custom profiles and the lab generates only custom profiles, so the key is never left to be inferred: `startup` installs neither the config-patch watchers nor the launcher's watch-only HMR fallback. `patchReload` governs config-patch watching **only** — it does not disable the dev overlay's src-rooted `hmr` row, whose reload delivery is still unverified in this forge.
 
 ## Manifest
 

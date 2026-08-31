@@ -77,6 +77,36 @@ describe('buildProfilePackageJson', () => {
     expect(out.dsh.profile.bundles).toContain('@deepseek-ai/dsh-web-app')
     expect(DEV_WEB_BUNDLES.length).toBeGreaterThan(1)
   })
+
+  // alpha2 resolves `dsh.profile.patchReload` as `raw ?? 'live'` and every lab
+  // profile is a CUSTOM one, so an omitted key silently opts the runtime into
+  // live config-patch watching plus the launcher's watch-only HMR fallback. One
+  // writer (buildProfilePackageJson) serves the dev, verify, and UI call sites,
+  // so the key is asserted for each profile shape it produces.
+  it('sets patchReload startup for a next-pin profile', () => {
+    const spec = { name: 'dsh-profile-next', bundles: ['@deepseek-ai/dsh-base'] }
+    const out = buildProfilePackageJson(spec, { dsh: '0.1.2-alpha.2' })
+    expect(out.dsh.profile.patchReload).toBe('startup')
+  })
+
+  it('sets patchReload startup for a master profile that carries no launcher pin', () => {
+    const spec = { name: 'dsh-profile-master', bundles: ['@deepseek-ai/dsh-base'] }
+    const out = buildProfilePackageJson(spec, {})
+    expect(out.dsh.profile.patchReload).toBe('startup')
+  })
+
+  it('sets patchReload startup for a UI-shaped profile with extra bundles and dependencies', () => {
+    const spec = {
+      name: '@dsh-lab/profile-next',
+      bundles: [...DEV_WEB_BUNDLES, '@fixture/example'],
+      dependencies: { '@fixture/example': 'file:../plugins/example' },
+    }
+    const out = buildProfilePackageJson(spec, { dsh: '0.1.2-alpha.2' })
+    expect(out.dsh.profile.patchReload).toBe('startup')
+    // Independent axes: `startup` governs config-patch watching only and does
+    // not touch the dev overlay's src-rooted hmr row asserted below.
+    expect(buildDevOverlay('example', 'plugins/example/src/index.ts', 'plugins/example/src')).toContain('- id: hmr')
+  })
 })
 
 describe('verifyAllTargets', () => {

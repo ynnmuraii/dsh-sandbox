@@ -50,19 +50,24 @@ cooperatively stops the session, verifies cleanup, and returns the retained
 `stopped` tombstone. Dev sessions are read-only with respect to the plugin: all
 writes stay under `.lab/runtime`.
 
-> **Phase 5 is honest v1 without live reload (HMR).** Upstream DSH Web hot-module
-> reload is disabled and untested for the Web bundle (`cordis.patch.yml` sets
-> `- id: hmr / disabled: true` with a TODO to re-enable it once its reload
-> lifecycle is tested). The lab does not patch DSH, so a dev session does not
-> hot-reload `src/**`; an edit instead latches `restartRequired` with reason
-> `source-changed`, and stop→start loads the new source. When the official DSH
-> release provides a tested reload lifecycle, the lab can remove the restart
-> requirement.
+> **Phase 5 is honest v1 without verified live reload (HMR).** In `0.1.2-alpha.2`
+> the shared `hmr` row ships `disabled: true` in the `base` bundle (before alpha2
+> it was disabled per app, in `web-app`/`headless`); `client-hmr` is a separate
+> row that remains mounted in `web-app`. `lab dev` re-enables the shared row for
+> the plugin's `src/` through a source overlay, but reload delivery is **not
+> verified** in this forge, so a dev session does not hot-reload `src/**`: an
+> edit latches `restartRequired` with reason `source-changed`, and stop→start
+> loads the new source. Generated profiles always carry
+> `dsh.profile.patchReload: "startup"` — that key governs config-patch watching
+> and the launcher's watch-only fallback, a separate axis from the overlay's
+> src-rooted row. When the official DSH release provides a tested reload
+> lifecycle, the lab can remove the restart requirement.
 
 - **Author guide & recipes** — [context/lab-author-guide.md](context/lab-author-guide.md)
 - **Root context library** — [context/](context/) (plugin shared-context snapshots derive from it)
 - **Portable agent skill** — [.agents/skills/dsh-plugin-development/SKILL.md](.agents/skills/dsh-plugin-development/SKILL.md)
 - **Compatibility pins** — [workbench/compatibility.yaml](workbench/compatibility.yaml)
+- **Changelog** — [CHANGELOG.md](CHANGELOG.md) (target repins and policy changes)
 - **Plugin index** — [catalog.yaml](catalog.yaml)
 
 ## Quick start

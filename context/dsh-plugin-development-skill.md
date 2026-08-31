@@ -52,7 +52,7 @@ Before production code, read the relevant canonical contracts and the [lab autho
 
 ## Source overlay vs packed bundle
 
-Treat source overlay and installable bundle as separate acceptance boundaries. Source mode proves live source behavior and HMR against a fixed checkout; bundle mode proves the packed package installs and boots. Test both when the change affects either boundary. A source-mode pass never substitutes for bundle proof, and vice versa.
+Treat source overlay and installable bundle as separate acceptance boundaries. Source mode proves live source behavior — including the src-rooted HMR row the dev overlay enables — against a fixed checkout; bundle mode proves the packed package installs and boots. Test both when the change affects either boundary. A source-mode pass never substitutes for bundle proof, and vice versa. Reload delivery itself is not verified in this forge: a `src/**` edit is treated as `restartRequired` (reason `source-changed`), so stop→start to load it.
 
 ## Dual-face (browser) plugins
 
@@ -65,6 +65,8 @@ A plugin with `dsh.client` adds a browser face — `exports["./client"] → lib/
 ## HMR safety
 
 Every registry, listener, adapter, and external resource must be HMR-safe: register through the contributing Fiber, acquire resources inside `ctx.effect()` with a disposer, and prove cleanup on unload. Keep order-dependent asynchronous teardown in one disposer that awaits each step. Declare mandatory services with `inject`; resolve optional services only at their point of use. A manual `ctx.plugin()` unit test never replaces a Loader/app/process smoke for a product-visible plugin.
+
+The requirement holds whatever the shipped row's state is: in `0.1.2-alpha.2` the shared `hmr` row ships `disabled: true` in the `base` bundle (before alpha2 it was disabled per app, in `web-app`/`headless`), and `client-hmr` is a separate row that stays mounted in `web-app`. The lab's dev overlay re-enables the shared row for the plugin's `src/`; `dsh.profile.patchReload: "startup"` in generated profiles is an independent config-patch-watching axis, not a statement about HMR.
 
 ## UI session protocol
 

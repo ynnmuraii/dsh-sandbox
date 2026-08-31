@@ -41,12 +41,17 @@ retains a `stopped` tombstone. Dev sessions are read-only with respect to the
 plugin — all writes stay under `.lab/runtime` — and the CLI `lab dev`
 foreground path is unchanged.
 
-> **Phase 5 v1 has no live reload (HMR).** Upstream DSH Web HMR is disabled and
-> untested (`cordis.patch.yml` sets `- id: hmr / disabled: true`), and the lab
-> does not patch DSH. A dev session therefore does not hot-reload `src/**`; an
-> edit latches `restartRequired` with reason `source-changed` and stop→start
-> loads the new source. Once the official DSH release provides a tested reload
-> lifecycle, the lab can drop the restart requirement.
+> **Phase 5 v1 has no verified live reload (HMR).** In `0.1.2-alpha.2` the shared
+> `hmr` row ships `disabled: true` in the `base` bundle (before alpha2 it was
+> disabled per app, in `web-app`/`headless`); `client-hmr` is a separate row that
+> remains mounted in `web-app`. The lab's dev overlay re-enables the shared row
+> for the plugin's `src/`, but reload delivery is **not verified** in this forge,
+> so a dev session does not hot-reload `src/**`: an edit latches
+> `restartRequired` with reason `source-changed` and stop→start loads the new
+> source. Generated profiles always carry `dsh.profile.patchReload: "startup"` —
+> config-patch watching and the launcher's watch-only fallback, a separate axis
+> from the overlay's src-rooted row. Once the official DSH release provides a
+> tested reload lifecycle, the lab can drop the restart requirement.
 
 ## Source of truth
 
@@ -74,7 +79,7 @@ pnpm lab doctor
 ```
 
 - `new` creates an autonomous nested Git repo from the template (tracked as `local`).
-- `dev` runs a source overlay + HMR against the chosen target.
+- `dev` runs a source overlay (src-rooted HMR row, reload delivery unverified) against the chosen target.
 - `verify` runs the plugin's own checks, then compatibility checks.
 - `sync-context` regenerates `plugin/.dsh-lab/shared-context.md` snapshots and `.agents/skills/dsh-plugin-development/SKILL.md`.
 - `doctor` checks toolchain, catalog, target pins, submodules, context hashes, and portable-skill drift without writing files.

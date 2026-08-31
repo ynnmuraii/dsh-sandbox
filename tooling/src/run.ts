@@ -100,6 +100,15 @@ export function resolveSourceOverlay(
 // omitted the manifest carries no launcher dependency at all — the master
 // target composes against the built upstream bin directly rather than a
 // profile-local install.
+//
+// `dsh.profile.patchReload` is always `'startup'`, for every workflow this one
+// writer serves (dev, verify, UI). Upstream resolves the key as
+// `raw ?? 'live'`, and every lab profile is a CUSTOM one (never a shipped
+// template), so omitting it opts every generated profile into `live`: config
+// patch-file watchers on the shared `$DSH_HOME/cordis.patch.yml`, plus the
+// launcher's watch-only HMR fallback. `startup` installs neither. It does NOT
+// disable source HMR — the dev overlay's src-rooted `hmr` row is a separate
+// axis (see buildDevOverlay).
 export function buildProfilePackageJson(
   spec: ProfileSpec,
   pin: { dsh?: string },
@@ -108,7 +117,7 @@ export function buildProfilePackageJson(
   private: true
   type: 'module'
   dependencies: Record<string, string>
-  dsh: { profile: { bundles: string[] } }
+  dsh: { profile: { bundles: string[]; patchReload: 'startup' } }
 } {
   const manifest = {
     name: spec.name,
@@ -118,6 +127,7 @@ export function buildProfilePackageJson(
     dsh: {
       profile: {
         bundles: spec.bundles,
+        patchReload: 'startup' as const,
       },
     },
   }
@@ -142,14 +152,24 @@ export function buildSourceOverlay(name: string, entryPath: string): string {
 }
 
 // Render the full source-dev overlay. Beyond inserting the plugin's source
-// entry (buildSourceOverlay), it scopes the shared Cordis module HMR row by
-// pointing its module `root` at the plugin's source directory. The web bundle
-// previously disabled the shared hmr row (`disabled: true`); because later
-// patch layers win per row, this overlay — applied last via `--patch` —
-// re-enables that row and scopes its watched root. Phase 5 v1 upstream Web HMR
-// is unavailable (disabled/untested), so a dev session does not hot-reload
-// src/**; an edit latches `restartRequired` (source-changed) and stop→start
-// loads the new source.
+// entry (buildSourceOverlay), it re-enables the shared Cordis module HMR row
+// and scopes it by pointing its module `root` at the plugin's source directory.
+//
+// In `0.1.2-alpha.2` the shared `hmr` row is shipped `disabled: true` in the
+// `base` bundle (before alpha2 it was disabled per app, in `web-app`/
+// `headless`); `client-hmr` is a different, still-mounted row in `web-app`.
+// Because later patch layers win per row, this overlay — applied last via
+// `--patch` — flips that one row to `disabled: false` and scopes its root.
+//
+// Honest status: emitting the row is all this forge does. Whether the running
+// dev session actually delivers a module reload is NOT verified here, so a
+// `src/**` edit is still treated as `restartRequired` with reason
+// `source-changed`; stop→start loads the new source.
+//
+// This row is independent of `dsh.profile.patchReload` (see
+// buildProfilePackageJson): that key governs config-PATCH watching and the
+// launcher's watch-only fallback, which is why generated profiles set it to
+// `startup` while this row stays enabled.
 export function buildDevOverlay(name: string, entryPath: string, sourceRoot: string): string {
   const root = sourceRoot.replace(/\\/g, '/').replace(/'/g, "''")
   const insert = buildSourceOverlay(name, entryPath)

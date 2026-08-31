@@ -67,7 +67,7 @@ elevation recipe below).
 | Command | What it does |
 |---|---|
 | `pnpm lab new <name>` | Scaffold a standalone plugin repo from `templates/plugin`, write `.dsh-lab/plugin.yaml`, append a `catalog.yaml` entry. |
-| `pnpm lab dev <name>\|--path P --target next\|master` | Read live source, emit a **source overlay** (`cordis.patch.yml`), materialize a pinned profile, and boot `dsh` against it watching source for HMR. |
+| `pnpm lab dev <name>\|--path P --target next\|master` | Read live source, emit a **source overlay** (`cordis.patch.yml`), materialize a pinned profile (always `patchReload: "startup"`), and boot `dsh` against it with the shared `hmr` row re-enabled for the plugin's `src/`. Reload delivery is **not verified** in this forge, so a source edit is treated as `restartRequired`. |
 | `pnpm lab verify <name>\|--path P --target next\|master\|all` | Copy the current source, build + pack the bundle in a temporary workspace, install the tarball via the real `dsh plugin add`, and assert the composed `--dump-config` contains the plugin. |
 | `pnpm lab sync-context [name\|--all]` | Regenerate `.dsh-lab/shared-context.md` snapshots inside each plugin repo from `context/`, embedding a content hash. The agent skill is hand-authored and not regenerated. |
 | `pnpm lab doctor` | Validate toolchain, catalog, target pins, context-snapshot freshness, and the upstream submodule (present + pinned to `master.commit` + clean). Exit 0 only when green. |
@@ -101,11 +101,18 @@ pnpm lab dev my-plugin --target next
 
 This writes a source overlay to `.lab/runtime/overlays/my-plugin/cordis.patch.yml`
 and boots the pinned `next` profile with `--patch <overlay>`. The overlay both
-inserts your `src/index.ts` and re-enables Cordis module HMR with a module `root`
-pointing at the plugin's `src/` dir, so an edit there is watched and the running
-instance reloads. The entry is emitted as a `file:` URL and the child runtime
-loads `tsx/esm`, so Windows drive paths and full TypeScript/ESM source imports
-remain valid. The stable runtime profile is named `<plugin>-<target>-dev`.
+inserts your `src/index.ts` and re-enables the shared Cordis module HMR row with a
+module `root` pointing at the plugin's `src/` dir. In `0.1.2-alpha.2` that shared
+row ships `disabled: true` in the `base` bundle (before alpha2 it was disabled per
+app, in `web-app`/`headless`); `client-hmr` is a separate row that stays mounted in
+`web-app`. **Reload delivery is not verified in this forge** — enabling the row is
+all the lab does — so treat a `src/**` edit as `restartRequired` (reason
+`source-changed`) and stop→start to load it. Separately, every generated profile
+sets `dsh.profile.patchReload: "startup"`: that key governs config-patch watching
+only and is a different axis from the overlay's row. The entry is emitted as a
+`file:` URL and the child runtime loads `tsx/esm`, so Windows drive paths and full
+TypeScript/ESM source imports remain valid. The stable runtime profile is named
+`<plugin>-<target>-dev`.
 
 - Source mode proves your **live source** behaves; it does **not** prove the
   packed bundle works. Keep the two boundaries separate (see `lab verify`).
@@ -255,6 +262,7 @@ All gates below ran green on this host (Windows, node v22.20.0 = the pinned
   test) → build all pass standalone
 - **Standalone clone** of `plugins/example` (install → typecheck → 3 tests → build →
   pack) — all pass without the meta-repo
-- **`lab dev`** emits an overlay that re-enables Cordis module HMR with a module
-  `root` at the plugin's `src/` (asserted by unit test); a live reload boot was not
-  re-run (it binds a running web server)
+- **`lab dev`** emits an overlay that re-enables the shared Cordis module HMR row with
+  a module `root` at the plugin's `src/` (asserted by unit test); a live reload boot
+  was not re-run (it binds a running web server), so reload delivery is **unverified**
+  here and a `src/**` edit is treated as `restartRequired`
