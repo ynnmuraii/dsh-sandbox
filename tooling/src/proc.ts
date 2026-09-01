@@ -3,6 +3,33 @@ import { readFileSync, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { defaultProcessTreeDependencies, stopOwnedProcessTree, type OwnedProcessTreeHandle } from './process-tree.js'
 
+// Credentials must never ride into forge-owned child processes. DSH persists
+// whatever key it finds in the inherited environment into
+// `$DSH_HOME/.credentials.yaml` (packages/credentials/credentials-local), where
+// the inherited environment outranks every managed store; every lab runtime
+// home is `.lab/runtime`, a directory the lab itself declares disposable.
+// Lab-owned gates never call a model, so a child that needs one must fail
+// loudly instead of silently copying a live key into disposable state.
+const CREDENTIAL_ENV_PATTERN = /(^|_)(?:API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|TOKEN|SECRET|CREDENTIALS?|PASSWORD)(?:_|$)/i
+const CREDENTIAL_ENV_PREFIXES = ['DEEPSEEK_', 'OPENAI_', 'ANTHROPIC_', 'GEMINI_']
+
+/**
+ * Copy an environment for a lab-owned child process, dropping every variable
+ * that can carry a credential. Windows treats names case-insensitively, so
+ * matching is done on the upper-cased key.
+ */
+export function sanitizeInheritedEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue
+    const upper = key.toUpperCase()
+    if (CREDENTIAL_ENV_PATTERN.test(upper)) continue
+    if (CREDENTIAL_ENV_PREFIXES.some(prefix => upper.startsWith(prefix))) continue
+    sanitized[key] = value
+  }
+  return sanitized
+}
+
 export interface RunOpts {
   cwd?: string
   env?: NodeJS.ProcessEnv

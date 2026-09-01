@@ -357,8 +357,16 @@ describe('prepareUiRuntime', () => {
       sessionId: SESSION,
     }, deps)
 
-    const env = buildUiRuntimeEnvironment(plan, { SECRET_TOKEN: 'do-not-persist', NODE_OPTIONS: '--trace-warnings' })
-    expect(env.SECRET_TOKEN).toBe('do-not-persist')
+    const env = buildUiRuntimeEnvironment(plan, {
+      SECRET_TOKEN: 'do-not-persist',
+      DEEPSEEK_API_KEY: 'sk-live',
+      NODE_OPTIONS: '--trace-warnings',
+    })
+    // A credential-bearing variable must not reach a lab-owned child: DSH
+    // persists inherited keys into `$DSH_HOME/.credentials.yaml`, and this home
+    // is disposable runtime state.
+    expect(env.SECRET_TOKEN).toBeUndefined()
+    expect(env.DEEPSEEK_API_KEY).toBeUndefined()
     expect(env.DSH_HOME).toBe(plan.runtimeHome)
     expect(env.NODE_OPTIONS).toContain('--trace-warnings')
     expect(JSON.stringify(plan)).not.toContain('SECRET_TOKEN')

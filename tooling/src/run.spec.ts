@@ -638,6 +638,40 @@ describe('prepareDevRuntime seam', () => {
     }
   })
 
+  it('strips credential-bearing variables from both dev environments', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-seam-credentials-'))
+    const previous = process.env.DSH_LAB_TEST_API_KEY
+    process.env.DSH_LAB_TEST_API_KEY = 'sk-fixture'
+    try {
+      mkdirSync(join(root, 'workbench'), { recursive: true })
+      writeFileSync(join(root, 'workbench', 'compatibility.yaml'), [
+        'targets:', '  next:', '    dsh: 0.1.1-rc.2', '    cordis: 4.0.1', '    node: 22.20.0',
+        '    pnpm: 11.7.0', '    allowBuilds:', '      esbuild: true',
+        '  master:', '    repository: deepseek-ai/deepseek-harness', `    commit: ${'1'.repeat(40)}`, '    pnpm: 11.7.0', '    node: ^22.19.0', '',
+      ].join('\n'))
+      const plugin: DevRuntimePlugin = { packageName: '@f/x', sourcePath: join(root, 'plugin'), runtimeName: 'x' }
+      mkdirSync(join(plugin.sourcePath, 'src'), { recursive: true })
+      writeFileSync(join(plugin.sourcePath, 'src', 'index.ts'), 'export const live = true\n')
+      vi.mocked(pnpm).mockReset().mockReturnValue('')
+      const plan = await prepareDevRuntime({
+        root, plugin, target: 'next',
+        runtimeHome: join(root, '.lab', 'runtime'),
+        profileName: 'x-next-dev',
+        installProfile: true,
+      })
+      const installEnv = vi.mocked(pnpm).mock.calls[0]?.[1]?.env ?? {}
+      expect(plan.env).not.toHaveProperty('DSH_LAB_TEST_API_KEY')
+      expect(installEnv).not.toHaveProperty('DSH_LAB_TEST_API_KEY')
+      expect(plan.env.DSH_HOME).toBe(join(root, '.lab', 'runtime').replaceAll('\\', '/'))
+      expect(installEnv.DSH_HOME).toBe(plan.env.DSH_HOME)
+    } finally {
+      if (previous === undefined) delete process.env.DSH_LAB_TEST_API_KEY
+      else process.env.DSH_LAB_TEST_API_KEY = previous
+      vi.mocked(pnpm).mockReset()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('emits all three dev banners before the profile install', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-seam-banner-'))
     const externalRoot = mkdtempSync(join(tmpdir(), 'dsh-seam-banner-plugin-'))

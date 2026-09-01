@@ -10,7 +10,7 @@ import {
 } from './schemas.js'
 import { ROOT_PATHS, rootPath } from './context.js'
 import { verifyUpstreamCommit } from './upstream.js'
-import { pnpm, pnpmAsync, pnpmCommand } from './proc.js'
+import { pnpm, pnpmAsync, pnpmCommand, sanitizeInheritedEnv } from './proc.js'
 import { resolvePluginRef, type PluginRef } from './plugin-ref.js'
 import { verifyPlugin } from './verify.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
@@ -413,9 +413,9 @@ export async function prepareDevRuntime(opts: PrepareDevRuntimeOptions): Promise
   // "Cannot find module .pnpmfile.mjs", crashing the session before the
   // harness boots. The tsx loader is applied only to the returned child env
   // (`plan.env`) so live TS source still loads.
-  const installEnv = { ...process.env, DSH_HOME: runtimeHome.replace(/\\/g, '/') }
+  const installEnv = { ...sanitizeInheritedEnv(), DSH_HOME: runtimeHome.replace(/\\/g, '/') }
   const childEnv = {
-    ...process.env,
+    ...sanitizeInheritedEnv(),
     NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${resolveTsxLoader()}`].filter(Boolean).join(' '),
     DSH_HOME: runtimeHome.replace(/\\/g, '/'),
   }
@@ -544,7 +544,7 @@ export async function verifyPackedTarget(opts: {
       JSON.stringify(buildProfilePackageJson(spec, pin), null, 2) + '\n',
     )
     writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), buildProfileWorkspaceYaml(opts.compat.targets[target].allowBuilds ?? {}))
-    const env = { ...process.env, DSH_HOME: home.replace(/\\/g, '/') }
+    const env = { ...sanitizeInheritedEnv(), DSH_HOME: home.replace(/\\/g, '/') }
 
     // 3. Install the packed bundle through dsh's own plugin manager. `plugin add`
     //    forwards to pnpm and reconciles `dsh.profile.bundles` against installed

@@ -11,7 +11,7 @@ import {
 import { ROOT_PATHS, rootPath } from './context.js'
 import { loadCompatibilityFromFile, type Compatibility } from './schemas.js'
 import { assertRuntimePluginIdentity } from './runtime-identity.js'
-import { pnpmAsync } from './proc.js'
+import { pnpmAsync, sanitizeInheritedEnv } from './proc.js'
 import { clientBundleRequirement } from './client-smoke.js'
 import type { OwnedUiDirectory, UiDirectoryIdentity } from './ui-owned-directory.js'
 export interface UiRuntimeRetainedIdentities {
@@ -258,7 +258,10 @@ function assertMutationTarget(path: string, operation: UiRuntimeMutation): void 
 
 export function buildUiRuntimeEnvironment(plan: UiRuntimePlan, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   if (!plan || typeof plan.runtimeHome !== 'string' || !plan.runtimeHome) throw new Error('invalid UI runtime plan')
-  return { ...inherited, DSH_HOME: plan.runtimeHome }
+  // `inherited` is filtered, not spread: a DSH boot persists whatever key it
+  // finds in the environment into `$DSH_HOME/.credentials.yaml`, and this home
+  // is disposable lab state. Lab-owned sessions never call a model.
+  return { ...sanitizeInheritedEnv(inherited), DSH_HOME: plan.runtimeHome }
 }
 
 function defaultDependencies(): UiRuntimeDependencies {
